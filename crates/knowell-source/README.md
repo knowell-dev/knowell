@@ -57,6 +57,10 @@ repository, its index or working tree. It resolves track targets exactly (a miss
 checks ancestry (force-push detection), lists worktrees and groups them into task views,
 and reports a worktree's uncommitted changes.
 
+Worktree listings canonicalize existing paths, including Windows short-name aliases, so
+opening the main checkout or any linked worktree yields the same identities. A missing
+worktree retains its registered path and is reported as prunable.
+
 ## Watching
 
 `watch::Watcher` is a debounced file-system watcher for one worktree that reports saved

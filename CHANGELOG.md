@@ -8,6 +8,13 @@ is released. Nothing has been released yet.
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep worktree identities stable across Windows short and long path spellings.
+- Resolve test binaries and fixture paths at runtime when CI relocates a Nextest archive.
+- Preserve executable Action test shims and reject unexpected network requests in the
+  offline harness; make the OIDC prerequisite check explicit for shellcheck.
+
 ### Added
 
 - Initial Rust workspace, contribution rules, and project documentation.

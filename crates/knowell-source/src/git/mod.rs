@@ -603,7 +603,8 @@ impl GitRepo {
 
     /// All worktrees of the repository: the main worktree first (absent for
     /// a bare repository), then linked worktrees sorted by path. Works the
-    /// same when opened from any of them.
+    /// same when opened from any of them. Existing paths are canonical
+    /// absolute paths; missing worktrees retain their registered paths.
     ///
     /// # Errors
     /// [`GitError::Git`] if the worktree metadata cannot be read.
@@ -614,7 +615,7 @@ impl GitRepo {
         if let Some(workdir) = main.workdir() {
             let (head_commit, branch) = head_state(&main)?;
             out.push(WorktreeInfo {
-                path: workdir.to_path_buf(),
+                path: worktree_path(workdir)?,
                 head_commit,
                 branch,
                 is_main: true,
@@ -638,7 +639,7 @@ impl GitRepo {
                 .map_err(failed("worktree open"))?;
             let (head_commit, branch) = head_state(&wt)?;
             linked.push(WorktreeInfo {
-                path,
+                path: worktree_path(&path)?,
                 head_commit,
                 branch,
                 is_main: false,
@@ -684,6 +685,19 @@ impl GitRepo {
 /// See [`GitRepo::open`] and [`GitRepo::working_changes`].
 pub fn working_changes(worktree: &Path, policy: &ExclusionPolicy) -> Result<Vec<Change>, GitError> {
     GitRepo::open(worktree)?.working_changes(policy)
+}
+
+fn worktree_path(path: &Path) -> Result<PathBuf, GitError> {
+    // Git can register long Windows paths while TEMP uses their 8.3 aliases.
+    // Canonical paths keep a worktree's identity independent of the entry point.
+    match std::fs::canonicalize(path) {
+        Ok(path) => Ok(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(path.to_path_buf()),
+        Err(error) => Err(GitError::Git {
+            operation: "worktree path resolution",
+            message: describe(&error),
+        }),
+    }
 }
 
 fn hash_name(kind: gix::hash::Kind) -> String {

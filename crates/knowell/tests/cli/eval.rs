@@ -5,10 +5,10 @@ use crate::common::Sandbox;
 #[test]
 fn ci_eval_command_still_passes_against_the_baseline() {
     let sb = Sandbox::new();
-    let baseline = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../eval/baselines/synthetic-small.json"
-    );
+    let manifest =
+        std::env::var_os("CARGO_MANIFEST_DIR").unwrap_or_else(|| env!("CARGO_MANIFEST_DIR").into());
+    let baseline =
+        std::path::PathBuf::from(manifest).join("../../eval/baselines/synthetic-small.json");
     let markdown = sb.work().join("summary.md");
     let json = sb.work().join("report.json");
     let out = sb.run(&[
@@ -23,7 +23,7 @@ fn ci_eval_command_still_passes_against_the_baseline() {
         "--retriever",
         "bm25",
         "--baseline",
-        baseline,
+        baseline.to_str().unwrap(),
         "--markdown",
         markdown.to_str().unwrap(),
         "--json",

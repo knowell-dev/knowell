@@ -53,10 +53,13 @@ mod tests {
     use super::*;
 
     fn schemas_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .join("schemas")
+        PathBuf::from(
+            std::env::var_os("CARGO_MANIFEST_DIR")
+                .unwrap_or_else(|| env!("CARGO_MANIFEST_DIR").into()),
+        )
+        .join("..")
+        .join("..")
+        .join("schemas")
     }
 
     fn pretty(value: &Value) -> String {

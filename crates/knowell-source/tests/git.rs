@@ -838,8 +838,14 @@ fn linked_worktrees_and_detached_heads() {
     );
     assert_eq!(canon(&list[0].path), canon(&main));
     assert_eq!(canon(&list[2].path), canon(&feature));
+    assert_eq!(list[0].path, std::fs::canonicalize(&main).unwrap());
+    assert_eq!(list[2].path, std::fs::canonicalize(&feature).unwrap());
     // Same answer from any worktree of the repository.
     assert_eq!(linked.worktrees().unwrap(), list);
+    assert_eq!(
+        open(&main.join("..").join("main")).worktrees().unwrap(),
+        list
+    );
 }
 
 #[test]
