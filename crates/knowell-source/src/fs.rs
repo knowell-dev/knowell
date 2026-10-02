@@ -905,6 +905,23 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn non_utf8_paths_are_rejected_and_lossily_reported() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        // APFS rejects invalid UTF-8 names at creation, before the walker can
+        // inspect them. Exercise path handling without requiring such a file.
+        let root = Path::new("/source");
+        let path = root.join(OsStr::from_bytes(b"dir/bad\xff.txt"));
+        assert!(relative(root, &path).is_none());
+        assert_eq!(
+            lossy_path(root, &path).unwrap().as_str(),
+            "dir/bad\u{fffd}.txt"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn non_utf8_names_are_skipped_not_fatal() {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;

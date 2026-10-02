@@ -75,3 +75,7 @@ python scripts/buildlock.py cargo test -p knowell-source
 
 Git tests create repositories with the git CLI under isolated settings in temporary
 directories; no network is used.
+
+Invalid UTF-8 path validation and lossy reporting are tested directly on Unix. Linux also
+tests a real directory containing an invalid filename; APFS rejects that filename before
+the walker can inspect it.
