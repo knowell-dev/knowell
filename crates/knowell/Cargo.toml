@@ -1,0 +1,64 @@
+[package]
+name = "knowell"
+description = "Knowell: semantic code intelligence and shared memory for AI coding agents. Installs the `know` command."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "know"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+# `know doctor` probes the embedded panel in-process through the router.
+axum.workspace = true
+clap.workspace = true
+knowell-auth.workspace = true
+knowell-config.workspace = true
+knowell-core.workspace = true
+knowell-embed.workspace = true
+knowell-engine.workspace = true
+knowell-eval.workspace = true
+knowell-index.workspace = true
+knowell-lexical.workspace = true
+knowell-link.workspace = true
+knowell-mcp.workspace = true
+knowell-pg-managed.workspace = true
+knowell-secrets.workspace = true
+knowell-server.workspace = true
+knowell-setup.workspace = true
+knowell-source.workspace = true
+knowell-store.workspace = true
+# `know login` verifies the hub over HTTPS.
+reqwest = { workspace = true, features = ["rustls"] }
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+# Writing the engine configuration and quoting values in generated TOML.
+toml.workspace = true
+# `ServiceExt::oneshot` for the in-process panel probe of `know doctor`.
+tower = { workspace = true, features = ["util"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+# Creates and drops a scratch database for the external-mode `know init` test.
+sqlx.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

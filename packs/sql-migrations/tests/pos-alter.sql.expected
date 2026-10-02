@@ -1,0 +1,7 @@
+# path: db/migrations/0002_alter_bays.sql
+# Expected extractions (order-insensitive); empty for negative fixtures.
+definition table bays @ <file> {column=capacity, op=drop_column}
+definition table bays @ <file> {column=door, op=add_column}
+definition table bays @ <file> {column=heated, op=add_column}
+definition table bays @ <file> {column=zone, op=add_column}
+definition table legacy_bays @ <file> {op=drop_table}

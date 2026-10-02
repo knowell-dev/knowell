@@ -1,0 +1,4 @@
+# path: lib/l10n/app_de.arb
+# Expected extractions (order-insensitive); empty for negative fixtures.
+definition i18n_key gateTitle @ <file> {locale=de}
+definition i18n_key openUntil @ <file> {locale=de}

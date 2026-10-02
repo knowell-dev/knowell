@@ -1,0 +1,21 @@
+# Appended to a CI checkout's crates/knowell/Cargo.toml by the release workflow
+# (the checkout is ephemeral; the committed manifest is never changed).
+# `cargo generate-rpm -p crates/knowell --target <triple>`
+[package.metadata.generate-rpm]
+name = "knowell"
+license = "MIT OR Apache-2.0"
+summary = "Semantic code intelligence and shared memory for AI coding agents"
+url = "https://github.com/knowell-dev/knowell"
+assets = [
+    { source = "target/release/know", dest = "/usr/bin/know", mode = "755" },
+    { source = "../../README.md", dest = "/usr/share/doc/knowell/README.md", mode = "644", doc = true },
+    { source = "../../LICENSE-MIT", dest = "/usr/share/licenses/knowell/LICENSE-MIT", mode = "644", license = true },
+    { source = "../../LICENSE-APACHE", dest = "/usr/share/licenses/knowell/LICENSE-APACHE", mode = "644", license = true },
+]
+
+# Explicit requirements (see the note in cargo-deb.toml): built on glibc 2.35.
+auto-req = "disabled"
+
+[package.metadata.generate-rpm.requires]
+glibc = ">= 2.35"
+libgcc = "*"

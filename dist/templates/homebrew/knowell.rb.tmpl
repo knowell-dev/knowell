@@ -1,0 +1,40 @@
+# Rendered by dist/render.py from dist/templates/homebrew/knowell.rb.tmpl.
+# Do not edit by hand: the release workflow overwrites this file.
+class Knowell < Formula
+  desc "Semantic code intelligence and shared memory for AI coding agents"
+  homepage "https://github.com/@@REPO@@"
+  version "@@VERSION@@"
+  license any_of: ["MIT", "Apache-2.0"]
+
+  on_macos do
+    on_arm do
+      url "@@URL_MACOS_ARM64@@"
+      sha256 "@@SHA_MACOS_ARM64@@"
+    end
+    on_intel do
+      url "@@URL_MACOS_X64@@"
+      sha256 "@@SHA_MACOS_X64@@"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "@@URL_LINUX_ARM64@@"
+      sha256 "@@SHA_LINUX_ARM64@@"
+    end
+    on_intel do
+      url "@@URL_LINUX_X64@@"
+      sha256 "@@SHA_LINUX_X64@@"
+    end
+  end
+
+  def install
+    bin.install "know"
+    doc.install "README.md"
+    prefix.install "LICENSE-MIT", "LICENSE-APACHE"
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/know --version")
+  end
+end

@@ -1,0 +1,3 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+consumer endpoint GET /v1/bundles/{} (dynamic) @ Fetch {host=api.example.com}
+consumer endpoint POST /v1/bundles/{}/archive (dynamic) @ Client.Archive

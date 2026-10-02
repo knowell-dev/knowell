@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package example.fleet.v1;
+
+service RouteService {
+  rpc GetRoute(GetRouteRequest) returns (Route);
+  rpc StreamStops(StreamStopsRequest) returns (stream Stop);
+}
+
+message GetRouteRequest {
+  string route_id = 1;
+}
+
+message Route {
+  string id = 1;
+  repeated Stop stops = 2;
+}
+
+message StreamStopsRequest {
+  string route_id = 1;
+}
+
+message Stop {
+  string id = 1;
+  int32 position = 2;
+}

@@ -1,0 +1,4 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+consumer topic bin.filled @ consumer
+consumer topic bin.moved @ consumer
+producer topic bin.emptied @ publish

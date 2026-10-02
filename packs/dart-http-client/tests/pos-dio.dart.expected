@@ -1,0 +1,4 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+consumer endpoint DELETE /v1/lockers/{} (dynamic) @ LockerApi.remove
+consumer endpoint GET /v1/lockers @ LockerApi.list
+consumer endpoint POST /v1/lockers/{}/open (dynamic) @ LockerApi.open

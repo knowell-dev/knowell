@@ -1,0 +1,5 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+reads table gates @ Gate {column=gate_code, entity=Gate}
+reads table gates @ Gate {column=id, entity=Gate}
+reads table gates @ Gate {column=lanes, entity=Gate}
+reads table gates @ Gate {entity=Gate}

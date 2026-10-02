@@ -1,0 +1,6 @@
+# path: yard/models.py
+# Expected extractions (order-insensitive); empty for negative fixtures.
+bind django-table Trailer = trailers
+reads table trailers @ Trailer {column=owner_id, entity=Trailer}
+reads table trailers @ Trailer {column=plate, entity=Trailer}
+reads table yard_carrier @ Carrier {column=name, entity=Carrier}

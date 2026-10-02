@@ -1,0 +1,3 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+bind rust-const DOCK_QUEUES = dock.a | dock.b
+bind rust-const DOCK_TOPIC = dock.updated

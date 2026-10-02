@@ -1,0 +1,3 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+consumer endpoint DELETE /v1/stops/{} (dynamic) @ delete_stop
+consumer endpoint GET /v1/stops @ list_stops

@@ -1,0 +1,6 @@
+# path: src/i18n/locales/de.json
+# Expected extractions (order-insensitive); empty for negative fixtures.
+definition i18n_key dock.banner.subtitle @ <file> {locale=de}
+definition i18n_key dock.banner.title @ <file> {locale=de}
+definition i18n_key dock.status.closed @ <file> {locale=de}
+definition i18n_key dock.status.open @ <file> {locale=de}

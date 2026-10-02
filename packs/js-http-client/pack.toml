@@ -1,0 +1,64 @@
+name = "js-http-client"
+version = "1.0.0"
+description = "HTTP calls from TypeScript / JavaScript: fetch, axios / ky / got style clients, and request(base, \"/path\", { method }) wrappers."
+languages = ["typescript", "tsx", "javascript", "jsx"]
+limits = """
+- Base URLs from variables or `axios.create({ baseURL })` are not applied; a dynamic base is stripped and the call is matched heuristically.
+- Wrapper functions are recognised by name (`request`, `apiRequest`, `fetchJson`, ...) and `this.get/post/...`; other wrappers are not followed.
+- Query strings are ignored; a path glued to a dynamic suffix (`/v1/orders${query}`) is matched as a pattern.
+"""
+
+[[rules]]
+id = "fetch"
+query = "fetch.scm"
+languages = ["typescript", "tsx", "javascript", "jsx"]
+kind = "endpoint"
+role = "consumer"
+key = "{verb|upper} {url}"
+anchor = "call"
+resolve = ["url"]
+
+[rules.defaults]
+verb = "GET"
+
+[[rules]]
+id = "client-method"
+query = "client_method.scm"
+languages = ["typescript", "tsx", "javascript", "jsx"]
+kind = "endpoint"
+role = "consumer"
+key = "{verb|upper} {url}"
+anchor = "call"
+resolve = ["url"]
+
+[rules.detect]
+npm = ["axios", "ky", "got", "ofetch", "superagent", "redaxios"]
+imports = ["axios", "ky", "got", "ofetch", "superagent", "redaxios"]
+
+[[rules]]
+id = "client-config"
+query = "client_config.scm"
+languages = ["typescript", "tsx", "javascript", "jsx"]
+kind = "endpoint"
+role = "consumer"
+key = "{verb|upper} {url}"
+anchor = "call"
+resolve = ["url"]
+
+[rules.detect]
+npm = ["axios", "redaxios"]
+imports = ["axios", "redaxios"]
+
+[[rules]]
+id = "wrapper"
+query = "wrapper.scm"
+languages = ["typescript", "tsx", "javascript", "jsx"]
+kind = "endpoint"
+role = "consumer"
+key = "{verb|upper} {url}"
+anchor = "call"
+resolve = ["url"]
+evidence = "heuristic"
+
+[rules.defaults]
+verb = "GET"

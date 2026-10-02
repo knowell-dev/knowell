@@ -1,0 +1,3 @@
+version: "3"
+x-shared:
+  image: example/base

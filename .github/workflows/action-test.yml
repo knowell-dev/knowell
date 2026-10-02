@@ -1,0 +1,92 @@
+# Offline tests of the composite action in action/ (no network beyond checkout, no secrets).
+name: Action tests
+
+on:
+  pull_request:
+    paths:
+      - "action/**"
+      - ".github/workflows/action-test.yml"
+  push:
+    branches: [main]
+    paths:
+      - "action/**"
+      - ".github/workflows/action-test.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: action-test-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  harness:
+    name: harness (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run the offline harness
+        run: bash action/test/run-tests.sh
+
+  lint:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: shellcheck (preinstalled on GitHub-hosted Ubuntu runners)
+        run: shellcheck -x -P SCRIPTDIR action/scripts/*.sh action/test/run-tests.sh action/test/bin/*
+
+  # action.yml itself, end to end on a runner: the real steps, conditions, cache and outputs,
+  # with a fake release served from disk (the job-level override variables are read by the
+  # scripts) and the fake know binary. sarif is off: the upload needs security-events: write.
+  composite:
+    name: composite action
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build a fake release
+        run: bash action/test/make-fake-release.sh "$RUNNER_TEMP/rel" 1.2.3
+      - name: Run the action
+        id: knowell
+        uses: ./action # zizmor: ignore[self-repository] actionlint rejects the $/ form
+        env:
+          KNOWELL_DOWNLOAD_URL: file://${{ runner.temp }}/rel
+        with:
+          command: check
+          version: v1.2.3
+          sarif: "false"
+          sarif-file: results/knowell.sarif
+          fail-on: never
+          attestation: skip
+      - name: Check the outputs
+        env:
+          FINDINGS: ${{ steps.knowell.outputs.findings }}
+          EXIT_CODE: ${{ steps.knowell.outputs.exit-code }}
+          SARIF_FILE: ${{ steps.knowell.outputs.sarif-file }}
+        run: |
+          set -euo pipefail
+          test "$FINDINGS" = 2
+          test "$EXIT_CODE" = 0
+          test -s "$SARIF_FILE"

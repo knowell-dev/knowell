@@ -1,0 +1,28 @@
+[package]
+name = "knowell-auth"
+description = "Identity and access for Knowell: principals, roles, scoped grants, API tokens, CSRF, audit events."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
+
+[dependencies]
+knowell-core.workspace = true
+blake3.workspace = true
+getrandom.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+time.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+
+[lints]
+workspace = true

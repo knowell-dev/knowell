@@ -1,0 +1,16 @@
+name = "sql-migrations"
+version = "1.0.0"
+description = "SQL schema definitions: CREATE TABLE (columns), ALTER TABLE ADD / DROP / RENAME COLUMN, RENAME TO and DROP TABLE, as table definitions in migration order."
+languages = ["sql"]
+limits = """
+- Read by a DDL tokenizer rather than tree-sitter queries: the bundled SQL grammar drops columns on valid PostgreSQL (for example `CHECK (interval IN (...))`), and a migration / entity check must not miss columns.
+- Migration order is the path order of the files (zero-padded numeric prefixes sort correctly); migration tools' own ordering tables are not read.
+- Tables are one namespace per workspace: the same table name in two databases is one contract.
+- Identifiers are case-folded; the default schemas `public`, `dbo` and `main` are dropped.
+- Statements built dynamically (`EXECUTE format(...)`) and non-table objects (views, indexes, types) are not recorded.
+"""
+
+[[extractors]]
+id = "ddl"
+extractor = "sql-ddl"
+files = ["**/*.sql", "**/*.psql", "**/*.pgsql", "**/*.ddl"]

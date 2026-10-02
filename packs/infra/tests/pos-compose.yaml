@@ -1,0 +1,11 @@
+services:
+  gateway:
+    image: example/gateway:2
+    ports:
+      - "80:8080"
+      - target: 9090
+        published: 9090
+  cache:
+    image: redis:7
+    expose:
+      - "6379"

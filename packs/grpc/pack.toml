@@ -1,0 +1,134 @@
+name = "grpc"
+version = "1.0.0"
+description = "gRPC: services and RPCs from .proto files (with request/response shape hashes) and generated stub usage — Go clients and servers, Python stubs and servicers, grpc-js clients and addService implementations."
+languages = ["protobuf", "go", "python", "typescript", "tsx", "javascript"]
+limits = """
+- Code-side RPC keys carry the service name without package (`RouteService/GetRoute`); they link to the proto definition by service and method name, which is a heuristic match when two packages define the same service.
+- Go clients are recognised through `pkg.NewXClient(conn)` assignments in the same file; Python stubs through `pkg.XStub(channel)` assignments; grpc-js clients through `new XClient(...)`.
+- Go servers are recognised through structs embedding `UnimplementedXServer`; other registration styles are not.
+- Connect, Twirp and gRPC-Web generated clients are not recognised.
+"""
+
+[detect]
+go = ["google.golang.org/grpc"]
+python = ["grpcio"]
+npm = ["@grpc/grpc-js", "grpc"]
+imports = ["google.golang.org/grpc", "grpc", "@grpc/grpc-js"]
+files = ["**/*.proto"]
+
+[[extractors]]
+id = "proto"
+extractor = "proto"
+files = ["**/*.proto"]
+
+# Go
+
+[[bindings]]
+id = "go-client"
+query = "client_binding.scm"
+languages = ["go"]
+scope = "file"
+name = "name"
+value = "{ctor|grpc_service}"
+
+[[bindings]]
+id = "go-server-type"
+query = "server_binding.scm"
+languages = ["go"]
+scope = "file"
+name = "name"
+value = "{embedded|grpc_service}"
+
+[[rules]]
+id = "go-client-call"
+query = "client_call.scm"
+languages = ["go"]
+kind = "rpc"
+role = "consumer"
+key = "{service}/{method}"
+anchor = "method"
+require = ["service"]
+
+[rules.lookup]
+service = { binding = "go-client", by = "receiver" }
+
+[[rules]]
+id = "go-server-method"
+query = "server_method.scm"
+languages = ["go"]
+kind = "rpc"
+role = "producer"
+key = "{service}/{method}"
+anchor = "method"
+require = ["service"]
+
+[rules.lookup]
+service = { binding = "go-server-type", by = "receiver" }
+
+# Python
+
+[[bindings]]
+id = "py-stub"
+query = "stub_binding.scm"
+languages = ["python"]
+scope = "file"
+name = "name"
+value = "{ctor|grpc_service}"
+
+[[rules]]
+id = "py-stub-call"
+query = "stub_call.scm"
+languages = ["python"]
+kind = "rpc"
+role = "consumer"
+key = "{service}/{method}"
+anchor = "method"
+require = ["service"]
+
+[rules.lookup]
+service = { binding = "py-stub", by = "receiver" }
+
+[[rules]]
+id = "py-servicer"
+query = "servicer.scm"
+languages = ["python"]
+kind = "rpc"
+role = "producer"
+key = "{base|grpc_service}/{method}"
+symbol = "method"
+anchor = "method"
+
+[rules.unless]
+method = "_*"
+
+# TypeScript / JavaScript (grpc-js)
+
+[[bindings]]
+id = "ts-client"
+query = "client_binding.scm"
+languages = ["typescript", "tsx", "javascript"]
+scope = "file"
+name = "name"
+value = "{ctor|grpc_service}"
+
+[[rules]]
+id = "ts-client-call"
+query = "client_call.scm"
+languages = ["typescript", "tsx", "javascript"]
+kind = "rpc"
+role = "consumer"
+key = "{service}/{method}"
+anchor = "method"
+require = ["service"]
+
+[rules.lookup]
+service = { binding = "ts-client", by = "receiver" }
+
+[[rules]]
+id = "ts-add-service"
+query = "add_service.scm"
+languages = ["typescript", "tsx", "javascript"]
+kind = "rpc"
+role = "producer"
+key = "{service|grpc_service}/{method}"
+anchor = "method"

@@ -1,0 +1,4 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+bind http-method httpMethod = POST
+consumer endpoint GET /v1/shelves/{} (dynamic) @ ShelfClient.loadShelf {host=api.example.com}
+consumer endpoint POST /v1/shelves/{}/restock (dynamic) @ ShelfClient.restock {host=api.example.com}

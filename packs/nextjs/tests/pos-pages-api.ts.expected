@@ -1,0 +1,3 @@
+# path: src/pages/api/reports/index.ts
+# Expected extractions (order-insensitive); empty for negative fixtures.
+producer endpoint * /api/reports @ handler

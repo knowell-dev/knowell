@@ -1,0 +1,24 @@
+# Test plugins for knowell-plugin's isolation tests.
+#
+# This is a standalone workspace, deliberately NOT part of the Knowell
+# workspace: it only builds for `wasm32-wasip2`. Rebuild the committed
+# components in `prebuilt/` with `python build.py` (see README.md).
+[workspace]
+resolver = "3"
+members = ["toy-endpoints", "hostile"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+wit-bindgen = { version = "0.57", default-features = false, features = ["macros", "realloc", "std"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+debug = false

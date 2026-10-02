@@ -1,0 +1,6 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+reads table loading_slot @ LoadingSlot {column=minutes, entity=LoadingSlot}
+reads table loading_slot @ LoadingSlot {column=slotId, entity=LoadingSlot}
+reads table loading_slot @ LoadingSlot {entity=LoadingSlot}
+reads table slot_notes @ SlotNote {column=id, entity=SlotNote}
+reads table slot_notes @ SlotNote {entity=SlotNote}

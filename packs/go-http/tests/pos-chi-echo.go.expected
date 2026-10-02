@@ -1,0 +1,4 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+producer endpoint GET /v1/bins/{} @ ChiRoutes
+producer endpoint POST /v1/bins @ ChiRoutes
+producer endpoint PUT /v1/slots/{} @ EchoRoutes

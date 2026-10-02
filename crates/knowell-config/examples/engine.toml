@@ -1,0 +1,26 @@
+#:schema https://raw.githubusercontent.com/knowell-dev/knowell/main/schemas/engine.schema.json
+# Example engine configuration for a single developer machine.
+version = 1
+
+[server]
+role = "standalone"
+# The local panel must stay on a loopback address.
+listen = "127.0.0.1:7420"
+
+[database]
+# Knowell runs and manages its own PostgreSQL.
+mode = "managed"
+
+# Secrets are referenced, never written here.
+[providers.gemini]
+kind = "gemini"
+api_key = "env:GEMINI_API_KEY"
+model = "gemini-embedding-2"
+
+[providers.local]
+kind = "ollama"
+# base_url defaults to http://127.0.0.1:11434
+model = "nomic-embed-text"
+
+[telemetry]
+enabled = false

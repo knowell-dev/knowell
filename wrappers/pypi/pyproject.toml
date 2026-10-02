@@ -1,0 +1,31 @@
+# SCAFFOLD ONLY -- NOT PUBLISHED. Publishing to PyPI is undecided; the release workflow
+# job for it is disabled (`if: false`). Do not upload this by hand.
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "knowell"
+version = "0.0.0"
+description = "Launcher for the Knowell code-intelligence engine (installs nothing; downloads the `know` binary on first run)."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-MIT", "LICENSE-APACHE"]
+keywords = ["mcp", "code-search", "code-intelligence", "ai-agents"]
+classifiers = [
+    "Development Status :: 1 - Planning",
+    "Environment :: Console",
+    "Programming Language :: Python :: 3",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/knowell-dev/knowell"
+Issues = "https://github.com/knowell-dev/knowell/issues"
+
+[project.scripts]
+know = "knowell.launcher:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

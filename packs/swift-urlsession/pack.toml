@@ -1,0 +1,36 @@
+name = "swift-urlsession"
+version = "1.0.0"
+description = "HTTP calls from Swift: URLSession requests built from string URLs (`URL(string: \"https://...\")`), with `request.httpMethod = \"POST\"` in the same function."
+languages = ["swift"]
+limits = """
+- Only string-literal URLs (with interpolations) are read; `URLComponents` and `appendingPathComponent` chains are not.
+- The HTTP method is taken from a `.httpMethod = "..."` assignment in the same function; otherwise GET.
+- Alamofire and other wrappers are not recognised.
+"""
+
+[detect]
+imports = ["Foundation"]
+
+[[bindings]]
+id = "http-method"
+query = "http_method.scm"
+languages = ["swift"]
+scope = "symbol"
+name = "property"
+value = "{method}"
+
+[[rules]]
+id = "url-string"
+query = "url_string.scm"
+languages = ["swift"]
+kind = "endpoint"
+role = "consumer"
+key = "{method|upper} {url}"
+anchor = "url"
+resolve = ["url"]
+
+[rules.lookup]
+method = { binding = "http-method", by = "=httpMethod" }
+
+[rules.defaults]
+method = "GET"

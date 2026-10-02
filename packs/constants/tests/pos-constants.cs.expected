@@ -1,0 +1,2 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+bind csharp-const DockUpdated = dock.updated

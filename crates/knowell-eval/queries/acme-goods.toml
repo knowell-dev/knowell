@@ -1,0 +1,799 @@
+# Graded retrieval queries for the `acme-goods` fixture (knowell-eval).
+#
+# kind:  symbol | behavior | cross_project | contract | config | i18n | history_doc | absent
+# lang:  en | tr
+# grade: 3 = the answer, 2 = directly involved, 1 = useful context.
+#
+# Rules (enforced when the set is loaded):
+# - ids are unique lowercase slugs;
+# - `relevant` lists only hand-written core files as `<project>/<path>`,
+#   never generated noise and never `infra/.env` (excluded by path);
+# - `absent` queries ask for behaviour that does not exist and list nothing.
+# Queries marked "paraphrase" in their notes deliberately avoid the words used
+# in the code.
+
+version = 1
+fixture = "acme-goods"
+
+# --- symbol -----------------------------------------------------------------
+
+[[query]]
+id = "sym-subscription-service-cancel"
+lang = "en"
+kind = "symbol"
+text = "SubscriptionService.cancelSubscription"
+relevant = [
+  { doc = "billing-api/src/subscriptions/subscription.service.ts", grade = 3 },
+  { doc = "billing-api/src/subscriptions/subscriptions.controller.ts", grade = 1 },
+]
+
+[[query]]
+id = "sym-cancel-subscription-web"
+lang = "en"
+kind = "symbol"
+text = "cancelSubscription function in the storefront web API client"
+relevant = [
+  { doc = "storefront-web/src/api/subscriptions.ts", grade = 3 },
+  { doc = "storefront-web/src/hooks/useSubscription.ts", grade = 1 },
+]
+notes = "The same name exists in mobile-app and billing-api; only the web client is wanted."
+
+[[query]]
+id = "sym-tr-cancel-subscription-mobile"
+lang = "tr"
+kind = "symbol"
+text = "mobil uygulamadaki cancelSubscription metodu"
+relevant = [
+  { doc = "mobile-app/lib/api/subscription_api.dart", grade = 3 },
+  { doc = "mobile-app/lib/screens/subscription_screen.dart", grade = 1 },
+]
+notes = "Same-named methods exist in storefront-web and billing-api."
+
+[[query]]
+id = "sym-idempotency-store"
+lang = "en"
+kind = "symbol"
+text = "IdempotencyStore"
+relevant = [
+  { doc = "ledger-service/ledger/payments/idempotency.py", grade = 3 },
+  { doc = "ledger-service/ledger/payments/capture.py", grade = 2 },
+]
+
+[[query]]
+id = "sym-cancel-pending-for-subscription"
+lang = "en"
+kind = "symbol"
+text = "CancelPendingForSubscription"
+relevant = [
+  { doc = "orders-service/internal/store/postgres.go", grade = 3 },
+  { doc = "orders-service/internal/events/subscription_consumer.go", grade = 2 },
+]
+
+[[query]]
+id = "sym-smtp-mailer"
+lang = "en"
+kind = "symbol"
+text = "SmtpMailer"
+relevant = [
+  { doc = "notification-worker/src/mailer.rs", grade = 3 },
+  { doc = "notification-worker/src/main.rs", grade = 1 },
+  { doc = "notification-worker/src/consumer.rs", grade = 1 },
+  { doc = "notification-worker/src/handlers/subscription_cancelled.rs", grade = 1 },
+  { doc = "notification-worker/src/handlers/payment_receipt.rs", grade = 1 },
+]
+
+[[query]]
+id = "sym-jwt-auth-guard"
+lang = "en"
+kind = "symbol"
+text = "JwtAuthGuard"
+relevant = [
+  { doc = "billing-api/src/auth/jwt-auth.guard.ts", grade = 3 },
+  { doc = "billing-api/src/subscriptions/subscriptions.controller.ts", grade = 1 },
+  { doc = "billing-api/src/checkout/checkout.controller.ts", grade = 1 },
+]
+
+[[query]]
+id = "sym-tr-capture-payment"
+lang = "tr"
+kind = "symbol"
+text = "capture_payment fonksiyonu nerede tanımlı?"
+relevant = [
+  { doc = "ledger-service/ledger/payments/capture.py", grade = 3 },
+  { doc = "ledger-service/ledger/api/payments.py", grade = 1 },
+]
+
+[[query]]
+id = "sym-tr-subscription-screen"
+lang = "tr"
+kind = "symbol"
+text = "SubscriptionScreen widget'ı hangi dosyada?"
+relevant = [
+  { doc = "mobile-app/lib/screens/subscription_screen.dart", grade = 3 },
+  { doc = "mobile-app/lib/main.dart", grade = 1 },
+]
+
+[[query]]
+id = "sym-prorated-amount"
+lang = "en"
+kind = "symbol"
+text = "prorated_amount"
+relevant = [
+  { doc = "ledger-service/ledger/payments/refunds.py", grade = 3 },
+]
+
+# --- behavior ---------------------------------------------------------------
+
+[[query]]
+id = "beh-prevent-double-charge"
+lang = "en"
+kind = "behavior"
+text = "where do we prevent charging a customer twice for the same purchase?"
+relevant = [
+  { doc = "ledger-service/ledger/payments/idempotency.py", grade = 3 },
+  { doc = "ledger-service/ledger/payments/capture.py", grade = 3 },
+  { doc = "ledger-service/ledger/api/payments.py", grade = 2 },
+  { doc = "storefront-web/src/api/checkout.ts", grade = 1 },
+  { doc = "db-migrations/migrations/0006_create_idempotency_keys.sql", grade = 1 },
+  { doc = "handbook/adr/0004-idempotency-keys-for-payment-capture.md", grade = 1 },
+]
+notes = "Paraphrase: the code says idempotency key, duplicate submission, replay; never 'charge twice'."
+
+[[query]]
+id = "beh-tr-prevent-double-charge"
+lang = "tr"
+kind = "behavior"
+text = "müşteriden iki kez ücret alınmasını nerede engelliyoruz?"
+relevant = [
+  { doc = "ledger-service/ledger/payments/idempotency.py", grade = 3 },
+  { doc = "ledger-service/ledger/payments/capture.py", grade = 3 },
+  { doc = "ledger-service/ledger/api/payments.py", grade = 2 },
+  { doc = "storefront-web/src/api/checkout.ts", grade = 1 },
+  { doc = "db-migrations/migrations/0006_create_idempotency_keys.sql", grade = 1 },
+  { doc = "handbook/adr/0004-idempotency-keys-for-payment-capture.md", grade = 1 },
+]
+notes = "Paraphrase in Turkish of beh-prevent-double-charge; the code is English."
+
+[[query]]
+id = "beh-email-retry"
+lang = "en"
+kind = "behavior"
+text = "what happens when sending an email fails, do we try again?"
+relevant = [
+  { doc = "notification-worker/src/mailer.rs", grade = 3 },
+  { doc = "notification-worker/src/consumer.rs", grade = 2 },
+  { doc = "notification-worker/src/config.rs", grade = 1 },
+]
+notes = "Paraphrase: the code says retried, backoff, redelivery."
+
+[[query]]
+id = "beh-billing-authentication"
+lang = "en"
+kind = "behavior"
+text = "how are requests to the billing service authenticated?"
+relevant = [
+  { doc = "billing-api/src/auth/jwt-auth.guard.ts", grade = 3 },
+  { doc = "billing-api/src/auth/current-customer.decorator.ts", grade = 1 },
+  { doc = "billing-api/src/auth/subscription-owner.guard.ts", grade = 1 },
+]
+
+[[query]]
+id = "beh-refund-early-stop"
+lang = "en"
+kind = "behavior"
+text = "how much money does a member get back when they stop their plan before the term ends?"
+relevant = [
+  { doc = "ledger-service/ledger/payments/refunds.py", grade = 3 },
+  { doc = "billing-api/src/subscriptions/subscription.service.ts", grade = 2 },
+  { doc = "handbook/adr/0005-cancel-at-period-end.md", grade = 2 },
+  { doc = "billing-api/src/payments/ledger.client.ts", grade = 1 },
+  { doc = "ledger-service/ledger/api/refunds.py", grade = 1 },
+]
+notes = "Paraphrase: the code says prorated refund, cancel, unused months."
+
+[[query]]
+id = "beh-tr-refund-early-stop"
+lang = "tr"
+kind = "behavior"
+text = "yıllık üyelik erken bırakılırsa kalan ayların parası nasıl hesaplanıyor?"
+relevant = [
+  { doc = "ledger-service/ledger/payments/refunds.py", grade = 3 },
+  { doc = "billing-api/src/subscriptions/subscription.service.ts", grade = 2 },
+  { doc = "handbook/adr/0005-cancel-at-period-end.md", grade = 2 },
+  { doc = "billing-api/src/payments/ledger.client.ts", grade = 1 },
+  { doc = "ledger-service/ledger/api/refunds.py", grade = 1 },
+]
+notes = "Turkish paraphrase of beh-refund-early-stop."
+
+[[query]]
+id = "beh-order-marked-paid"
+lang = "en"
+kind = "behavior"
+text = "what marks an order as paid?"
+relevant = [
+  { doc = "orders-service/internal/events/payment_consumer.go", grade = 3 },
+  { doc = "orders-service/internal/store/postgres.go", grade = 2 },
+  { doc = "ledger-service/ledger/events.py", grade = 1 },
+]
+
+[[query]]
+id = "beh-access-after-cancel"
+lang = "en"
+kind = "behavior"
+text = "does a member keep their benefits after cancelling until the billing period runs out?"
+relevant = [
+  { doc = "billing-api/src/subscriptions/subscription.service.ts", grade = 3 },
+  { doc = "handbook/adr/0005-cancel-at-period-end.md", grade = 2 },
+  { doc = "storefront-web/src/pages/account/subscription.tsx", grade = 1 },
+]
+
+[[query]]
+id = "beh-tr-mobile-cancel-confirmation"
+lang = "tr"
+kind = "behavior"
+text = "mobil uygulamada iptal etmeden önce kullanıcıdan onay alınıyor mu?"
+relevant = [
+  { doc = "mobile-app/lib/screens/subscription_screen.dart", grade = 3 },
+]
+
+[[query]]
+id = "beh-tr-session-token-header"
+lang = "tr"
+kind = "behavior"
+text = "mobil uygulama oturum anahtarını her isteğe nerede ekliyor?"
+relevant = [
+  { doc = "mobile-app/lib/api/api_client.dart", grade = 3 },
+  { doc = "mobile-app/lib/session/token_storage.dart", grade = 2 },
+]
+notes = "Paraphrase: the code says login token and Authorization header."
+
+[[query]]
+id = "beh-psp-timeout"
+lang = "en"
+kind = "behavior"
+text = "how long do we wait for the card processor before giving up?"
+relevant = [
+  { doc = "ledger-service/ledger/psp/gateway.py", grade = 3 },
+  { doc = "ledger-service/ledger/settings.py", grade = 3 },
+  { doc = "infra/k8s/ledger-service.yaml", grade = 1 },
+]
+notes = "Paraphrase: the code says payment service provider (PSP) and timeout."
+
+[[query]]
+id = "beh-idempotency-ttl"
+lang = "en"
+kind = "behavior"
+text = "how long are idempotency keys remembered?"
+relevant = [
+  { doc = "ledger-service/ledger/settings.py", grade = 3 },
+  { doc = "ledger-service/ledger/payments/idempotency.py", grade = 3 },
+  { doc = "db-migrations/migrations/0006_create_idempotency_keys.sql", grade = 2 },
+  { doc = "handbook/adr/0004-idempotency-keys-for-payment-capture.md", grade = 2 },
+]
+
+[[query]]
+id = "beh-tr-order-history-paging"
+lang = "tr"
+kind = "behavior"
+text = "sipariş geçmişi sayfa sayfa nasıl yükleniyor?"
+relevant = [
+  { doc = "orders-service/internal/store/postgres.go", grade = 3 },
+  { doc = "orders-service/internal/httpapi/handlers.go", grade = 2 },
+  { doc = "storefront-web/src/pages/orders/index.tsx", grade = 2 },
+  { doc = "mobile-app/lib/screens/order_history_screen.dart", grade = 2 },
+  { doc = "storefront-web/src/api/orders.ts", grade = 1 },
+  { doc = "mobile-app/lib/api/orders_api.dart", grade = 1 },
+]
+notes = "Paraphrase: the code uses a cursor."
+
+[[query]]
+id = "beh-foreign-subscription-access"
+lang = "en"
+kind = "behavior"
+text = "what stops a customer from viewing someone else's membership?"
+relevant = [
+  { doc = "billing-api/src/auth/subscription-owner.guard.ts", grade = 3 },
+  { doc = "billing-api/src/subscriptions/subscription.service.ts", grade = 1 },
+]
+notes = "Paraphrase: the code says owner guard and subscription."
+
+# --- cross_project ----------------------------------------------------------
+
+[[query]]
+id = "xp-cancel-end-to-end"
+lang = "en"
+kind = "cross_project"
+text = "what happens end to end when a customer cancels their membership?"
+relevant = [
+  { doc = "billing-api/src/subscriptions/subscription.service.ts", grade = 3 },
+  { doc = "notification-worker/src/handlers/subscription_cancelled.rs", grade = 3 },
+  { doc = "orders-service/internal/events/subscription_consumer.go", grade = 3 },
+  { doc = "billing-api/src/subscriptions/subscriptions.controller.ts", grade = 2 },
+  { doc = "ledger-service/ledger/payments/refunds.py", grade = 2 },
+  { doc = "billing-api/src/events/event-publisher.ts", grade = 1 },
+  { doc = "storefront-web/src/api/subscriptions.ts", grade = 1 },
+  { doc = "mobile-app/lib/api/subscription_api.dart", grade = 1 },
+]
+
+[[query]]
+id = "xp-tr-cancel-triggers"
+lang = "tr"
+kind = "cross_project"
+text = "abonelik iptal edilince hangi servisler tetikleniyor?"
+relevant = [
+  { doc = "notification-worker/src/handlers/subscription_cancelled.rs", grade = 3 },
+  { doc = "orders-service/internal/events/subscription_consumer.go", grade = 3 },
+  { doc = "billing-api/src/subscriptions/subscription.service.ts", grade = 2 },
+  { doc = "ledger-service/ledger/payments/refunds.py", grade = 2 },
+  { doc = "contracts/events/subscription.cancelled.v1.json", grade = 1 },
+  { doc = "notification-worker/src/consumer.rs", grade = 1 },
+]
+
+[[query]]
+id = "xp-checkout-to-capture"
+lang = "en"
+kind = "cross_project"
+text = "trace a checkout from the web page to the card capture"
+relevant = [
+  { doc = "billing-api/src/checkout/checkout.service.ts", grade = 3 },
+  { doc = "ledger-service/ledger/payments/capture.py", grade = 3 },
+  { doc = "storefront-web/src/pages/checkout.tsx", grade = 2 },
+  { doc = "storefront-web/src/api/checkout.ts", grade = 2 },
+  { doc = "billing-api/src/checkout/checkout.controller.ts", grade = 2 },
+  { doc = "billing-api/src/payments/ledger.client.ts", grade = 2 },
+  { doc = "ledger-service/ledger/api/payments.py", grade = 2 },
+  { doc = "orders-service/internal/httpapi/handlers.go", grade = 1 },
+]
+
+[[query]]
+id = "xp-tr-payment-to-order-status"
+lang = "tr"
+kind = "cross_project"
+text = "ödeme alındıktan sonra sipariş durumu hangi servislerde nasıl güncelleniyor?"
+relevant = [
+  { doc = "ledger-service/ledger/events.py", grade = 3 },
+  { doc = "orders-service/internal/events/payment_consumer.go", grade = 3 },
+  { doc = "orders-service/internal/store/postgres.go", grade = 2 },
+  { doc = "contracts/events/payment.captured.v1.json", grade = 2 },
+  { doc = "orders-service/internal/ledger/client.go", grade = 1 },
+]
+
+[[query]]
+id = "xp-cancel-email-from-mobile"
+lang = "en"
+kind = "cross_project"
+text = "how does the cancellation email get sent after someone cancels in the mobile app?"
+relevant = [
+  { doc = "notification-worker/src/handlers/subscription_cancelled.rs", grade = 3 },
+  { doc = "mobile-app/lib/api/subscription_api.dart", grade = 2 },
+  { doc = "billing-api/src/subscriptions/subscription.service.ts", grade = 2 },
+  { doc = "notification-worker/src/mailer.rs", grade = 2 },
+  { doc = "billing-api/src/events/event-publisher.ts", grade = 1 },
+  { doc = "notification-worker/src/consumer.rs", grade = 1 },
+]
+
+[[query]]
+id = "xp-order-history-sources"
+lang = "en"
+kind = "cross_project"
+text = "which apps show past orders and which backend serves them?"
+relevant = [
+  { doc = "orders-service/internal/httpapi/handlers.go", grade = 3 },
+  { doc = "storefront-web/src/api/orders.ts", grade = 2 },
+  { doc = "storefront-web/src/pages/orders/index.tsx", grade = 2 },
+  { doc = "mobile-app/lib/api/orders_api.dart", grade = 2 },
+  { doc = "mobile-app/lib/screens/order_history_screen.dart", grade = 2 },
+]
+
+[[query]]
+id = "xp-tr-checkout-order-creation"
+lang = "tr"
+kind = "cross_project"
+text = "ödeme sırasında sipariş kaydı hangi serviste oluşturuluyor?"
+relevant = [
+  { doc = "orders-service/internal/httpapi/handlers.go", grade = 3 },
+  { doc = "orders-service/internal/store/postgres.go", grade = 3 },
+  { doc = "billing-api/src/orders/orders.client.ts", grade = 2 },
+  { doc = "billing-api/src/checkout/checkout.service.ts", grade = 2 },
+]
+
+# --- contract ---------------------------------------------------------------
+
+[[query]]
+id = "ct-cancel-endpoint-callers"
+lang = "en"
+kind = "contract"
+text = "who calls POST /v1/subscriptions/{id}/cancel?"
+relevant = [
+  { doc = "storefront-web/src/api/subscriptions.ts", grade = 3 },
+  { doc = "mobile-app/lib/api/subscription_api.dart", grade = 3 },
+  { doc = "billing-api/src/subscriptions/subscriptions.controller.ts", grade = 2 },
+  { doc = "contracts/openapi/billing-api.yaml", grade = 2 },
+]
+
+[[query]]
+id = "ct-tr-cancelled-event-consumers"
+lang = "tr"
+kind = "contract"
+text = "subscription.cancelled olayını hangi servisler dinliyor?"
+relevant = [
+  { doc = "notification-worker/src/consumer.rs", grade = 3 },
+  { doc = "notification-worker/src/handlers/subscription_cancelled.rs", grade = 3 },
+  { doc = "orders-service/internal/events/subscription_consumer.go", grade = 3 },
+  { doc = "contracts/events/subscription.cancelled.v1.json", grade = 2 },
+]
+
+[[query]]
+id = "ct-cancelled-event-producer"
+lang = "en"
+kind = "contract"
+text = "who publishes the subscription.cancelled event?"
+relevant = [
+  { doc = "billing-api/src/subscriptions/subscription.service.ts", grade = 3 },
+  { doc = "billing-api/src/events/subscription-events.ts", grade = 2 },
+  { doc = "billing-api/src/events/event-publisher.ts", grade = 2 },
+  { doc = "contracts/events/subscription.cancelled.v1.json", grade = 1 },
+]
+
+[[query]]
+id = "ct-get-payment-status"
+lang = "en"
+kind = "contract"
+text = "which service implements LedgerService.GetPaymentStatus and who calls it?"
+relevant = [
+  { doc = "ledger-service/ledger/grpc_server.py", grade = 3 },
+  { doc = "orders-service/internal/ledger/client.go", grade = 3 },
+  { doc = "contracts/proto/ledger/v1/ledger.proto", grade = 2 },
+  { doc = "orders-service/internal/events/payment_consumer.go", grade = 1 },
+]
+
+[[query]]
+id = "ct-tr-idempotency-header-senders"
+lang = "tr"
+kind = "contract"
+text = "Idempotency-Key başlığını hangi istemciler gönderiyor?"
+relevant = [
+  { doc = "storefront-web/src/api/checkout.ts", grade = 3 },
+  { doc = "billing-api/src/payments/ledger.client.ts", grade = 3 },
+  { doc = "ledger-service/ledger/psp/gateway.py", grade = 2 },
+  { doc = "billing-api/src/checkout/checkout.controller.ts", grade = 2 },
+  { doc = "ledger-service/ledger/api/payments.py", grade = 2 },
+  { doc = "contracts/openapi/billing-api.yaml", grade = 2 },
+  { doc = "contracts/openapi/ledger-api.yaml", grade = 2 },
+  { doc = "ledger-service/ledger/api/refunds.py", grade = 1 },
+]
+
+[[query]]
+id = "ct-payment-captured-payload"
+lang = "en"
+kind = "contract"
+text = "fields of the payment captured event payload"
+relevant = [
+  { doc = "contracts/events/payment.captured.v1.json", grade = 3 },
+  { doc = "ledger-service/ledger/events.py", grade = 2 },
+  { doc = "orders-service/internal/events/payment_consumer.go", grade = 2 },
+  { doc = "notification-worker/src/handlers/payment_receipt.rs", grade = 1 },
+]
+
+[[query]]
+id = "ct-cancel-reason-column"
+lang = "en"
+kind = "contract"
+text = "which code maps the cancel_reason column of the subscriptions table?"
+relevant = [
+  { doc = "db-migrations/migrations/0009_add_cancel_reason_to_subscriptions.sql", grade = 3 },
+  { doc = "billing-api/src/subscriptions/subscription.entity.ts", grade = 3 },
+  { doc = "ledger-service/ledger/db/models.py", grade = 1 },
+]
+notes = "Planted schema drift (schema-drift-cancel-reason): ledger-service maps subscriptions in SubscriptionRow but lacks cancel_reason; a drift check must flag that file."
+
+[[query]]
+id = "ct-resume-endpoint-in-spec"
+lang = "en"
+kind = "contract"
+text = "is the resume subscription endpoint documented in the OpenAPI spec?"
+relevant = [
+  { doc = "contracts/openapi/billing-api.yaml", grade = 3 },
+  { doc = "billing-api/src/subscriptions/subscriptions.controller.ts", grade = 2 },
+  { doc = "storefront-web/src/api/subscriptions.ts", grade = 1 },
+]
+notes = "Planted contract drift (contract-drift-resume-endpoint): the correct answer is no."
+
+[[query]]
+id = "ct-tr-orders-table-writer"
+lang = "tr"
+kind = "contract"
+text = "orders tablosuna hangi servis yazıyor?"
+relevant = [
+  { doc = "orders-service/internal/store/postgres.go", grade = 3 },
+  { doc = "db-migrations/README.md", grade = 2 },
+  { doc = "db-migrations/migrations/0004_create_orders.sql", grade = 2 },
+  { doc = "handbook/adr/0003-shared-postgres-table-ownership.md", grade = 1 },
+]
+
+# --- config -----------------------------------------------------------------
+
+[[query]]
+id = "cfg-smtp-host"
+lang = "en"
+kind = "config"
+text = "where is the SMTP host configured?"
+relevant = [
+  { doc = "notification-worker/src/config.rs", grade = 3 },
+  { doc = "infra/docker-compose.yml", grade = 2 },
+  { doc = "infra/k8s/notification-worker.yaml", grade = 2 },
+  { doc = "notification-worker/README.md", grade = 1 },
+]
+notes = "infra/.env also sets SMTP_HOST but is excluded by path and is never relevant."
+
+[[query]]
+id = "cfg-tr-mail-server-address"
+lang = "tr"
+kind = "config"
+text = "e-posta sunucusunun adresi hangi ortam değişkeninden okunuyor?"
+relevant = [
+  { doc = "notification-worker/src/config.rs", grade = 3 },
+  { doc = "infra/docker-compose.yml", grade = 2 },
+  { doc = "infra/k8s/notification-worker.yaml", grade = 2 },
+  { doc = "notification-worker/README.md", grade = 1 },
+]
+notes = "Paraphrase in Turkish of cfg-smtp-host."
+
+[[query]]
+id = "cfg-database-url-readers"
+lang = "en"
+kind = "config"
+text = "which services read DATABASE_URL?"
+relevant = [
+  { doc = "orders-service/cmd/orders/main.go", grade = 3 },
+  { doc = "ledger-service/ledger/settings.py", grade = 3 },
+  { doc = "billing-api/src/app.module.ts", grade = 3 },
+  { doc = "infra/docker-compose.yml", grade = 2 },
+  { doc = "ledger-service/ledger/db/session.py", grade = 1 },
+  { doc = "infra/k8s/ledger-service.yaml", grade = 1 },
+  { doc = "infra/k8s/billing-api.yaml", grade = 1 },
+  { doc = "db-migrations/README.md", grade = 1 },
+]
+
+[[query]]
+id = "cfg-tr-web-billing-api-url"
+lang = "tr"
+kind = "config"
+text = "web sitesi faturalama API adresini nereden alıyor?"
+relevant = [
+  { doc = "storefront-web/src/api/client.ts", grade = 3 },
+  { doc = "storefront-web/README.md", grade = 1 },
+]
+
+[[query]]
+id = "cfg-kafka-connection"
+lang = "en"
+kind = "config"
+text = "event broker connection settings for each service"
+relevant = [
+  { doc = "infra/docker-compose.yml", grade = 3 },
+  { doc = "billing-api/src/events/event-publisher.ts", grade = 2 },
+  { doc = "orders-service/cmd/orders/main.go", grade = 2 },
+  { doc = "ledger-service/ledger/settings.py", grade = 2 },
+  { doc = "notification-worker/src/config.rs", grade = 2 },
+  { doc = "notification-worker/src/consumer.rs", grade = 1 },
+]
+notes = "Paraphrase: the code says Kafka and KAFKA_BROKERS."
+
+[[query]]
+id = "cfg-tr-psp-api-key"
+lang = "tr"
+kind = "config"
+text = "ödeme sağlayıcısının API anahtarı servise nasıl veriliyor?"
+relevant = [
+  { doc = "ledger-service/ledger/settings.py", grade = 3 },
+  { doc = "infra/k8s/ledger-service.yaml", grade = 3 },
+  { doc = "ledger-service/ledger/psp/gateway.py", grade = 2 },
+  { doc = "infra/docker-compose.yml", grade = 1 },
+]
+
+[[query]]
+id = "cfg-notification-worker-replicas"
+lang = "en"
+kind = "config"
+text = "how many replicas of the notification worker run in kubernetes?"
+relevant = [
+  { doc = "infra/k8s/notification-worker.yaml", grade = 3 },
+]
+
+# --- i18n -------------------------------------------------------------------
+
+[[query]]
+id = "i18n-tr-cancel-button-text"
+lang = "tr"
+kind = "i18n"
+text = "abonelik iptal butonunun Türkçe metni hangi dosyada?"
+relevant = [
+  { doc = "storefront-web/src/i18n/locales/tr.json", grade = 3 },
+  { doc = "mobile-app/lib/l10n/app_tr.arb", grade = 3 },
+  { doc = "storefront-web/src/components/CancelSubscriptionDialog.tsx", grade = 1 },
+  { doc = "storefront-web/src/pages/account/subscription.tsx", grade = 1 },
+]
+notes = "The website's Turkish copy says 'üyelik' (membership), the app says 'abonelik'."
+
+[[query]]
+id = "i18n-cancel-dialog-title"
+lang = "en"
+kind = "i18n"
+text = "translation of the cancel confirmation dialog title"
+relevant = [
+  { doc = "storefront-web/src/i18n/locales/en.json", grade = 3 },
+  { doc = "mobile-app/lib/l10n/app_en.arb", grade = 3 },
+  { doc = "storefront-web/src/i18n/locales/tr.json", grade = 2 },
+  { doc = "mobile-app/lib/l10n/app_tr.arb", grade = 2 },
+  { doc = "storefront-web/src/components/CancelSubscriptionDialog.tsx", grade = 2 },
+  { doc = "mobile-app/lib/screens/subscription_screen.dart", grade = 1 },
+]
+
+[[query]]
+id = "i18n-tr-cancellation-email-template"
+lang = "tr"
+kind = "i18n"
+text = "iptal e-postasının Türkçe şablonu nerede?"
+relevant = [
+  { doc = "notification-worker/templates/subscription_cancelled.tr.txt", grade = 3 },
+  { doc = "notification-worker/src/handlers/subscription_cancelled.rs", grade = 2 },
+]
+
+[[query]]
+id = "i18n-tr-price-formatting"
+lang = "tr"
+kind = "i18n"
+text = "fiyatlar Türk lirası olarak nasıl biçimlendiriliyor?"
+relevant = [
+  { doc = "storefront-web/src/components/PriceTag.tsx", grade = 3 },
+  { doc = "storefront-web/src/i18n/index.ts", grade = 1 },
+]
+
+[[query]]
+id = "i18n-locale-choice"
+lang = "en"
+kind = "i18n"
+text = "how does the website decide which language to show?"
+relevant = [
+  { doc = "storefront-web/src/i18n/index.ts", grade = 3 },
+]
+
+[[query]]
+id = "i18n-tr-missing-translation-fallback"
+lang = "tr"
+kind = "i18n"
+text = "çevirisi olmayan metinler hangi dile düşüyor?"
+relevant = [
+  { doc = "storefront-web/src/i18n/index.ts", grade = 3 },
+]
+
+[[query]]
+id = "i18n-mobile-languages"
+lang = "en"
+kind = "i18n"
+text = "which languages does the mobile app support?"
+relevant = [
+  { doc = "mobile-app/lib/main.dart", grade = 3 },
+  { doc = "mobile-app/lib/l10n/app_en.arb", grade = 2 },
+  { doc = "mobile-app/lib/l10n/app_tr.arb", grade = 2 },
+  { doc = "mobile-app/README.md", grade = 1 },
+]
+
+# --- history_doc ------------------------------------------------------------
+
+[[query]]
+id = "doc-why-idempotency-keys"
+lang = "en"
+kind = "history_doc"
+text = "why did we introduce idempotency keys for payment capture?"
+relevant = [
+  { doc = "handbook/adr/0004-idempotency-keys-for-payment-capture.md", grade = 3 },
+  { doc = "ledger-service/ledger/payments/idempotency.py", grade = 1 },
+  { doc = "ledger-service/README.md", grade = 1 },
+]
+
+[[query]]
+id = "doc-tr-why-rust-worker"
+lang = "tr"
+kind = "history_doc"
+text = "bildirim işçisi neden Rust ile yazıldı?"
+relevant = [
+  { doc = "handbook/adr/0006-bildirim-iscisi-rust.md", grade = 3 },
+  { doc = "notification-worker/README.md", grade = 1 },
+]
+
+[[query]]
+id = "doc-event-naming"
+lang = "en"
+kind = "history_doc"
+text = "what is the naming convention for event topics?"
+relevant = [
+  { doc = "handbook/adr/0002-domain-events-on-kafka.md", grade = 3 },
+  { doc = "contracts/README.md", grade = 3 },
+  { doc = "billing-api/src/events/event-publisher.ts", grade = 1 },
+]
+
+[[query]]
+id = "doc-tr-shared-database-ownership"
+lang = "tr"
+kind = "history_doc"
+text = "servisler aynı veritabanını mı kullanıyor, tablo sahipliği nasıl belirlenmiş?"
+relevant = [
+  { doc = "handbook/adr/0003-shared-postgres-table-ownership.md", grade = 3 },
+  { doc = "db-migrations/README.md", grade = 3 },
+]
+
+[[query]]
+id = "doc-why-period-end"
+lang = "en"
+kind = "history_doc"
+text = "why don't cancellations take effect immediately?"
+relevant = [
+  { doc = "handbook/adr/0005-cancel-at-period-end.md", grade = 3 },
+  { doc = "billing-api/src/subscriptions/subscription.service.ts", grade = 1 },
+]
+
+[[query]]
+id = "doc-tr-adr-process"
+lang = "tr"
+kind = "history_doc"
+text = "mimari kararları nasıl kayıt altına alıyoruz?"
+relevant = [
+  { doc = "handbook/adr/0001-record-architecture-decisions.md", grade = 3 },
+  { doc = "handbook/README.md", grade = 2 },
+]
+
+[[query]]
+id = "doc-stuck-pending-orders-runbook"
+lang = "en"
+kind = "history_doc"
+text = "orders stay pending although the customer paid, what should on-call check?"
+relevant = [
+  { doc = "handbook/runbooks/payment-capture-incidents.md", grade = 3 },
+  { doc = "orders-service/internal/events/payment_consumer.go", grade = 1 },
+]
+
+# --- absent -----------------------------------------------------------------
+
+[[query]]
+id = "abs-invoice-pdf-export"
+lang = "en"
+kind = "absent"
+text = "where do we export invoices to PDF?"
+notes = "No invoices or PDF generation exist. The nightly order CSV export (orders-service/internal/export/s3_export.go) is a distractor."
+
+[[query]]
+id = "abs-tr-sms-notifications"
+lang = "tr"
+kind = "absent"
+text = "SMS bildirimleri nereden gönderiliyor?"
+notes = "Notifications are e-mail only."
+
+[[query]]
+id = "abs-admin-two-factor"
+lang = "en"
+kind = "absent"
+text = "where is two-factor login enforced for admin users?"
+notes = "No second factor exists anywhere; JWT verification is a distractor."
+
+[[query]]
+id = "abs-tr-loyalty-points"
+lang = "tr"
+kind = "absent"
+text = "sadakat puanları nasıl hesaplanıyor?"
+notes = "No loyalty programme; review ratings ('puan') are distractors."
+
+[[query]]
+id = "abs-crypto-payments"
+lang = "en"
+kind = "absent"
+text = "do we accept bitcoin or other cryptocurrency payments?"
+notes = "Card payments only."
+
+[[query]]
+id = "abs-tr-gift-card-balance"
+lang = "tr"
+kind = "absent"
+text = "hediye kartı bakiyesi nerede düşülüyor?"
+notes = "Coupons exist in generated noise; gift cards do not exist."

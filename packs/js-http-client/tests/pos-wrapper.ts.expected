@@ -1,0 +1,5 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+consumer endpoint GET /v1/plans/{} (dynamic) @ getPlan
+consumer endpoint POST /v1/plans/{}/archive (dynamic) @ PlansClient.archive
+consumer endpoint POST /v1/plans/{}/cancel (dynamic) @ cancelPlan
+consumer endpoint POST {} (unresolved) @ PlansClient.post

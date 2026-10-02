@@ -1,0 +1,4 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+definition endpoint DELETE /api/v1/trucks/{} @ <file> {operation=deleteTruck}
+definition endpoint GET /api/v1/trucks/{} @ <file> {operation=getTruck}
+definition endpoint POST /api/v1/trucks @ <file> {operation=createTruck}

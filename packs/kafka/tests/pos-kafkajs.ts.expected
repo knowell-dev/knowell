@@ -1,0 +1,7 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+consumer topic shipment.delayed @ listen
+consumer topic shipment.lost @ listen
+consumer topic shipment.returned @ listen
+producer topic shipment.dispatched @ Outbox.flush
+producer topic shipment.dispatched @ announce
+producer topic {} (unresolved) @ Outbox.flush

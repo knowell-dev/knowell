@@ -1,0 +1,20 @@
+name = "sql-in-code"
+version = "1.0.0"
+description = "SQL statements embedded in code strings: tables after FROM / JOIN are read, tables after INSERT INTO / UPDATE / DELETE FROM are written."
+languages = ["go", "python", "typescript", "tsx", "javascript", "java", "kotlin", "rust", "csharp"]
+limits = """
+- Only statements written with upper-case keywords are recognised (so prose such as "Select a bay from the list" is never SQL).
+- Statements assembled from several strings or query builders (knex, sqlx macros, JPA criteria) are not read.
+- Schema-qualified names keep their schema unless it is `public`, `dbo` or `main`.
+"""
+
+[[rules]]
+id = "sql-string"
+query = "sql_string.scm"
+languages = ["go", "python", "typescript", "tsx", "javascript", "java", "kotlin", "rust", "csharp"]
+kind = "table"
+role = "reads"
+key = "{sql}"
+anchor = "sql"
+postprocess = "sql"
+evidence = "heuristic"

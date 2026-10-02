@@ -1,0 +1,852 @@
+# Release pipeline.
+#
+# Trigger: a `v*` tag (owner only; the tag must equal v<workspace version> and sit on the
+# default branch) or a manual run. A manual run defaults to `dry_run: true`, which builds,
+# packages, checks and renders everything and publishes nothing.
+#
+# There are no releases before 1.0 (see docs/RELEASING.md). Publishing jobs run in the
+# protected `release` environment (owner approval) and are skipped entirely in a dry run,
+# so a dry run never asks for approval and never sees a secret.
+#
+# Order of a real release:
+#   meta -> panel -> build (8 targets) -> packages / sbom / pgvector / checks -> assemble
+#   (checksums, attestations) -> github-release (DRAFT, all assets) -> crates + ghcr ->
+#   publish-release (undraft) -> npm, homebrew, scoop, winget
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and check everything, publish nothing
+        type: boolean
+        default: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+# Deny by default; every job declares what it needs.
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  # --------------------------------------------------------------------------------------
+  # Decide what this run is and refuse unsafe combinations.
+  meta:
+    name: meta
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      dry_run: ${{ steps.meta.outputs.dry_run }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Resolve version and mode
+        id: meta
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DRY_RUN_INPUT: ${{ inputs.dry_run }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::workspace version '$version' is not a plain semantic version"; exit 1
+          fi
+          dry_run=false
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$DRY_RUN_INPUT" != "false" ]; then dry_run=true; fi
+          if [ "$dry_run" = "false" ]; then
+            if [ "$REF_TYPE" != "tag" ]; then
+              echo "::error::a real release must run from a v* tag, not from '$REF_NAME'"; exit 1
+            fi
+            if [ "$REF_NAME" != "v$version" ]; then
+              echo "::error::tag '$REF_NAME' does not match the workspace version v$version"; exit 1
+            fi
+            git fetch --no-tags origin "$DEFAULT_BRANCH"
+            if ! git merge-base --is-ancestor HEAD "origin/$DEFAULT_BRANCH"; then
+              echo "::error::tag $REF_NAME is not on $DEFAULT_BRANCH"; exit 1
+            fi
+          fi
+          prerelease=false
+          case "$version" in *-*) prerelease=true ;; esac
+          {
+            echo "version=$version"
+            echo "tag=v$version"
+            echo "dry_run=$dry_run"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+          echo "Release $version (dry_run=$dry_run, prerelease=$prerelease)" >> "$GITHUB_STEP_SUMMARY"
+
+  # --------------------------------------------------------------------------------------
+  # Cheap checks of the release tooling itself (offline unit tests).
+  tooling-tests:
+    name: tooling tests
+    needs: meta
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - name: dist tests (render, archives, pgvector bundles, crates order, install.sh)
+        run: python -m unittest discover -s dist -v
+      - name: PyPI scaffold tests
+        run: python -m unittest discover -s wrappers/pypi/tests -v
+        env:
+          PYTHONPATH: wrappers/pypi/src
+      - name: npm launcher tests
+        working-directory: wrappers/npm
+        run: npm test
+
+  # --------------------------------------------------------------------------------------
+  panel:
+    name: panel
+    needs: meta
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - name: Build the static panel
+        working-directory: panel
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: panel-dist
+          path: panel/dist
+          if-no-files-found: error
+          retention-days: 7
+
+  # --------------------------------------------------------------------------------------
+  build:
+    name: build ${{ matrix.target }}
+    needs: [meta, panel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    # Experimental targets may fail without failing the release; their assets are simply
+    # absent (the assemble job checks that every required platform is present).
+    continue-on-error: ${{ matrix.experimental == true }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux glibc is built on the oldest runner image so the binary runs on older
+          # distributions (glibc 2.35+). ubuntu-22.04-arm is the native arm64 runner.
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04, exe: know }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm, exe: know }
+          - { target: x86_64-apple-darwin, os: macos-15-intel, exe: know }
+          - { target: aarch64-apple-darwin, os: macos-14, exe: know }
+          # Static CRT: no Visual C++ redistributable needed on the user's machine.
+          - { target: x86_64-pc-windows-msvc, os: windows-2022, exe: know.exe, rustflags: "-C target-feature=+crt-static" }
+          - { target: aarch64-pc-windows-msvc, os: windows-11-arm, exe: know.exe, rustflags: "-C target-feature=+crt-static" }
+          # Fully static Linux binaries (optional; C dependencies may need work).
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-22.04, exe: know, musl: true, experimental: true }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-22.04-arm, exe: know, musl: true, experimental: true }
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      TARGET: ${{ matrix.target }}
+      EXE: ${{ matrix.exe }}
+      CARGO_PROFILE_RELEASE_STRIP: symbols
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: Install musl toolchain
+        if: matrix.musl == true
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: panel-dist
+          path: panel/dist
+      # No dependency cache here on purpose: a release must not consume a cache that a
+      # pull request could have written.
+      - name: Build
+        env:
+          MATRIX_RUSTFLAGS: ${{ matrix.rustflags }}
+        run: |
+          set -euo pipefail
+          # Map the checkout path out of the binary (reproducible, no runner paths).
+          export RUSTFLAGS="--remap-path-prefix=${GITHUB_WORKSPACE}=/build ${MATRIX_RUSTFLAGS:-}"
+          cargo build --release --locked -p knowell --target "$TARGET"
+      - name: Smoke test the binary
+        run: |
+          set -euo pipefail
+          out=$("target/$TARGET/release/$EXE" --version)
+          echo "$out"
+          printf '%s' "$out" | grep -F "$VERSION"
+      - name: Package archive
+        run: python dist/package_archive.py --version "$VERSION" --target "$TARGET" --binary "target/$TARGET/release/$EXE" --out out
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist-${{ matrix.target }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # --------------------------------------------------------------------------------------
+  # .deb and .rpm for both Linux glibc targets, assembled from the built binaries.
+  packages:
+    name: deb and rpm
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+      # install-action verifies the downloaded tool against pinned checksums.
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: cargo-deb@3.8.0
+      - name: Install cargo-generate-rpm
+        run: cargo install --locked --version 0.21.0 cargo-generate-rpm
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: dist-*-unknown-linux-gnu
+          path: in
+      - name: Build packages
+        run: |
+          set -euo pipefail
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            tar -xzf "in/dist-$target/knowell-$VERSION-$target.tar.gz" -C "in/dist-$target"
+            bash dist/build-packages.sh "$target" "in/dist-$target/knowell-$VERSION-$target/know" out
+          done
+          ls -l out
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist-packages
+          path: out/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # --------------------------------------------------------------------------------------
+  sbom:
+    name: sbom
+    needs: meta
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: cargo-cyclonedx@0.5.9
+      - name: Generate the CycloneDX SBOM of the `know` binary crate
+        run: |
+          set -euo pipefail
+          cargo cyclonedx --format json --spec-version 1.5 --target all --override-filename knowell-sbom.cdx
+          mkdir out
+          cp crates/knowell/knowell-sbom.cdx.json "out/knowell-$VERSION.cdx.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom
+          path: out/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # --------------------------------------------------------------------------------------
+  # pgvector bundles for managed PostgreSQL mode (17 and 18, five platforms each).
+  pgvector:
+    name: pgvector
+    needs: meta
+    uses: ./.github/workflows/pgvector.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    with:
+      attest: ${{ needs.meta.outputs.dry_run == 'false' }}
+
+  # --------------------------------------------------------------------------------------
+  # The container image must build from the release binaries and run as non-root.
+  image-check:
+    name: image check
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist-x86_64-unknown-linux-gnu
+          path: in
+      - name: Build and run the image
+        run: |
+          set -euo pipefail
+          target=x86_64-unknown-linux-gnu
+          mkdir -p docker-bin/linux/amd64
+          tar -xzf "in/knowell-$VERSION-$target.tar.gz" -C in
+          install -m 0755 "in/knowell-$VERSION-$target/know" docker-bin/linux/amd64/know
+          docker build -f deploy/Dockerfile --target runtime-prebuilt --platform linux/amd64 -t knowell:smoke .
+          docker run --rm knowell:smoke --version | grep -F "$VERSION"
+          test "$(docker run --rm --entrypoint id knowell:smoke -u)" = "10001"
+
+  crates-check:
+    name: crates.io dry run
+    needs: meta
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: Package every publishable crate (no upload)
+        run: |
+          set -euo pipefail
+          order=$(python dist/publish_crates.py --print-order)
+          if [ -z "$order" ]; then
+            echo "::warning::no publishable crates: the workspace still has publish = false (expected before 1.0; a real release fails until it is lifted)"
+            exit 0
+          fi
+          echo "$order"
+          cargo publish --workspace --dry-run --locked
+
+  npm-check:
+    name: npm package check
+    needs: meta
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - name: Test, version and pack (no publish)
+        working-directory: wrappers/npm
+        run: |
+          set -euo pipefail
+          cp ../../LICENSE-MIT ../../LICENSE-APACHE .
+          npm test
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          npm pack --dry-run
+
+  # --------------------------------------------------------------------------------------
+  # Gather everything, write SHA256SUMS, attest, and prove the assets work end to end.
+  assemble:
+    name: assemble
+    needs: [meta, tooling-tests, build, packages, sbom, pgvector, image-check, crates-check, npm-check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write # build provenance attestations (real releases only)
+      attestations: write
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      DRY_RUN: ${{ needs.meta.outputs.dry_run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: dist-*
+          path: release
+          merge-multiple: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sbom
+          path: release
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: pgvector-*
+          path: release
+          merge-multiple: true
+      - name: Check the asset set
+        working-directory: release
+        run: |
+          set -euo pipefail
+          bundles=$(find . -maxdepth 1 -name 'pgvector-*.tar.gz' | wc -l)
+          manifests=$(find . -maxdepth 1 -name 'pgvector-*.manifest.json' | wc -l)
+          if [ "$bundles" -ne 10 ] || [ "$manifests" -ne 10 ]; then
+            echo "::error::expected 10 pgvector bundles and 10 manifests, found $bundles and $manifests"; exit 1
+          fi
+          for pattern in '*.deb' '*.rpm' '*.cdx.json'; do
+            if [ -z "$(find . -maxdepth 1 -name "$pattern")" ]; then echo "::error::no $pattern asset"; exit 1; fi
+          done
+          # Nothing that looks like a secret or local state may be in a release asset.
+          if find . -name '.env*' -o -name '*.pem' -o -name '*.key' | grep -q .; then
+            echo "::error::release assets contain a sensitive-looking file"; exit 1
+          fi
+      - name: Write SHA256SUMS
+        working-directory: release
+        run: |
+          set -euo pipefail
+          rm -f SHA256SUMS
+          find . -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort | xargs sha256sum > SHA256SUMS
+          cat SHA256SUMS
+      - name: Every platform archive is listed
+        run: python dist/render.py check --version "$VERSION" --sums release/SHA256SUMS
+      - name: Render package-manager manifests (validates the templates against real checksums)
+        run: python dist/render.py --version "$VERSION" --sums release/SHA256SUMS --out rendered
+      - name: install.sh installs the release archive end to end
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/dl/v$VERSION"
+          cp release/* "$RUNNER_TEMP/dl/v$VERSION/"
+          KNOWELL_DOWNLOAD_BASE="file://$RUNNER_TEMP/dl" sh scripts/install.sh --version "$VERSION" --install-dir "$RUNNER_TEMP/bin" --attestation skip
+          "$RUNNER_TEMP/bin/know" --version | grep -F "$VERSION"
+      - name: Attest build provenance of every asset
+        if: needs.meta.outputs.dry_run == 'false'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: release/SHA256SUMS
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assets
+          path: release/*
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rendered-manifests
+          path: rendered
+          if-no-files-found: error
+          retention-days: 14
+      - name: Summary
+        run: |
+          {
+            echo "### Release assets ($VERSION, dry_run=$DRY_RUN)"
+            echo '```'
+            ls -l release
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ======================================================================================
+  # Publishing starts here. Everything below needs owner approval (`release` environment)
+  # and is skipped in a dry run.
+  # ======================================================================================
+
+  # Create the GitHub release as a DRAFT with every asset; it is published only after the
+  # other registries succeeded (publish-release).
+  github-release:
+    name: github release (draft)
+    needs: [meta, assemble]
+    if: needs.meta.outputs.dry_run == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.meta.outputs.tag }}
+      VERSION: ${{ needs.meta.outputs.version }}
+      PRERELEASE: ${{ needs.meta.outputs.prerelease }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets
+          path: release
+      - name: Create or update the draft release
+        run: |
+          set -euo pipefail
+          flags=(--draft --verify-tag --title "Knowell $VERSION" --generate-notes)
+          if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # A re-run: the release must still be a draft; never touch a published one.
+            test "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = "true"
+            gh release upload "$TAG" release/* --clobber
+          else
+            gh release create "$TAG" release/* "${flags[@]}"
+          fi
+      - name: Verify every asset arrived
+        run: |
+          set -euo pipefail
+          expected=$(find release -maxdepth 1 -type f | wc -l)
+          actual=$(gh release view "$TAG" --json assets --jq '.assets | length')
+          if [ "$expected" -ne "$actual" ]; then
+            echo "::error::release has $actual assets, expected $expected"; exit 1
+          fi
+
+  crates:
+    name: crates.io
+    needs: [meta, assemble]
+    if: needs.meta.outputs.dry_run == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 240 # new crates are rate limited (about one per ten minutes after a burst)
+    environment: release
+    permissions:
+      contents: read
+      # Trusted publishing (OIDC): after the first publish, configure it on crates.io for
+      # every crate, then uncomment the next line and the auth step below, and delete the
+      # CARGO_REGISTRY_TOKEN secret.
+      # id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      # - name: Authenticate with crates.io (trusted publishing)
+      #   id: crates-auth
+      #   uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+      - name: Publish in dependency order
+        env:
+          # First publish: a token stored as a secret of the `release` environment.
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          # After switching to trusted publishing, use this instead:
+          # CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
+        run: python dist/publish_crates.py
+
+  ghcr:
+    name: container image
+    needs: [meta, assemble]
+    if: needs.meta.outputs.dry_run == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: release
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      IMAGE: ghcr.io/knowell-dev/knowell
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: dist-*-unknown-linux-gnu
+          path: in
+      - name: Place the release binaries in the build context
+        run: |
+          set -euo pipefail
+          for pair in x86_64-unknown-linux-gnu:amd64 aarch64-unknown-linux-gnu:arm64; do
+            target=${pair%%:*}
+            arch=${pair##*:}
+            tar -xzf "in/dist-$target/knowell-$VERSION-$target.tar.gz" -C "in/dist-$target"
+            install -D -m 0755 "in/dist-$target/knowell-$VERSION-$target/know" "docker-bin/linux/$arch/know"
+          done
+      # The prebuilt image stage runs `apt-get` for arm64, which needs emulation here.
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ needs.meta.outputs.prerelease == 'false' }}
+            type=raw,value=latest,enable=${{ needs.meta.outputs.prerelease == 'false' }}
+      - id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: deploy/Dockerfile
+          target: runtime-prebuilt
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+  # Publish the draft once the registries that need no public release assets are done.
+  publish-release:
+    name: publish github release
+    needs: [meta, github-release, crates, ghcr]
+    if: needs.meta.outputs.dry_run == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.meta.outputs.tag }}
+      PRERELEASE: ${{ needs.meta.outputs.prerelease }}
+    steps:
+      - name: Undraft
+        run: |
+          set -euo pipefail
+          if [ "$PRERELEASE" = "true" ]; then
+            gh release edit "$TAG" --draft=false --prerelease
+          else
+            gh release edit "$TAG" --draft=false --latest
+          fi
+
+  # --------------------------------------------------------------------------------------
+  # Channels that download from the (now public) release.
+  npm:
+    name: npm
+    needs: [meta, publish-release]
+    if: needs.meta.outputs.dry_run == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # npm provenance
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      PRERELEASE: ${{ needs.meta.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+          registry-url: https://registry.npmjs.org
+      - name: Publish with provenance
+        working-directory: wrappers/npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          cp ../../LICENSE-MIT ../../LICENSE-APACHE .
+          npm test
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          tag=latest
+          if [ "$PRERELEASE" = "true" ]; then tag=next; fi
+          npm publish --provenance --access public --tag "$tag"
+
+  # Homebrew tap and Scoop bucket: one short-lived GitHub App token per repository.
+  tap-bucket:
+    name: ${{ matrix.name }}
+    needs: [meta, publish-release]
+    if: needs.meta.outputs.dry_run == 'false' && needs.meta.outputs.prerelease == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: homebrew tap, repo: homebrew-tap, only: homebrew, file: Formula/knowell.rb }
+          - { name: scoop bucket, repo: scoop-bucket, only: scoop, file: bucket/knowell.json }
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      TAG: ${{ needs.meta.outputs.tag }}
+      REPO_NAME: ${{ matrix.repo }}
+      ONLY: ${{ matrix.only }}
+      FILE: ${{ matrix.file }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets
+          path: release
+      - name: Render from the release checksums
+        run: python dist/render.py --version "$VERSION" --sums release/SHA256SUMS --only "$ONLY" --out rendered
+      - id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: knowell-dev
+          repositories: ${{ matrix.repo }}
+          permission-contents: write
+      - name: Commit the new manifest
+        env:
+          APP_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          set -euo pipefail
+          auth=$(printf 'x-access-token:%s' "$APP_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          git -c http.extraheader="AUTHORIZATION: basic $auth" clone --depth 1 "https://github.com/knowell-dev/$REPO_NAME.git" target
+          mkdir -p "target/$(dirname "$FILE")"
+          cp "rendered/$FILE" "target/$FILE"
+          cd target
+          git config user.name "knowell-release"
+          git config user.email "noreply@users.noreply.github.com"
+          git add "$FILE"
+          if git diff --cached --quiet; then
+            echo "Nothing to commit: $FILE is already at $VERSION"
+            exit 0
+          fi
+          git commit -m "knowell $VERSION"
+          git -c http.extraheader="AUTHORIZATION: basic $auth" push origin HEAD
+
+  winget:
+    name: winget
+    needs: [meta, publish-release]
+    if: needs.meta.outputs.dry_run == 'false' && needs.meta.outputs.prerelease == 'false'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    environment: release
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      # wingetcreate pinned by version and SHA-256 (microsoft/winget-create v1.12.13.0).
+      WINGETCREATE_VERSION: v1.12.13.0
+      WINGETCREATE_SHA256: 24042bd37915805615e6cf969ac57c6439124c3fe85823327f5f3fb24bd9ffea
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets
+          path: release
+      - name: Render the winget manifests
+        shell: pwsh
+        run: python dist/render.py --version $env:VERSION --sums release/SHA256SUMS --only winget --out rendered
+      - name: Download wingetcreate (checksum pinned)
+        shell: pwsh
+        run: |
+          $url = "https://github.com/microsoft/winget-create/releases/download/$env:WINGETCREATE_VERSION/wingetcreate.exe"
+          Invoke-WebRequest -Uri $url -OutFile wingetcreate.exe
+          $actual = (Get-FileHash -Algorithm SHA256 wingetcreate.exe).Hash.ToLowerInvariant()
+          if ($actual -ne $env:WINGETCREATE_SHA256) { throw "wingetcreate checksum mismatch: $actual" }
+      - name: Open the winget-pkgs pull request
+        shell: pwsh
+        env:
+          # Restricted token (fork + pull request scope only), available only in `release`.
+          WINGET_CREATE_GITHUB_TOKEN: ${{ secrets.WINGET_PAT }}
+        run: |
+          .\wingetcreate.exe submit --prtitle "New version: Knowell.Knowell version $env:VERSION" --no-open rendered\winget
+
+  # --------------------------------------------------------------------------------------
+  # PyPI is undecided: this job is disabled on purpose (the condition starts with `false &&`). To enable it, decide,
+  # reserve the name via trusted publishing on PyPI, then replace the condition with
+  # `needs.meta.outputs.dry_run == 'false'` and add `publish-release` to `needs`.
+  pypi:
+    name: pypi (disabled)
+    needs: [meta, publish-release]
+    if: ${{ false && needs.meta.outputs.dry_run == 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # PyPI trusted publishing
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: Build sdist and wheel
+        working-directory: wrappers/pypi
+        run: |
+          set -euo pipefail
+          cp ../../LICENSE-MIT ../../LICENSE-APACHE .
+          sed -i "s/^version = \"0.0.0\"/version = \"$VERSION\"/" pyproject.toml
+          python -m pip install build==1.6.1
+          python -m build --outdir dist
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: wrappers/pypi/dist

@@ -1,0 +1,19 @@
+asyncapi: 2.6.0
+info:
+  title: Yard events
+  version: 1.0.0
+channels:
+  yard.gate.opened:
+    subscribe:
+      message:
+        payload:
+          type: object
+          properties:
+            gateId: { type: string }
+  yard.truck.arrived:
+    publish:
+      message:
+        payload:
+          type: object
+          properties:
+            truckId: { type: string }

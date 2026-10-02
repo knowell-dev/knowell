@@ -1,0 +1,22 @@
+{
+    "version": "@@VERSION@@",
+    "description": "Semantic code intelligence and shared memory for AI coding agents. Installs the `know` command.",
+    "homepage": "https://github.com/@@REPO@@",
+    "license": "MIT OR Apache-2.0",
+    "architecture": {
+        "64bit": {
+            "url": "@@URL_WINDOWS_X64@@",
+            "hash": "@@SHA_WINDOWS_X64@@",
+            "extract_dir": "@@DIR_WINDOWS_X64@@"
+        },
+        "arm64": {
+            "url": "@@URL_WINDOWS_ARM64@@",
+            "hash": "@@SHA_WINDOWS_ARM64@@",
+            "extract_dir": "@@DIR_WINDOWS_ARM64@@"
+        }
+    },
+    "bin": "know.exe",
+    "checkver": {
+        "github": "https://github.com/@@REPO@@"
+    }
+}

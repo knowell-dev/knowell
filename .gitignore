@@ -1,0 +1,27 @@
+# Private working plan (owner's language) and agent hand-off notes — never published
+PLAN.md
+HANDOFF.md
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+
+# Build output
+/target/
+**/node_modules/
+/out/
+
+# Local tool state
+.knowell/
+*.profraw
+.DS_Store
+Thumbs.db
+
+# Python / test tool caches
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+/panel/test-results/
+/panel/playwright-report/

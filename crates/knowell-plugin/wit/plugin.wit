@@ -1,0 +1,213 @@
+/// Knowell analyzer plugin contract.
+///
+/// A plugin is a WebAssembly component that targets the `plugin` world. The
+/// host instantiates a fresh, sandboxed instance for every call, so plugins
+/// must not rely on state surviving between calls.
+///
+/// Versioning: the package version is the plugin API version. The host accepts
+/// a plugin whose API version has the same major version and, while the major
+/// version is 0, the same minor version, and is not newer than the host's.
+package knowell:plugin@0.1.0;
+
+/// Self-description of a plugin, read once when the host loads it.
+interface metadata {
+    /// A host capability a plugin can ask for. Every capability is denied
+    /// unless the plugin's manifest requests it and the user grants it.
+    enum capability {
+        /// Read-only access to text files inside the analysed project's root
+        /// through the `project-files` interface.
+        project-files,
+    }
+
+    /// What a plugin is and what it needs.
+    record plugin-info {
+        /// Plugin name; must equal the manifest `name`.
+        name: string,
+        /// Plugin version; must equal the manifest `version`.
+        version: string,
+        /// Languages this plugin analyses, as lowercase identifiers such as
+        /// `typescript` (1-64 entries, each 1-64 characters from
+        /// `[a-z0-9+#._-]`, starting with a letter or digit).
+        languages: list<string>,
+        /// Frameworks this plugin recognises, as lowercase identifiers such as
+        /// `express` (0-64 entries, same character rules as `languages`).
+        frameworks: list<string>,
+        /// Capabilities the plugin uses; each must also be requested in the
+        /// manifest.
+        capabilities: list<capability>,
+    }
+
+    /// Returns the plugin's self-description.
+    info: func() -> plugin-info;
+}
+
+/// Extraction of cross-project contracts and relations from one file.
+interface analyzer {
+    /// A 1-based, inclusive span of lines in the analysed file. `end` must not
+    /// be before `start` and must not exceed the file's line count.
+    record line-range {
+        start: u32,
+        end: u32,
+    }
+
+    /// The file being analysed. The host has already excluded sensitive files
+    /// and redacted secrets before a plugin sees the text.
+    record source-file {
+        /// Path relative to the project root, `/`-separated, without `.` or
+        /// `..` components.
+        path: string,
+        /// Language identifier, one of the plugin's `languages`.
+        language: string,
+        /// Full UTF-8 text of the file.
+        text: string,
+    }
+
+    /// What a contract stands for.
+    enum contract-kind {
+        /// An HTTP endpoint, keyed as `METHOD /path/{param}`.
+        endpoint,
+        /// An event topic or queue name.
+        topic,
+        /// An RPC method, keyed as `package.Service/Method`.
+        rpc,
+        /// A database table.
+        table,
+        /// An environment variable or config name (never its value).
+        env-name,
+        /// An i18n message key.
+        i18n-key,
+        /// A package or library.
+        %package,
+    }
+
+    /// Which side of a contract the code is on.
+    enum contract-role {
+        /// Defines, serves or publishes the contract.
+        producer,
+        /// Calls, reads or subscribes to the contract.
+        consumer,
+    }
+
+    /// A contract occurrence found in the file.
+    record contract {
+        kind: contract-kind,
+        /// Normalised contract key (1-512 bytes, no control characters).
+        key: string,
+        role: contract-role,
+        /// Where the contract occurs.
+        range: line-range,
+    }
+
+    /// Relationship between two symbols; `a --kind--> b` reads "a kind b".
+    enum edge-kind {
+        calls,
+        references,
+        implements,
+        imports,
+        defines,
+        tests,
+        produces,
+        consumes,
+        reads,
+        writes,
+        exposes,
+        depends-on,
+    }
+
+    /// How a plugin established an edge. Plugins cannot claim compiler-grade
+    /// (semantic) resolution.
+    enum evidence {
+        /// Seen in the source structure.
+        syntactic,
+        /// Name, structure or pattern similarity.
+        heuristic,
+    }
+
+    /// Whether the edge's target is known.
+    enum resolution {
+        resolved,
+        ambiguous,
+        unresolved,
+    }
+
+    /// A relation between two symbol (or contract) keys.
+    record edge {
+        /// Source symbol key (1-512 bytes, no control characters).
+        from-symbol: string,
+        /// Target symbol or contract key (1-512 bytes, no control characters).
+        to-symbol: string,
+        kind: edge-kind,
+        evidence: evidence,
+        resolution: resolution,
+        /// Where the relation is observed.
+        range: line-range,
+    }
+
+    /// Everything a plugin extracted from one file.
+    record analysis {
+        contracts: list<contract>,
+        edges: list<edge>,
+    }
+
+    /// Why a plugin produced no analysis. Messages are shown to users after
+    /// sanitising and truncation; they must not contain file contents.
+    variant analyze-error {
+        /// The file uses a dialect or version the plugin does not handle.
+        unsupported(string),
+        /// The plugin failed to analyse the file.
+        failed(string),
+    }
+
+    /// Analyses one file.
+    analyze: func(file: source-file) -> result<analysis, analyze-error>;
+}
+
+/// Host-side logging. The host bounds the number and size of messages per
+/// call and silently drops the excess.
+interface log {
+    enum level {
+        trace,
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    /// Records a diagnostic message.
+    log: func(level: level, message: string);
+}
+
+/// Optional read-only access to files in the analysed project. Only usable
+/// when the manifest requests the `project-files` capability and the user
+/// grants it; a plugin that imports this interface without requesting the
+/// capability is refused at load time.
+interface project-files {
+    enum read-error {
+        /// The path is outside the project root, malformed, or excluded by
+        /// the host's file policy.
+        denied,
+        /// No regular file exists at the path.
+        not-found,
+        /// The file is larger than the host's per-file limit.
+        too-large,
+        /// The file is not valid UTF-8.
+        not-text,
+        /// The per-call read budget is used up.
+        budget-exhausted,
+        /// The file could not be read.
+        unavailable,
+    }
+
+    /// Reads a UTF-8 text file by path relative to the project root
+    /// (`/`-separated, no `.` or `..` components).
+    read-file: func(path: string) -> result<string, read-error>;
+}
+
+/// The world every Knowell analyzer plugin targets.
+world plugin {
+    import log;
+    import project-files;
+
+    export metadata;
+    export analyzer;
+}

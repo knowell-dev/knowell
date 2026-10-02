@@ -1,0 +1,13 @@
+[package]
+name = "hostile"
+description = "Misbehaving Knowell test plugin: each input path selects one attack on the host sandbox."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen.workspace = true

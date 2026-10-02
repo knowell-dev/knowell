@@ -1,0 +1,162 @@
+name = "kafka"
+version = "1.0.0"
+description = "Kafka producers and consumers: kafkajs (TS/JS), segmentio/kafka-go, sarama and confluent-kafka-go (Go), Spring Kafka (Java), aiokafka / kafka-python / confluent-kafka (Python) and rdkafka (Rust)."
+languages = ["typescript", "tsx", "javascript", "go", "java", "python", "rust"]
+limits = """
+- Topics passed through variables are resolved only through module-level constants (same file first, then a constant defined in exactly one file); otherwise the use is unresolved.
+- Generic `publish(TOPIC, payload)` wrappers (TS) and `newReader(brokers, "topic")`-style helpers (Go) are matched heuristically; topics must contain a separator (`.`, `-`, `_`).
+- Topic patterns (`subscribe({ topic: /x.*/ })`, `topicPattern`) are not expanded.
+- Kafka Streams and Kafka Connect configurations are not read.
+"""
+
+[detect]
+npm = ["kafkajs", "@confluentinc/kafka-javascript", "node-rdkafka"]
+go = ["github.com/segmentio/kafka-go", "github.com/IBM/sarama", "github.com/Shopify/sarama", "github.com/confluentinc/confluent-kafka-go*"]
+python = ["aiokafka", "kafka-python", "confluent-kafka"]
+cargo = ["rdkafka"]
+maven = ["org.springframework.kafka:", "org.apache.kafka:"]
+imports = ["kafkajs", "github.com/segmentio/kafka-go", "github.com/IBM/sarama", "github.com/Shopify/sarama", "github.com/confluentinc/confluent-kafka-go", "aiokafka", "kafka", "confluent_kafka", "rdkafka", "org.springframework.kafka", "org.apache.kafka"]
+
+# TypeScript / JavaScript (kafkajs)
+
+[[rules]]
+id = "kafkajs-send"
+query = "send.scm"
+languages = ["typescript", "tsx", "javascript"]
+kind = "topic"
+role = "producer"
+key = "{topic}"
+anchor = "topic"
+resolve = ["topic"]
+
+[[rules]]
+id = "kafkajs-subscribe"
+query = "subscribe.scm"
+languages = ["typescript", "tsx", "javascript"]
+kind = "topic"
+role = "consumer"
+key = "{topic}"
+anchor = "topic"
+resolve = ["topic"]
+
+[[rules]]
+id = "publish-wrapper"
+query = "publish_wrapper.scm"
+languages = ["typescript", "tsx", "javascript"]
+kind = "topic"
+role = "producer"
+key = "{topic}"
+anchor = "topic"
+resolve = ["topic"]
+evidence = "heuristic"
+key_shape = "dotted"
+
+# Go
+
+[[rules]]
+id = "go-producer-struct"
+query = "producer_struct.scm"
+languages = ["go"]
+kind = "topic"
+role = "producer"
+key = "{topic}"
+anchor = "topic"
+resolve = ["topic"]
+
+[[rules]]
+id = "go-consumer-struct"
+query = "consumer_struct.scm"
+languages = ["go"]
+kind = "topic"
+role = "consumer"
+key = "{topic}"
+anchor = "topic"
+resolve = ["topic"]
+
+[[rules]]
+id = "go-consumer-call"
+query = "consumer_call.scm"
+languages = ["go"]
+kind = "topic"
+role = "consumer"
+key = "{topic}"
+anchor = "topic"
+resolve = ["topic"]
+evidence = "heuristic"
+key_shape = "dotted"
+
+# Java (Spring Kafka, kafka-clients)
+
+[[rules]]
+id = "java-send"
+query = "send.scm"
+languages = ["java"]
+kind = "topic"
+role = "producer"
+key = "{topic}"
+anchor = "topic"
+resolve = ["topic"]
+
+[[rules]]
+id = "java-listener"
+query = "listener.scm"
+languages = ["java"]
+kind = "topic"
+role = "consumer"
+key = "{topic}"
+symbol = "handler"
+anchor = "topic"
+resolve = ["topic"]
+
+# Python
+
+[[rules]]
+id = "python-send"
+query = "send.scm"
+languages = ["python"]
+kind = "topic"
+role = "producer"
+key = "{topic}"
+anchor = "topic"
+resolve = ["topic"]
+
+[[rules]]
+id = "python-consumer"
+query = "consumer.scm"
+languages = ["python"]
+kind = "topic"
+role = "consumer"
+key = "{topic}"
+anchor = "topic"
+resolve = ["topic"]
+
+# Rust (rdkafka)
+
+[[rules]]
+id = "rust-subscribe"
+query = "subscribe.scm"
+languages = ["rust"]
+kind = "topic"
+role = "consumer"
+key = "{topic}"
+anchor = "topic"
+resolve = ["topic"]
+
+[[rules]]
+id = "rust-record"
+query = "record.scm"
+languages = ["rust"]
+kind = "topic"
+role = "producer"
+key = "{topic}"
+anchor = "topic"
+resolve = ["topic"]
+
+[[rules]]
+id = "rust-topic-match"
+query = "topic_match.scm"
+languages = ["rust"]
+kind = "topic"
+role = "consumer"
+key = "{topic}"
+anchor = "topic"

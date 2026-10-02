@@ -1,0 +1,23 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.10.0.schema.json
+PackageIdentifier: Knowell.Knowell
+PackageVersion: @@VERSION@@
+InstallerType: zip
+NestedInstallerType: portable
+Commands:
+  - know
+ReleaseDate: @@RELEASE_DATE@@
+Installers:
+  - Architecture: x64
+    InstallerUrl: @@URL_WINDOWS_X64@@
+    InstallerSha256: @@SHA_WINDOWS_X64_UPPER@@
+    NestedInstallerFiles:
+      - RelativeFilePath: @@DIR_WINDOWS_X64@@\know.exe
+        PortableCommandAlias: know
+  - Architecture: arm64
+    InstallerUrl: @@URL_WINDOWS_ARM64@@
+    InstallerSha256: @@SHA_WINDOWS_ARM64_UPPER@@
+    NestedInstallerFiles:
+      - RelativeFilePath: @@DIR_WINDOWS_ARM64@@\know.exe
+        PortableCommandAlias: know
+ManifestType: installer
+ManifestVersion: 1.10.0

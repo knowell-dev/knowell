@@ -1,0 +1,22 @@
+[package]
+name = "knowell-lexical"
+description = "Lexical (BM25) search for Knowell on Tantivy with a code-aware tokenizer."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
+
+[dependencies]
+knowell-core.workspace = true
+serde.workspace = true
+tantivy.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

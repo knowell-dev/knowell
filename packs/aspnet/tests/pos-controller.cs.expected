@@ -1,0 +1,5 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+bind class-route TrucksController = api/[controller]
+producer endpoint DELETE /api/trucks/{} @ Example.Fleet.TrucksController.Delete
+producer endpoint GET /api/trucks/{} @ Example.Fleet.TrucksController.Get
+producer endpoint POST /api/trucks @ Example.Fleet.TrucksController.Create

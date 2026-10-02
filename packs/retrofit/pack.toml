@@ -1,0 +1,22 @@
+name = "retrofit"
+version = "1.0.0"
+description = "Retrofit service interfaces in Kotlin and Java (`@GET(\"v1/x/{id}\")`, `@POST(...)`)."
+languages = ["kotlin", "java"]
+limits = """
+- The `baseUrl` given to `Retrofit.Builder()` is not applied; relative paths are matched as written.
+- `@HTTP(method = ..., path = ...)` and `@Url` dynamic URLs are not read.
+"""
+
+[detect]
+maven = ["com.squareup.retrofit2:"]
+imports = ["retrofit2"]
+
+[[rules]]
+id = "service-method"
+query = "service.scm"
+languages = ["kotlin", "java"]
+kind = "endpoint"
+role = "consumer"
+key = "{verb} {path}"
+symbol = "handler"
+anchor = "annotation"

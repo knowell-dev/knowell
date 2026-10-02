@@ -1,0 +1,2 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+definition infra gateway @ <file> {ports=80, source=kubernetes:Service}

@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Fake `know` for the action tests. It records its arguments and never touches the network.
+#   FAKE_KNOW_LOG   file that receives one line per call (the arguments)
+#   FAKE_KNOW_RC    exit code to return (default 0)
+#   FAKE_KNOW_RESULTS  number of SARIF results to emit (default 2)
+set -eu
+log="${FAKE_KNOW_LOG:-/dev/null}"
+printf '%s\n' "$*" >>"$log"
+if [ -n "${KNOWELL_OIDC_TOKEN:-}" ]; then printf 'oidc-token-present\n' >>"$log"; fi
+if [ "${1:-}" = "--version" ]; then echo "know 0.0.0-fake"; exit 0; fi
+out=""
+prev=""
+cmd=""
+for a in "$@"; do
+  case "$a" in check | impact | index | doc-drift) [ -n "$cmd" ] || cmd="$a" ;; esac
+  if [ "$prev" = "--output" ]; then out="$a"; fi
+  prev="$a"
+done
+case "$cmd" in
+  check)
+    if [ -n "$out" ]; then
+      n="${FAKE_KNOW_RESULTS:-2}"
+      {
+        printf '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"knowell"}},"results":['
+        i=0
+        while [ "$i" -lt "$n" ]; do
+          [ "$i" -eq 0 ] || printf ','
+          printf '{"ruleId":"fake.rule","level":"error","message":{"text":"fake"}}'
+          i=$((i + 1))
+        done
+        printf ']}]}\n'
+      } >"$out"
+    fi
+    ;;
+  impact | doc-drift)
+    if [ -n "$out" ]; then printf '## Fake report\n\nnothing real here\n' >"$out"; fi
+    ;;
+esac
+exit "${FAKE_KNOW_RC:-0}"

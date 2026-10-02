@@ -1,0 +1,106 @@
+name = "rabbitmq"
+version = "1.0.0"
+description = "RabbitMQ / AMQP publishers and consumers: amqplib (TS/JS), amqp091-go (Go), pika (Python) and Spring AMQP (Java)."
+languages = ["typescript", "tsx", "javascript", "go", "python", "java"]
+limits = """
+- Publishers are keyed by routing key (the exchange is kept as the `exchange` attribute) and consumers by queue name, so they only link when the routing key equals the queue (default exchange, or bindings named after the queue). Exchange-to-queue bindings are not followed.
+- Topic-exchange patterns (`orders.*`, `#`) are kept literally.
+- Only literal names (and module-level constants) are read.
+"""
+
+[detect]
+npm = ["amqplib", "amqp-connection-manager"]
+go = ["github.com/rabbitmq/amqp091-go", "github.com/streadway/amqp"]
+python = ["pika", "aio-pika"]
+maven = ["org.springframework.amqp:", "com.rabbitmq:"]
+imports = ["amqplib", "amqp-connection-manager", "github.com/rabbitmq/amqp091-go", "github.com/streadway/amqp", "pika", "aio_pika", "org.springframework.amqp", "com.rabbitmq"]
+
+[[rules]]
+id = "amqplib-publish"
+query = "publish.scm"
+languages = ["typescript", "tsx", "javascript"]
+kind = "topic"
+role = "producer"
+key = "{topic}"
+anchor = "topic"
+resolve = ["topic", "exchange"]
+
+[rules.attrs]
+exchange = "{exchange}"
+
+[[rules]]
+id = "amqplib-consume"
+query = "consume.scm"
+languages = ["typescript", "tsx", "javascript"]
+kind = "topic"
+role = "consumer"
+key = "{topic}"
+anchor = "topic"
+resolve = ["topic"]
+
+[[rules]]
+id = "go-publish"
+query = "publish.scm"
+languages = ["go"]
+kind = "topic"
+role = "producer"
+key = "{topic}"
+anchor = "topic"
+resolve = ["topic", "exchange"]
+
+[rules.attrs]
+exchange = "{exchange}"
+
+[[rules]]
+id = "go-consume"
+query = "consume.scm"
+languages = ["go"]
+kind = "topic"
+role = "consumer"
+key = "{topic}"
+anchor = "topic"
+resolve = ["topic"]
+
+[[rules]]
+id = "pika-publish"
+query = "publish.scm"
+languages = ["python"]
+kind = "topic"
+role = "producer"
+key = "{topic}"
+anchor = "topic"
+resolve = ["topic"]
+
+[[rules]]
+id = "pika-consume"
+query = "consume.scm"
+languages = ["python"]
+kind = "topic"
+role = "consumer"
+key = "{topic}"
+anchor = "topic"
+resolve = ["topic"]
+
+[[rules]]
+id = "spring-send"
+query = "publish.scm"
+languages = ["java"]
+kind = "topic"
+role = "producer"
+key = "{topic}"
+anchor = "topic"
+resolve = ["topic", "exchange"]
+
+[rules.attrs]
+exchange = "{exchange}"
+
+[[rules]]
+id = "spring-listener"
+query = "consume.scm"
+languages = ["java"]
+kind = "topic"
+role = "consumer"
+key = "{topic}"
+symbol = "handler"
+anchor = "topic"
+resolve = ["topic"]

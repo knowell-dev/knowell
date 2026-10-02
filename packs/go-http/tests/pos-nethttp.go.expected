@@ -1,0 +1,5 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+producer endpoint * /healthz @ Register
+producer endpoint * /metrics @ Register
+producer endpoint GET /v1/parcels/{} @ Register
+producer endpoint POST /v1/parcels @ Register

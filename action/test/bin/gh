@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Fake GitHub CLI for the action tests.
+#   FAKE_GH_LOG         receives one line per call
+#   FAKE_GH_BODY        receives the last body file passed with -F body=@file
+#   FAKE_GH_AUTH_RC / FAKE_GH_ATTEST_RC   exit codes for `auth status` / `attestation verify`
+#   FAKE_GH_EXISTING    id printed for the "find existing comment/issue" listing calls
+set -eu
+printf '%s\n' "$*" >>"${FAKE_GH_LOG:-/dev/null}"
+case "${1:-} ${2:-}" in
+  "auth status") exit "${FAKE_GH_AUTH_RC:-0}" ;;
+  "attestation verify") exit "${FAKE_GH_ATTEST_RC:-0}" ;;
+esac
+if [ "${1:-}" = api ]; then
+  for a in "$@"; do
+    case "$a" in
+      body=@*) [ -z "${FAKE_GH_BODY:-}" ] || cp "${a#body=@}" "$FAKE_GH_BODY" ;;
+      --paginate) [ -z "${FAKE_GH_EXISTING:-}" ] || echo "$FAKE_GH_EXISTING" ;;
+    esac
+  done
+fi
+exit 0

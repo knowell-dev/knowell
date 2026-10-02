@@ -1,0 +1,32 @@
+[package]
+name = "knowell-source"
+description = "Source access for Knowell: project trees and git objects under the exclusion and secret policies, plus change signals."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
+
+[dependencies]
+knowell-core.workspace = true
+knowell-secrets.workspace = true
+# sha1: object ids; parallel: thread-safe handles (`GitRepo: Send + Sync`);
+# revision: merge-base; blob-diff: tree diff with rename tracking; status:
+# working-tree changes (index + dirwalk + excludes). No network, transport
+# or credential features.
+gix = { workspace = true, features = ["sha1", "parallel", "revision", "blob-diff", "status"] }
+ignore.workspace = true
+notify.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

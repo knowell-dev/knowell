@@ -1,0 +1,25 @@
+name = "api-specs"
+version = "1.0.0"
+description = "API contract documents: OpenAPI 3 / Swagger 2 (paths x methods, with operation schema hashes), AsyncAPI 2 / 3 channels and per-event JSON Schema files (title = topic)."
+languages = ["yaml", "json"]
+limits = """
+- Only local `$ref`s (`#/components/...`) are resolved for hashing; references to other files are hashed as written.
+- The first server URL's path (OpenAPI 3) or `basePath` (Swagger 2) is prefixed to every path; templated server URLs are ignored.
+- Event schemas are recognised under an `events/`, `event-schemas/` or `schemas/` directory (or `*.schema.json`) and need a topic-like `title`.
+- YAML anchors and aliases are not expanded.
+"""
+
+[[extractors]]
+id = "openapi"
+extractor = "openapi"
+files = ["**/*.yaml", "**/*.yml", "**/*.json"]
+
+[[extractors]]
+id = "asyncapi"
+extractor = "asyncapi"
+files = ["**/*.yaml", "**/*.yml", "**/*.json"]
+
+[[extractors]]
+id = "event-schema"
+extractor = "event-schema"
+files = ["**/*.json"]

@@ -1,0 +1,22 @@
+{
+  "openapi": "3.1.0",
+  "info": { "title": "Gates", "version": "2.0.0" },
+  "paths": {
+    "/v2/gates": {
+      "get": { "operationId": "listGates", "responses": { "200": { "description": "ok" } } }
+    },
+    "/v2/gates/{gateId}/open": {
+      "post": {
+        "operationId": "openGate",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": { "type": "object", "properties": { "reason": { "type": "string" } } }
+            }
+          }
+        },
+        "responses": { "202": { "description": "accepted" } }
+      }
+    }
+  }
+}

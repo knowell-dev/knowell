@@ -1,0 +1,9 @@
+# path: prisma/schema.prisma
+# Expected extractions (order-insensitive); empty for negative fixtures.
+reads table bay @ Bay {column=dock_id, entity=Bay}
+reads table bay @ Bay {column=id, entity=Bay}
+reads table bay @ Bay {entity=Bay}
+reads table docks @ Dock {column=created_at, entity=Dock}
+reads table docks @ Dock {column=dock_code, entity=Dock}
+reads table docks @ Dock {column=id, entity=Dock}
+reads table docks @ Dock {entity=Dock}

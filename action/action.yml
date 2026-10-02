@@ -1,0 +1,210 @@
+name: Knowell Check
+description: Run Knowell checks on pull requests (SARIF in code scanning), cross-project impact comments, index updates and doc-drift reports. Downloads a verified prebuilt know binary; no compilation, no stored secrets.
+author: Knowell
+branding:
+  icon: check-circle
+  color: blue
+
+inputs:
+  command:
+    description: "What to run: check (PR checks, no secrets), impact (cross-project impact via the hub), index (update the hub index), doc-drift (documentation drift report)."
+    required: false
+    default: check
+  version:
+    description: "Knowell version: latest, X.Y.Z or vX.Y.Z. Pin a version in production workflows."
+    required: false
+    default: latest
+  workspace-config:
+    description: Workspace config file, relative to working-directory.
+    required: false
+    default: knowell.toml
+  working-directory:
+    description: Directory the command runs in, relative to the checkout.
+    required: false
+    default: "."
+  sarif:
+    description: "check only: write SARIF and upload it to code scanning (needs security-events: write; skipped on fork pull requests)."
+    required: false
+    default: "true"
+  sarif-file:
+    description: "check only: where to write the SARIF file (inside the workspace or the runner temp dir). Default: knowell.sarif in the runner temp dir."
+    required: false
+    default: ""
+  sarif-category:
+    description: Code scanning category, so several Knowell runs in one workflow stay separate.
+    required: false
+    default: knowell
+  fail-on:
+    description: "check only: fail the job on findings of this severity or above: error, warning or never."
+    required: false
+    default: error
+  hub-url:
+    description: "impact and index: https URL of your team's Knowell hub."
+    required: false
+    default: ""
+  oidc-audience:
+    description: "impact and index: audience of the GitHub OIDC token. Default: hub-url."
+    required: false
+    default: ""
+  comment:
+    description: "impact: post or update one pull request comment. doc-drift: open or update one issue."
+    required: false
+    default: "true"
+  attestation:
+    description: "Verify the build provenance of the downloaded binary with gh: auto (when gh is authenticated), require or skip. The SHA256SUMS check always runs."
+    required: false
+    default: auto
+  github-token:
+    description: Token for pull request comments, issues and the attestation check. Never sent to the hub.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  sarif-file:
+    description: Path of the SARIF file (check), empty otherwise.
+    value: ${{ steps.run.outputs.sarif-file }}
+  findings:
+    description: Number of results in the SARIF file (check); 0 for other commands.
+    value: ${{ steps.run.outputs.findings }}
+  exit-code:
+    description: Exit code of know. Empty when the command was skipped.
+    value: ${{ steps.run.outputs.exit-code }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate inputs and detect context
+      id: prep
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        IN_COMMAND: ${{ inputs.command }}
+        IN_VERSION: ${{ inputs.version }}
+        IN_CONFIG: ${{ inputs.workspace-config }}
+        IN_WORKDIR: ${{ inputs.working-directory }}
+        IN_SARIF: ${{ inputs.sarif }}
+        IN_SARIF_FILE: ${{ inputs.sarif-file }}
+        IN_SARIF_CATEGORY: ${{ inputs.sarif-category }}
+        IN_FAIL_ON: ${{ inputs.fail-on }}
+        IN_HUB_URL: ${{ inputs.hub-url }}
+        IN_OIDC_AUDIENCE: ${{ inputs.oidc-audience }}
+        IN_COMMENT: ${{ inputs.comment }}
+        IN_ATTESTATION: ${{ inputs.attestation }}
+        EVENT_NAME: ${{ github.event_name }}
+        REPOSITORY: ${{ github.repository }}
+        PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        PUSH_BEFORE_SHA: ${{ github.event.before }}
+      run: |
+        set -euo pipefail
+        bash "$ACTION_PATH/scripts/prepare.sh"
+
+    - name: Resolve the Knowell version
+      id: version
+      if: steps.prep.outputs.run == 'true'
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        KNOWELL_VERSION: ${{ steps.prep.outputs.version }}
+      run: |
+        set -euo pipefail
+        bash "$ACTION_PATH/scripts/resolve-version.sh"
+
+    - name: Select the release asset
+      id: asset
+      if: steps.prep.outputs.run == 'true'
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        KNOWELL_VERSION: ${{ steps.version.outputs.version }}
+      run: |
+        set -euo pipefail
+        bash "$ACTION_PATH/scripts/asset-name.sh"
+
+    # Only the verified archive is cached. It is re-verified against SHA256SUMS on every run.
+    - name: Restore the archive cache
+      if: steps.prep.outputs.run == 'true'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/knowell-dl
+        key: knowell-${{ steps.version.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
+
+    - name: Download, verify and install know
+      id: install
+      if: steps.prep.outputs.run == 'true'
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        KNOWELL_VERSION: ${{ steps.version.outputs.version }}
+        KNOWELL_ARCHIVE: ${{ steps.asset.outputs.archive }}
+        KNOWELL_NAME: ${{ steps.asset.outputs.name }}
+        KNOWELL_EXE: ${{ steps.asset.outputs.exe }}
+        KNOWELL_DL_DIR: ${{ runner.temp }}/knowell-dl
+        KNOWELL_INSTALL_DIR: ${{ runner.temp }}/knowell-bin
+        KNOWELL_ATTESTATION: ${{ steps.prep.outputs.attestation }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        bash "$ACTION_PATH/scripts/install-know.sh"
+
+    - name: Run know
+      id: run
+      if: steps.prep.outputs.run == 'true'
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        KNOWELL_BIN: ${{ steps.install.outputs.bin-path }}
+        KNOWELL_COMMAND: ${{ steps.prep.outputs.command }}
+        KNOWELL_CONFIG: ${{ steps.prep.outputs.config }}
+        KNOWELL_WORKDIR: ${{ steps.prep.outputs.workdir }}
+        KNOWELL_FAIL_ON: ${{ steps.prep.outputs.fail-on }}
+        KNOWELL_HUB_URL: ${{ steps.prep.outputs.hub-url }}
+        KNOWELL_OIDC_AUDIENCE: ${{ steps.prep.outputs.oidc-audience }}
+        KNOWELL_SARIF_FILE: ${{ steps.prep.outputs.sarif-file }}
+        KNOWELL_DIFF_BASE: ${{ steps.prep.outputs.diff-base }}
+        KNOWELL_REPORT_FILE: ${{ runner.temp }}/knowell-report.md
+        KNOWELL_COMMIT: ${{ github.sha }}
+        KNOWELL_REF: ${{ github.ref }}
+      run: |
+        set -euo pipefail
+        bash "$ACTION_PATH/scripts/run-know.sh"
+
+    - name: Upload SARIF to code scanning
+      id: sarif
+      if: always() && steps.prep.outputs.upload-sarif == 'true' && steps.run.outputs.sarif-exists == 'true'
+      continue-on-error: true
+      uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+      with:
+        sarif_file: ${{ steps.run.outputs.sarif-file }}
+        category: ${{ steps.prep.outputs.sarif-category }}
+
+    - name: Explain a failed SARIF upload
+      if: always() && steps.sarif.outcome == 'failure'
+      shell: bash
+      run: |
+        echo "::warning::The SARIF upload failed. The job needs 'permissions: security-events: write', and code scanning must be available for this repository (public repositories, or GitHub Advanced Security / Code Security). The check result itself is unaffected."
+
+    - name: Post or update the report
+      if: always() && steps.run.outputs.report-exists == 'true' && steps.prep.outputs.comment == 'true' && steps.prep.outputs.fork == 'false'
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        KNOWELL_MODE: ${{ steps.prep.outputs.command == 'doc-drift' && 'issue' || 'pr-comment' }}
+        KNOWELL_REPOSITORY: ${{ github.repository }}
+        KNOWELL_PR_NUMBER: ${{ github.event.pull_request.number }}
+        KNOWELL_REPORT_FILE: ${{ steps.run.outputs.report-file }}
+      run: |
+        set -euo pipefail
+        bash "$ACTION_PATH/scripts/post-comment.sh"
+
+    - name: Fail on know's exit code
+      if: always() && steps.run.outputs.exit-code != '' && steps.run.outputs.exit-code != '0'
+      shell: bash
+      env:
+        KNOWELL_EXIT_CODE: ${{ steps.run.outputs.exit-code }}
+        KNOWELL_COMMAND: ${{ steps.prep.outputs.command }}
+      run: |
+        set -euo pipefail
+        echo "::error::know $KNOWELL_COMMAND exited with code $KNOWELL_EXIT_CODE"
+        exit 1

@@ -1,0 +1,28 @@
+{
+  "name": "knowell",
+  "version": "0.0.0",
+  "description": "Semantic code intelligence and shared memory for AI coding agents. Thin launcher for the `know` binary.",
+  "keywords": ["mcp", "code-search", "code-intelligence", "embeddings", "ai-agents"],
+  "homepage": "https://github.com/knowell-dev/knowell",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/knowell-dev/knowell.git",
+    "directory": "wrappers/npm"
+  },
+  "bugs": "https://github.com/knowell-dev/knowell/issues",
+  "license": "MIT OR Apache-2.0",
+  "bin": {
+    "know": "bin/know.js"
+  },
+  "files": ["bin/", "lib/", "README.md", "LICENSE-MIT", "LICENSE-APACHE"],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}

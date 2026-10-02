@@ -1,0 +1,4 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+bind go-const DockQueue = dock.queue
+bind go-const DockTopic = dock.updated
+bind go-const dockSubjects = dock.x | dock.y

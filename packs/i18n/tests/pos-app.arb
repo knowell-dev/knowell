@@ -1,0 +1,6 @@
+{
+  "@@locale": "de",
+  "gateTitle": "Tor",
+  "@gateTitle": { "description": "Title of the gate screen" },
+  "openUntil": "Geöffnet bis {time}"
+}

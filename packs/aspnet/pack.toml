@@ -1,0 +1,48 @@
+name = "aspnet"
+version = "1.0.0"
+description = "ASP.NET Core: attribute-routed controllers ([Route] on the class + [HttpGet(\"x\")] ...) and minimal APIs (app.MapGet(\"/x\", ...))."
+languages = ["csharp"]
+limits = """
+- Method-level `[Route]` attributes combined with `[HttpGet]` without a template are not read.
+- `MapGroup("/prefix")` prefixes of minimal APIs are not applied.
+- Conventional routes (`MapControllerRoute`) are not expanded; route constraints (`{id:guid}`) collapse to a parameter.
+- Paths are compared case-sensitively, but `[controller]` is lower-cased.
+"""
+
+[detect]
+nuget = ["Microsoft.AspNetCore*"]
+imports = ["Microsoft.AspNetCore"]
+
+[[bindings]]
+id = "class-route"
+query = "class_route.scm"
+languages = ["csharp"]
+scope = "file"
+name = "class"
+value = "{prefix}"
+
+[[rules]]
+id = "http-attribute"
+query = "http_attribute.scm"
+languages = ["csharp"]
+kind = "endpoint"
+role = "producer"
+key = "{verb|strip_prefix:Http|upper} {prefix}/{path}"
+symbol = "handler"
+anchor = "attribute"
+
+[rules.lookup]
+prefix = { binding = "class-route", by = "class" }
+
+[rules.tokens]
+"[controller]" = "{class|strip_suffix:Controller|lower}"
+"[action]" = "{handler|lower}"
+
+[[rules]]
+id = "minimal-api"
+query = "minimal_api.scm"
+languages = ["csharp"]
+kind = "endpoint"
+role = "producer"
+key = "{verb|strip_prefix:Map|upper} {path}"
+anchor = "path"

@@ -1,0 +1,13 @@
+enum Zone {
+  NORTH
+  SOUTH
+}
+
+/// Shelves inside a bay.
+model Shelf {
+  shelfId String @id @map("shelf_id")
+  zone    Zone
+  level   Int    @default(0) // floor level
+
+  @@map(name: "shelves")
+}

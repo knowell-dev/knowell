@@ -1,0 +1,59 @@
+#:schema https://raw.githubusercontent.com/knowell-dev/knowell/main/schemas/workspace.schema.json
+# Example workspace: a fictional online shop made of several repositories.
+version = 1
+
+[workspace]
+name = "shop"
+description = "Storefront, mobile app and the services behind them"
+# Knowell never guesses a branch: projects follow this unless they override it.
+track = "branch:development"
+# Content may be sent to the cloud embedding provider named below.
+data_policy = "cloud"
+exclude = ["**/generated/**", "**/*.min.js"]
+
+[workspace.embedding]
+provider = "gemini"
+model = "gemini-embedding-2"
+preset = "balanced"
+
+[[project]]
+name = "storefront-web"
+path = "storefront-web"
+remote = "https://github.com/example-shop/storefront-web.git"
+exclude = ["public/assets/**"]
+
+[[project]]
+name = "mobile-app"
+path = "mobile-app"
+remote = "https://github.com/example-shop/mobile-app.git"
+exclude = ["ios/Pods/**", "android/build/**"]
+
+[[project]]
+name = "billing-api"
+path = "billing-api"
+remote = "https://github.com/example-shop/billing-api.git"
+# Release branch of the server, tracked as last fetched from the remote.
+track = "remote:origin/release/2.x"
+# Payment code stays on this machine: embed it with the local model only.
+data_policy = "local-only"
+embedding = { provider = "local", preset = "compact" }
+exclude = ["fixtures/**"]
+
+[[project]]
+name = "orders-service"
+path = "orders-service"
+remote = "https://github.com/example-shop/orders-service.git"
+embedding = { preset = "extended" }
+
+[[project]]
+name = "notification-worker"
+path = "notification-worker"
+track = "worktree"
+exclude = ["templates/snapshots/**"]
+
+# Only part of a larger repository: the contracts live in a sub-directory.
+[[project]]
+name = "contracts"
+path = "platform-monorepo"
+root = "packages/contracts"
+track = "tag:v2.1.0"

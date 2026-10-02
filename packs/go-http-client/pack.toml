@@ -1,0 +1,21 @@
+name = "go-http-client"
+version = "1.0.0"
+description = "HTTP calls from Go's net/http: http.NewRequest / NewRequestWithContext (method + URL) and http.Get / http.Post / http.Head."
+languages = ["go"]
+limits = """
+- URLs assembled with `fmt.Sprintf` or `url.JoinPath` are recorded as unresolved.
+- Clients from other libraries (resty, req) are not recognised.
+"""
+
+[detect]
+imports = ["net/http"]
+
+[[rules]]
+id = "new-request"
+query = "new_request.scm"
+languages = ["go"]
+kind = "endpoint"
+role = "consumer"
+key = "{verb|http_method} {url}"
+anchor = "call"
+resolve = ["url"]

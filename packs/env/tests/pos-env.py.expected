@@ -1,0 +1,6 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+consumer env_name GATE_HOST @ HOST
+consumer env_name GATE_REGION @ Settings.gate_region
+consumer env_name GATE_TIMEOUT @ TIMEOUT
+consumer env_name GATE_TOKEN_FILE @ TOKEN_FILE
+consumer env_name RETRIES @ Settings.retries

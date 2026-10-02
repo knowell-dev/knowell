@@ -1,0 +1,5 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+bind router-prefix router = /v1/vouchers
+producer endpoint DELETE /v1/vouchers/{} @ delete_voucher
+producer endpoint GET /v1/vouchers/{} @ get_voucher
+producer endpoint POST /v1/vouchers @ create_voucher

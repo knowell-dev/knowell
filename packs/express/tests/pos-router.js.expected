@@ -1,0 +1,4 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+producer endpoint * /v1/ping @ <file>
+producer endpoint GET /v1/gizmos @ <file>
+producer endpoint POST /v1/gizmos/{}/enable @ <file>

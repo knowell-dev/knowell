@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Knowell panel not built</title>
+  </head>
+  <body>
+    <h1>The Knowell panel was not built into this binary</h1>
+    <p>
+      This server was compiled without <code>panel/dist</code>, so it serves this placeholder
+      page instead of the panel. The REST API under <code>/api/v1</code> works as usual.
+    </p>
+    <p>To include the panel, build it and then rebuild the server:</p>
+    <pre>python scripts/buildlock.py npm --prefix panel ci
+python scripts/buildlock.py npm --prefix panel run build
+cargo clean -p knowell-server
+python scripts/buildlock.py cargo build -p knowell</pre>
+    <p>
+      During panel development you can also point the server at a directory with
+      <code>PanelMode::Directory</code>, or run <code>npm run dev</code> in <code>panel/</code>.
+    </p>
+  </body>
+</html>

@@ -1,0 +1,31 @@
+[package]
+name = "knowell-pg-managed"
+description = "Managed embedded PostgreSQL for Knowell: install, start, stop, upgrade, backup."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
+[dependencies]
+# Binary download + checksum verification. This is the crate `postgresql_embedded`
+# itself builds on; see the README for why the higher-level `PostgreSQL` type is not used.
+postgresql_archive.workspace = true
+# CSPRNG for the generated superuser password.
+getrandom.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

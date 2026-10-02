@@ -1,0 +1,91 @@
+name = "python-orm"
+version = "1.0.0"
+description = "Python ORM models as table readers: SQLAlchemy declarative classes (`__tablename__` + `mapped_column` / `Column`) and Django models (`models.Model` fields, `Meta.db_table`)."
+languages = ["python"]
+limits = """
+- SQLAlchemy: only classes that set `__tablename__` literally; imperative mappings and `Table(...)` objects are not read. The column name is the first string argument of `mapped_column` / `Column`, else the attribute name.
+- Django: the default table is `<app>_<model>` with the app taken from the directory that holds `models.py`; the implicit `id` primary key, many-to-many tables and model inheritance are not added; `ForeignKey` / `OneToOneField` map to `<name>_id`.
+"""
+
+[detect]
+python = ["sqlalchemy", "flask-sqlalchemy", "sqlmodel", "django"]
+imports = ["sqlalchemy", "django.db", "sqlmodel", "flask_sqlalchemy"]
+
+# SQLAlchemy
+
+[[rules]]
+id = "sqlalchemy-model"
+query = "sqlalchemy_model.scm"
+languages = ["python"]
+kind = "table"
+role = "reads"
+key = "{table}"
+symbol = "entity"
+anchor = "entity"
+
+[rules.attrs]
+entity = "{entity}"
+
+[[rules]]
+id = "sqlalchemy-column"
+query = "sqlalchemy_column.scm"
+languages = ["python"]
+kind = "table"
+role = "reads"
+key = "{table}"
+symbol = "entity"
+anchor = "property"
+
+[rules.attrs]
+entity = "{entity}"
+column = "{column|else:property}"
+
+# Django
+
+[[bindings]]
+id = "django-table"
+query = "django_meta.scm"
+languages = ["python"]
+scope = "file"
+name = "model"
+value = "{table}"
+
+[[rules]]
+id = "django-field"
+query = "django_field.scm"
+languages = ["python"]
+kind = "table"
+role = "reads"
+key = "{table}"
+symbol = "entity"
+anchor = "property"
+
+[rules.lookup]
+table = { binding = "django-table", by = "entity" }
+
+[rules.defaults]
+table = "{path.dir}_{entity|lower}"
+
+[rules.attrs]
+entity = "{entity}"
+column = "{property}"
+
+[[rules]]
+id = "django-foreign-key"
+query = "django_foreign_key.scm"
+languages = ["python"]
+kind = "table"
+role = "reads"
+key = "{table}"
+symbol = "entity"
+anchor = "property"
+
+[rules.lookup]
+table = { binding = "django-table", by = "entity" }
+
+[rules.defaults]
+table = "{path.dir}_{entity|lower}"
+
+[rules.attrs]
+entity = "{entity}"
+column = "{property}_id"

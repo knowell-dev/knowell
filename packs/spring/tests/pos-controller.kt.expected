@@ -1,0 +1,4 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+bind class-prefix DockController = /v1/docks
+producer endpoint DELETE /v1/docks/{} @ DockController.delete
+producer endpoint GET /v1/docks/{} @ DockController.get

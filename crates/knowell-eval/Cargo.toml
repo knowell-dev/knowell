@@ -1,0 +1,30 @@
+[package]
+name = "knowell-eval"
+description = "Evaluation harness for Knowell: synthetic multi-repo fixtures, query sets, retrieval metrics, reports."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
+
+[dependencies]
+knowell-core.workspace = true
+knowell-lexical.workspace = true
+knowell-secrets.workspace = true
+knowell-source.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

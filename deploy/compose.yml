@@ -1,0 +1,94 @@
+# Knowell hub + PostgreSQL with pgvector.
+#
+#   cd deploy
+#   cp .env.example .env                 # non-secret settings
+#   printf '%s' "$(openssl rand -hex 24)" > secrets/postgres_password
+#   # secrets/database_url holds the connection URL for that password; see deploy/README.md
+#   docker compose up -d --build
+#
+# No secret value appears in this file: passwords and the database URL are Docker secrets
+# read from files under deploy/secrets/ (git-ignored). The panel is published on
+# 127.0.0.1 only; put a TLS reverse proxy in front of it to expose it to a team.
+name: knowell
+
+services:
+  db:
+    # Pinned by digest (tag shown for humans): pgvector 0.8.7 on PostgreSQL 17.
+    image: pgvector/pgvector:0.8.7-pg17@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
+    restart: unless-stopped
+    # Parallel HNSW index builds use /dev/shm; Docker's 64 MB default is too
+    # small for large embedding profiles.
+    shm_size: 512mb
+    environment:
+      POSTGRES_USER: knowell
+      POSTGRES_DB: knowell
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U knowell -d knowell"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    # Reachable only from the hub over the compose network: no published ports.
+    networks: [backend]
+    security_opt: ["no-new-privileges:true"]
+
+  hub:
+    image: ghcr.io/knowell-dev/knowell:${KNOWELL_IMAGE_TAG:-latest}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: runtime
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["serve", "--role", "hub"]
+    environment:
+      # The hub listens on all interfaces inside the container, so it must know the
+      # public URL clients use (Host/Origin allow-list). Override in .env.
+      KNOWELL_PUBLIC_URL: ${KNOWELL_PUBLIC_URL:-http://localhost:7420}
+    # Provider keys and other settings referenced from config/hub.toml (env:NAME) go in .env.
+    env_file:
+      - path: .env
+        required: false
+    secrets:
+      - database_url
+    volumes:
+      - knowell-data:/data
+      - ./config/hub.toml:/data/.knowell/config.toml:ro
+    ports:
+      # Loopback by default. Set KNOWELL_PANEL_BIND=0.0.0.0 only behind a TLS proxy or firewall.
+      - "${KNOWELL_PANEL_BIND:-127.0.0.1}:${KNOWELL_PANEL_PORT:-7420}:7420"
+    healthcheck:
+      # Until `know serve` exposes a health endpoint this checks the engine and its database.
+      test: ["CMD", "know", "doctor"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks: [backend, frontend]
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password
+  database_url:
+    file: ./secrets/database_url
+
+volumes:
+  pgdata:
+  knowell-data:
+
+networks:
+  backend:
+    internal: true
+  frontend:

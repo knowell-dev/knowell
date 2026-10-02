@@ -1,0 +1,5 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+bind go-client client = RouteService
+bind go-server-type server = RouteService
+consumer rpc RouteService/GetRoute @ Lookup
+producer rpc RouteService/GetRoute @ server.GetRoute

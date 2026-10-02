@@ -1,0 +1,35 @@
+name = "nextjs"
+version = "1.0.0"
+description = "Next.js route handlers: app router `route.ts` exports (GET/POST/...) and pages router `pages/api/**` handlers."
+languages = ["typescript", "tsx", "javascript", "jsx"]
+limits = """
+- `basePath` and `i18n` settings of `next.config.js` are not applied.
+- Catch-all segments (`[...slug]`, `[[...slug]]`) are recorded as one parameter segment.
+- Pages-router API handlers serve every method (`*`); method checks inside the handler are not read.
+- Middleware rewrites and redirects are not followed.
+"""
+
+[detect]
+npm = ["next"]
+imports = ["next/", "next"]
+
+[[rules]]
+id = "app-route"
+query = "app_route.scm"
+languages = ["typescript", "tsx", "javascript", "jsx"]
+kind = "endpoint"
+role = "producer"
+key = "{verb} {route}"
+route = "nextjs-app"
+symbol = "verb"
+
+[[rules]]
+id = "pages-api"
+query = "pages_api.scm"
+languages = ["typescript", "tsx", "javascript", "jsx"]
+kind = "endpoint"
+role = "producer"
+key = "* {route}"
+route = "nextjs-pages"
+symbol = "handler"
+anchor = "export"

@@ -1,0 +1,13 @@
+name = "prisma"
+version = "1.0.0"
+description = "Prisma schema models as table readers: table = @@map or the model name, columns = scalar fields (@map renames), relation fields excluded."
+languages = ["prisma"]
+limits = """
+- Parsed by a line scanner (no tree-sitter grammar for Prisma is bundled): one field per line, block attributes on their own lines.
+- Composite types, views and multi-file schemas (`prismaSchemaFolder`) are read file by file; `@@schema` is ignored.
+"""
+
+[[extractors]]
+id = "schema"
+extractor = "prisma"
+files = ["**/*.prisma"]

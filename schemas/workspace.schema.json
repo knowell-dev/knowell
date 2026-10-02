@@ -1,0 +1,274 @@
+{
+  "$defs": {
+    "DataPolicy": {
+      "description": "Whether content may leave the machine.",
+      "oneOf": [
+        {
+          "const": "local-only",
+          "description": "Nothing leaves this machine: only local embedding providers may be used.",
+          "type": "string"
+        },
+        {
+          "const": "cloud",
+          "description": "Content may be sent to the configured cloud embedding provider.",
+          "type": "string"
+        }
+      ]
+    },
+    "EmbeddingConfig": {
+      "additionalProperties": false,
+      "description": "Embedding settings. All fields are optional; a project's fields override the workspace's. `preset` and `dimensions` travel together: a project that sets either one replaces both workspace values.",
+      "properties": {
+        "dimensions": {
+          "description": "Vector size, 32 to 4000. Required when `preset = \"custom\"`; otherwise optional but must equal the preset's size. Requires `preset`.",
+          "format": "uint32",
+          "maximum": 4000,
+          "minimum": 32,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "model": {
+          "description": "Embedding model. Falls back to the provider's `model`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "preset": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EmbeddingPreset"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Vector size preset. Defaults to `balanced` (1536)."
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Name"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Name of a provider defined in the engine config (`[providers.<name>]`). Without any provider, only lexical and graph search are available."
+        }
+      },
+      "type": "object"
+    },
+    "EmbeddingPreset": {
+      "description": "Embedding vector size presets.",
+      "oneOf": [
+        {
+          "const": "compact",
+          "description": "768 dimensions: smallest index, fastest search.",
+          "type": "string"
+        },
+        {
+          "const": "balanced",
+          "description": "1536 dimensions: good quality/size balance (default).",
+          "type": "string"
+        },
+        {
+          "const": "extended",
+          "description": "3072 dimensions: best recall, largest index.",
+          "type": "string"
+        },
+        {
+          "const": "custom",
+          "description": "Any size from 32 to 4000; requires `dimensions`.",
+          "type": "string"
+        }
+      ]
+    },
+    "Name": {
+      "description": "Lowercase slug (a-z, 0-9, '-', '_'; max 64).",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+      "type": "string"
+    },
+    "ProjectConfig": {
+      "additionalProperties": false,
+      "description": "One `[[project]]` table.",
+      "properties": {
+        "data_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DataPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Data policy, overriding `workspace.data_policy`."
+        },
+        "embedding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EmbeddingConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Embedding overrides for this project."
+        },
+        "exclude": {
+          "description": "Extra exclude globs, appended to the workspace's.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name": {
+          "$ref": "#/$defs/Name",
+          "description": "Project name (lowercase slug), unique within the workspace."
+        },
+        "path": {
+          "description": "Directory of the project, relative to the directory holding this file, or absolute.",
+          "type": "string"
+        },
+        "remote": {
+          "description": "Clone URL of the repository. Informational only; never contacted without an explicit fetch request.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "root": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RepoPath"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Sub-directory (relative to `path`, `/`-separated) for monorepo projects that cover only part of a repository."
+        },
+        "track": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrackTarget"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Ref to follow, overriding `workspace.track`."
+        }
+      },
+      "required": [
+        "name",
+        "path"
+      ],
+      "type": "object"
+    },
+    "RepoPath": {
+      "description": "Repository-relative path, '/'-separated.",
+      "type": "string"
+    },
+    "TrackTarget": {
+      "description": "Ref to follow: branch:<name>, remote:<remote>/<branch>, tag:<name>, commit:<sha> or worktree.",
+      "examples": [
+        "branch:development"
+      ],
+      "pattern": "^(worktree|branch:.+|remote:[^/]+/.+|tag:.+|commit:([0-9a-f]{40}|[0-9a-f]{64}))$",
+      "type": "string"
+    },
+    "WorkspaceSection": {
+      "additionalProperties": false,
+      "description": "The `[workspace]` table.",
+      "properties": {
+        "data_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DataPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Default data policy for projects. Built-in default: `local-only`."
+        },
+        "description": {
+          "description": "Free-text description.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "embedding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EmbeddingConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Default embedding settings."
+        },
+        "exclude": {
+          "description": "Glob patterns (gitignore style) excluded from indexing in every project. Projects add their own on top.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name": {
+          "$ref": "#/$defs/Name",
+          "description": "Workspace name (lowercase slug)."
+        },
+        "track": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrackTarget"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Default ref for projects that do not set `track`. Knowell never assumes a default branch: every project needs a target from here or from itself."
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A workspace: a named group of projects indexed and searched together.\n\nStored as `knowell.toml` next to (or above) the projects. Settings in `[workspace]` are defaults that each `[[project]]` may override.",
+  "properties": {
+    "project": {
+      "description": "The projects of this workspace (`[[project]]` tables).",
+      "items": {
+        "$ref": "#/$defs/ProjectConfig"
+      },
+      "type": "array"
+    },
+    "version": {
+      "description": "Configuration format version. Must be `1`.",
+      "format": "uint32",
+      "maximum": 1,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "workspace": {
+      "$ref": "#/$defs/WorkspaceSection",
+      "description": "Workspace-wide settings and defaults."
+    }
+  },
+  "required": [
+    "version",
+    "workspace"
+  ],
+  "title": "WorkspaceConfig",
+  "type": "object"
+}

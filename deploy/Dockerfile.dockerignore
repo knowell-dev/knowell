@@ -1,0 +1,18 @@
+# Build-context filter for deploy/Dockerfile (BuildKit reads <Dockerfile>.dockerignore).
+# Keep the context small and keep private or local files out of every layer.
+.git
+.github
+target
+**/node_modules
+panel/dist
+panel/test-results
+panel/playwright-report
+.knowell
+PLAN.md
+.env
+.env.*
+**/*.env
+deploy/secrets
+wrappers
+dist
+*.profraw

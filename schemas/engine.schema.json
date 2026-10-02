@@ -1,0 +1,256 @@
+{
+  "$defs": {
+    "DatabaseConfig": {
+      "additionalProperties": false,
+      "description": "Database settings.",
+      "properties": {
+        "data_dir": {
+          "description": "Directory for managed database files. Only for `managed`; when omitted Knowell uses its default data directory.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/$defs/DatabaseMode",
+          "default": "managed",
+          "description": "`managed` (default) or `external`."
+        },
+        "url": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SecretRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Reference to the connection URL, e.g. `env:KNOWELL_DATABASE_URL`. Required for `external`, not allowed for `managed`."
+        }
+      },
+      "type": "object"
+    },
+    "DatabaseMode": {
+      "description": "Database ownership mode.",
+      "oneOf": [
+        {
+          "const": "managed",
+          "description": "Knowell starts and manages its own PostgreSQL instance.",
+          "type": "string"
+        },
+        {
+          "const": "external",
+          "description": "Knowell connects to a PostgreSQL server you operate; requires `url`.",
+          "type": "string"
+        }
+      ]
+    },
+    "HubConfig": {
+      "additionalProperties": false,
+      "description": "Connection to a hub (for `role = \"edge\"`).",
+      "properties": {
+        "token": {
+          "$ref": "#/$defs/SecretRef",
+          "description": "Reference to the access token, e.g. `env:KNOWELL_HUB_TOKEN`."
+        },
+        "url": {
+          "description": "Hub base URL, `http://` or `https://`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url",
+        "token"
+      ],
+      "type": "object"
+    },
+    "ProviderConfig": {
+      "additionalProperties": false,
+      "description": "One embedding provider.",
+      "properties": {
+        "api_key": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SecretRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Reference to the API key, e.g. `env:GEMINI_API_KEY`. Required for `gemini` and `voyage`, optional for `openai-compatible`, not allowed for `ollama`."
+        },
+        "base_url": {
+          "description": "Endpoint base URL (`http://` or `https://`). Required for `openai-compatible`; optional for `gemini` and `voyage`; for `ollama` it defaults to `http://127.0.0.1:11434` when omitted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/ProviderKind",
+          "description": "Provider kind."
+        },
+        "model": {
+          "description": "Default embedding model for workspaces that do not name one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
+    },
+    "ProviderKind": {
+      "description": "Kind of embedding provider.",
+      "oneOf": [
+        {
+          "const": "gemini",
+          "description": "Google Gemini API (cloud).",
+          "type": "string"
+        },
+        {
+          "const": "openai-compatible",
+          "description": "Any server speaking the OpenAI embeddings API; requires `base_url`.",
+          "type": "string"
+        },
+        {
+          "const": "ollama",
+          "description": "Local Ollama server.",
+          "type": "string"
+        },
+        {
+          "const": "voyage",
+          "description": "Voyage AI API (cloud).",
+          "type": "string"
+        }
+      ]
+    },
+    "SecretRef": {
+      "description": "Reference to a secret, never the secret itself: 'env:<VARIABLE>' or 'file:<path>'.",
+      "examples": [
+        "env:GEMINI_API_KEY",
+        "file:/run/secrets/gemini_api_key"
+      ],
+      "pattern": "^(env:[A-Za-z_][A-Za-z0-9_]*|file:.+)$",
+      "type": "string"
+    },
+    "ServerConfig": {
+      "additionalProperties": false,
+      "description": "Server role and listen address.",
+      "properties": {
+        "listen": {
+          "default": "127.0.0.1:7420",
+          "description": "Address to listen on, as `ip:port`. Defaults to `127.0.0.1:7420`. Every role except `hub` must use a loopback address so the local panel is never exposed to the network.",
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/ServerRole",
+          "default": "standalone",
+          "description": "Role of this process. Defaults to `standalone`."
+        }
+      },
+      "type": "object"
+    },
+    "ServerRole": {
+      "description": "Role of this process in a deployment.",
+      "oneOf": [
+        {
+          "const": "standalone",
+          "description": "One machine runs everything: panel, indexer and agent endpoint.",
+          "type": "string"
+        },
+        {
+          "const": "hub",
+          "description": "Central server shared by a team. The only role that may listen on a non-loopback address.",
+          "type": "string"
+        },
+        {
+          "const": "worker",
+          "description": "Indexing worker that serves a hub.",
+          "type": "string"
+        },
+        {
+          "const": "edge",
+          "description": "Developer machine that talks to a hub; requires the `[hub]` table.",
+          "type": "string"
+        }
+      ]
+    },
+    "TelemetryConfig": {
+      "additionalProperties": false,
+      "description": "Telemetry settings.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Whether anonymous usage telemetry may be sent. Defaults to `false`; Knowell never sends telemetry without this opt-in.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Engine configuration, normally stored at `~/.knowell/config.toml`.\n\nHolds machine-level settings only. Which projects exist and how they are indexed lives in the workspace file (`knowell.toml`). Secrets are never written here: use references such as `env:GEMINI_API_KEY`.",
+  "properties": {
+    "database": {
+      "$ref": "#/$defs/DatabaseConfig",
+      "default": {
+        "mode": "managed"
+      },
+      "description": "Where Knowell stores its index and memory."
+    },
+    "hub": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/HubConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Connection to the hub. Required when `server.role = \"edge\"`, and only allowed then."
+    },
+    "providers": {
+      "additionalProperties": false,
+      "default": {},
+      "description": "Embedding providers, keyed by a name that workspaces refer to.",
+      "patternProperties": {
+        "^[a-z0-9][a-z0-9_-]{0,63}$": {
+          "$ref": "#/$defs/ProviderConfig"
+        }
+      },
+      "type": "object"
+    },
+    "server": {
+      "$ref": "#/$defs/ServerConfig",
+      "default": {
+        "listen": "127.0.0.1:7420",
+        "role": "standalone"
+      },
+      "description": "Network role and listen address of this process."
+    },
+    "telemetry": {
+      "$ref": "#/$defs/TelemetryConfig",
+      "default": {
+        "enabled": false
+      },
+      "description": "Telemetry opt-in."
+    },
+    "version": {
+      "description": "Configuration format version. Must be `1`.",
+      "format": "uint32",
+      "maximum": 1,
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version"
+  ],
+  "title": "EngineConfig",
+  "type": "object"
+}

@@ -1,0 +1,51 @@
+[package]
+name = "knowell-engine"
+description = "Knowell engine facade: wires indexing, storage, lexical, semantic and graph search, memory into the MCP tools and the REST API."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
+
+[dependencies]
+knowell-auth.workspace = true
+knowell-config.workspace = true
+knowell-core.workspace = true
+knowell-embed.workspace = true
+# The `hybrid` retriever implements `knowell_eval::Retriever` so `know eval run`
+# can measure the engine (light: core, lexical, secrets, source, toml).
+knowell-eval.workspace = true
+knowell-graph.workspace = true
+knowell-link.workspace = true
+knowell-index.workspace = true
+knowell-knowledge.workspace = true
+knowell-lexical.workspace = true
+knowell-mcp.workspace = true
+knowell-parse.workspace = true
+knowell-query.workspace = true
+knowell-secrets.workspace = true
+knowell-server.workspace = true
+# Git refs and tree diffs for `analyze_impact` on committed diffs and for
+# detecting a caller's worktree.
+knowell-source.workspace = true
+knowell-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+# Creates and drops one throwaway database per integration test.
+sqlx.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

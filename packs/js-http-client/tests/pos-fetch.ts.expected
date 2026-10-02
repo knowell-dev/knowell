@@ -1,0 +1,4 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+consumer endpoint GET /health @ ping {host=status.example.com}
+consumer endpoint GET /v1/customers/{}/invoices (dynamic) @ loadInvoices
+consumer endpoint POST /v1/invoices/{}/void (dynamic) @ voidInvoice

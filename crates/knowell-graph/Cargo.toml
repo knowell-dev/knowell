@@ -1,0 +1,25 @@
+[package]
+name = "knowell-graph"
+description = "Code and contract graph for Knowell: typed evidence edges, bounded walks, flow tracing, impact analysis."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
+
+[dependencies]
+knowell-core.workspace = true
+petgraph.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,5 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+consumer topic yard.truck.arrived @ YardEvents.onArrival
+consumer topic yard.truck.left @ YardEvents.onDeparture
+consumer topic yard.truck.lost @ YardEvents.onDeparture
+producer topic yard.gate.opened @ YardEvents.gateOpened

@@ -1,0 +1,5 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+reads table shelves @ Shelf {column=level, entity=Shelf}
+reads table shelves @ Shelf {column=shelf_id, entity=Shelf}
+reads table shelves @ Shelf {column=zone, entity=Shelf}
+reads table shelves @ Shelf {entity=Shelf}

@@ -1,0 +1,4 @@
+# path: src/app/(shop)/api/orders/[orderId]/route.ts
+# Expected extractions (order-insensitive); empty for negative fixtures.
+producer endpoint DELETE /api/orders/{} @ DELETE
+producer endpoint GET /api/orders/{} @ GET

@@ -1,0 +1,45 @@
+openapi: 3.0.3
+info:
+  title: Example fleet API
+  version: 1.0.0
+servers:
+  - url: https://fleet.example.com/api
+paths:
+  /v1/trucks/{truckId}:
+    parameters:
+      - name: truckId
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getTruck
+      responses:
+        "200":
+          description: The truck.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Truck"
+    delete:
+      operationId: deleteTruck
+      responses:
+        "204":
+          description: Deleted.
+  /v1/trucks:
+    post:
+      operationId: createTruck
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Truck"
+      responses:
+        "201":
+          description: Created.
+components:
+  schemas:
+    Truck:
+      type: object
+      properties:
+        id: { type: string }
+        plate: { type: string }

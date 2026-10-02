@@ -1,0 +1,74 @@
+name = "redis-pubsub"
+version = "1.0.0"
+description = "Redis pub/sub channels: ioredis / node-redis (TS/JS), go-redis (Go) and redis-py (Python) publish / subscribe."
+languages = ["typescript", "tsx", "javascript", "go", "python"]
+limits = """
+- Pattern subscriptions (`psubscribe`) are not recorded.
+- Redis Streams (`XADD` / `XREADGROUP`) are not recorded.
+"""
+
+[detect]
+npm = ["ioredis", "redis"]
+go = ["github.com/redis/go-redis*", "github.com/go-redis/redis*"]
+python = ["redis"]
+imports = ["ioredis", "redis", "github.com/redis/go-redis", "github.com/go-redis/redis"]
+
+[[rules]]
+id = "js-publish"
+query = "publish.scm"
+languages = ["typescript", "tsx", "javascript"]
+kind = "topic"
+role = "producer"
+key = "{topic}"
+anchor = "topic"
+resolve = ["topic"]
+
+[[rules]]
+id = "js-subscribe"
+query = "subscribe.scm"
+languages = ["typescript", "tsx", "javascript"]
+kind = "topic"
+role = "consumer"
+key = "{topic}"
+anchor = "topic"
+resolve = ["topic"]
+
+[[rules]]
+id = "go-publish"
+query = "publish.scm"
+languages = ["go"]
+kind = "topic"
+role = "producer"
+key = "{topic}"
+anchor = "topic"
+resolve = ["topic"]
+
+[[rules]]
+id = "go-subscribe"
+query = "subscribe.scm"
+languages = ["go"]
+kind = "topic"
+role = "consumer"
+key = "{topic}"
+anchor = "topic"
+resolve = ["topic"]
+
+[[rules]]
+id = "py-publish"
+query = "publish.scm"
+languages = ["python"]
+kind = "topic"
+role = "producer"
+key = "{topic}"
+anchor = "topic"
+resolve = ["topic"]
+
+[[rules]]
+id = "py-subscribe"
+query = "subscribe.scm"
+languages = ["python"]
+kind = "topic"
+role = "consumer"
+key = "{topic}"
+anchor = "topic"
+resolve = ["topic"]

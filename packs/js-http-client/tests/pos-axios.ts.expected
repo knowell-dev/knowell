@@ -1,0 +1,4 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+consumer endpoint DELETE /v1/legacy/items @ purge
+consumer endpoint GET /v1/coupons @ listCoupons
+consumer endpoint POST /v1/coupons/{}/redeem (dynamic) @ redeem

@@ -1,0 +1,31 @@
+name = "express"
+version = "1.0.0"
+description = "Express, Fastify and Koa router route registrations (`router.get(\"/path\", handler)`, `fastify.route({ method, url })`)."
+languages = ["typescript", "tsx", "javascript", "jsx"]
+limits = """
+- Mount prefixes (`app.use("/api", router)`, Fastify `prefix` plugin options) are not applied.
+- Only literal paths are read; a route registered with a variable path is skipped.
+- `router.route("/x").get(...)` chains are not recognised.
+"""
+
+[detect]
+npm = ["express", "fastify", "koa-router", "@koa/router"]
+imports = ["express", "fastify", "koa-router", "@koa/router"]
+
+[[rules]]
+id = "route"
+query = "routes.scm"
+languages = ["typescript", "tsx", "javascript", "jsx"]
+kind = "endpoint"
+role = "producer"
+key = "{verb|upper} {path}"
+anchor = "path"
+
+[[rules]]
+id = "route-object"
+query = "route_object.scm"
+languages = ["typescript", "tsx", "javascript", "jsx"]
+kind = "endpoint"
+role = "producer"
+key = "{method|upper} {url}"
+anchor = "url"

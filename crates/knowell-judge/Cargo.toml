@@ -1,0 +1,33 @@
+[package]
+name = "knowell-judge"
+description = "Rerank and classification providers for Knowell: local models, hosted rerank APIs, all optional and off by default."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
+
+[dependencies]
+knowell-core.workspace = true
+knowell-secrets.workspace = true
+async-trait.workspace = true
+reqwest = { workspace = true, features = ["json", "rustls"] }
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+wiremock.workspace = true
+
+[lints]
+workspace = true

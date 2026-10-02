@@ -1,0 +1,33 @@
+name = "dart-http-client"
+version = "1.0.0"
+description = "HTTP calls from Dart / Flutter: dio (`dio.get('/x')`, including generic `get<T>`) and package:http (`http.post(Uri.parse('...'))`)."
+languages = ["dart"]
+limits = """
+- `BaseOptions(baseUrl: ...)` is not applied; paths are matched as written (absolute URLs lose their host).
+- Retrofit-style generated dio clients (`@GET` annotations in Dart) are not recognised.
+- `Uri.https(host, path)` constructions are not read.
+"""
+
+[detect]
+pub = ["dio", "http", "chopper"]
+imports = ["package:dio/", "package:http/"]
+
+[[rules]]
+id = "dio"
+query = "dio.scm"
+languages = ["dart"]
+kind = "endpoint"
+role = "consumer"
+key = "{verb|upper} {url}"
+anchor = "url"
+resolve = ["url"]
+
+[[rules]]
+id = "http-package"
+query = "http_package.scm"
+languages = ["dart"]
+kind = "endpoint"
+role = "consumer"
+key = "{verb|upper} {url}"
+anchor = "url"
+resolve = ["url"]

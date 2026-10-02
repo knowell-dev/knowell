@@ -1,0 +1,62 @@
+name = "gorm"
+version = "1.0.0"
+description = "GORM models: structs with at least one `gorm:` tag, as table readers with their columns (`column:` tag or snake_case field name, `-` skipped)."
+languages = ["go"]
+limits = """
+- Table names: a `TableName()` method returning a literal in the same file, else GORM's default (snake_case plural of the struct name, naive English pluralisation).
+- Embedded structs (`gorm.Model`) and custom naming strategies are not expanded.
+- Unexported fields are columns only when tagged.
+"""
+
+[[bindings]]
+id = "table-name"
+query = "table_name.scm"
+languages = ["go"]
+scope = "file"
+name = "model"
+value = "{table}"
+
+[[rules]]
+id = "model"
+query = "model.scm"
+languages = ["go"]
+kind = "table"
+role = "reads"
+key = "{table}"
+symbol = "model"
+anchor = "model"
+
+[rules.lookup]
+table = { binding = "table-name", by = "model" }
+
+[rules.defaults]
+table = "{model|snake|plural}"
+
+[rules.attrs]
+entity = "{model}"
+
+[[rules]]
+id = "field"
+query = "field.scm"
+languages = ["go"]
+kind = "table"
+role = "reads"
+key = "{table}"
+symbol = "model"
+anchor = "field"
+requires_rule = "model"
+
+[rules.lookup]
+table = { binding = "table-name", by = "model" }
+
+[rules.defaults]
+table = "{model|snake|plural}"
+default_column = "{field|snake}"
+skip = "{tag|gotag:gorm:-}"
+
+[rules.unless]
+skip = "-"
+
+[rules.attrs]
+entity = "{model}"
+column = "{tag|gotag:gorm:column|else:default_column}"

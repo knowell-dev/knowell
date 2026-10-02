@@ -1,0 +1,13 @@
+#:schema ../../schemas/engine.schema.json
+# Engine configuration for the hub container (mounted at ~/.knowell/config.toml).
+# Secrets are referenced, never written here: `file:` points at a Docker secret.
+version = 1
+
+[server]
+role = "hub"
+# Inside the container; the host port mapping in compose.yml decides who can reach it.
+listen = "0.0.0.0:7420"
+
+[database]
+mode = "external"
+url = "file:/run/secrets/database_url"

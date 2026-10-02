@@ -1,0 +1,74 @@
+name = "nats"
+version = "1.0.0"
+description = "NATS publishers and subscribers: nats.js (TS/JS), nats.go (including JetStream publish and queue subscriptions) and nats-py."
+languages = ["typescript", "tsx", "javascript", "go", "python"]
+limits = """
+- Subject wildcards (`orders.*`, `orders.>`) in subscriptions are kept literally and only link to an identical subject.
+- Request / reply (`request`, `respond`) is not recorded.
+"""
+
+[detect]
+npm = ["nats", "nats.ws"]
+go = ["github.com/nats-io/nats.go"]
+python = ["nats-py"]
+imports = ["nats", "github.com/nats-io/nats.go"]
+
+[[rules]]
+id = "js-publish"
+query = "publish.scm"
+languages = ["typescript", "tsx", "javascript"]
+kind = "topic"
+role = "producer"
+key = "{topic}"
+anchor = "topic"
+resolve = ["topic"]
+
+[[rules]]
+id = "js-subscribe"
+query = "subscribe.scm"
+languages = ["typescript", "tsx", "javascript"]
+kind = "topic"
+role = "consumer"
+key = "{topic}"
+anchor = "topic"
+resolve = ["topic"]
+
+[[rules]]
+id = "go-publish"
+query = "publish.scm"
+languages = ["go"]
+kind = "topic"
+role = "producer"
+key = "{topic}"
+anchor = "topic"
+resolve = ["topic"]
+
+[[rules]]
+id = "go-subscribe"
+query = "subscribe.scm"
+languages = ["go"]
+kind = "topic"
+role = "consumer"
+key = "{topic}"
+anchor = "topic"
+resolve = ["topic"]
+
+[[rules]]
+id = "py-publish"
+query = "publish.scm"
+languages = ["python"]
+kind = "topic"
+role = "producer"
+key = "{topic}"
+anchor = "topic"
+resolve = ["topic"]
+
+[[rules]]
+id = "py-subscribe"
+query = "subscribe.scm"
+languages = ["python"]
+kind = "topic"
+role = "consumer"
+key = "{topic}"
+anchor = "topic"
+resolve = ["topic"]

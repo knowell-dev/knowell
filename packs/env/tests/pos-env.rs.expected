@@ -1,0 +1,6 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+consumer env_name BAY_BUILD @ load
+consumer env_name BAY_HOME @ load
+consumer env_name BAY_LOG_LEVEL @ load
+consumer env_name BAY_PORT @ port
+consumer env_name {} (unresolved) @ required

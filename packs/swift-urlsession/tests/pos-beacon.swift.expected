@@ -1,0 +1,2 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+consumer endpoint GET /v1/beacons/ping @ BeaconService.ping {host=telemetry.example.com}

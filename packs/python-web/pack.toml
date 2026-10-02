@@ -1,0 +1,51 @@
+name = "python-web"
+version = "1.0.0"
+description = "FastAPI and Flask routes: `@app.get(\"/x\")`, `@router.post(...)` with `APIRouter(prefix=...)`, `@bp.route(..., methods=[...])` with `Blueprint(url_prefix=...)`."
+languages = ["python"]
+limits = """
+- `app.include_router(router, prefix=...)` and `app.register_blueprint(bp, url_prefix=...)` prefixes are not applied (the router's own prefix is).
+- `add_api_route` / `add_url_rule` calls and class-based views are not recognised.
+- Routes whose path is not a literal string are skipped.
+"""
+
+[detect]
+python = ["fastapi", "flask", "starlette", "quart"]
+imports = ["fastapi", "flask", "starlette", "quart"]
+
+[[bindings]]
+id = "router-prefix"
+query = "router_prefix.scm"
+languages = ["python"]
+scope = "file"
+name = "router"
+value = "{prefix}"
+
+[[rules]]
+id = "verb-decorator"
+query = "routes.scm"
+languages = ["python"]
+kind = "endpoint"
+role = "producer"
+key = "{verb|upper} {router_prefix}{path}"
+symbol = "handler"
+anchor = "decorator"
+
+[rules.lookup]
+router_prefix = { binding = "router-prefix", by = "router" }
+
+[[rules]]
+id = "route-decorator"
+query = "route.scm"
+languages = ["python"]
+kind = "endpoint"
+role = "producer"
+key = "{methods|upper} {router_prefix}{path}"
+symbol = "handler"
+anchor = "decorator"
+resolve = ["methods"]
+
+[rules.lookup]
+router_prefix = { binding = "router-prefix", by = "router" }
+
+[rules.defaults]
+methods = "GET"

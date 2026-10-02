@@ -1,0 +1,138 @@
+name = "env"
+version = "1.0.0"
+description = "Environment variable NAMES: reads in code (process.env, os.Getenv, os.environ / getenv, pydantic BaseSettings fields, std::env::var, System.getenv, Environment.GetEnvironmentVariable, String.fromEnvironment) and declarations in docker-compose `environment:` and Kubernetes `env:`. Values are never read or kept."
+languages = ["typescript", "tsx", "javascript", "jsx", "go", "python", "rust", "java", "kotlin", "csharp", "dart", "yaml"]
+limits = """
+- Only names are recorded; a value next to a name is never decoded, copied or stored.
+- `.env*` files are never opened (excluded by path before reading).
+- Helper functions that wrap the env API (`getenv("X", default)`, `required("X")`) are matched heuristically by name, and only for UPPER_SNAKE literal arguments.
+- `envFrom` / `env_file` references and Kubernetes ConfigMap / Secret keys are not expanded into names.
+- pydantic `BaseSettings` fields map to upper-cased names; `env_prefix` and field aliases are not applied.
+"""
+
+[[extractors]]
+id = "compose"
+extractor = "compose-env"
+files = ["**/*.yaml", "**/*.yml"]
+
+[[extractors]]
+id = "kubernetes"
+extractor = "kubernetes-env"
+files = ["**/*.yaml", "**/*.yml"]
+
+[[rules]]
+id = "js-process-env"
+query = "process_env.scm"
+languages = ["typescript", "tsx", "javascript", "jsx"]
+kind = "env_name"
+role = "consumer"
+key = "{name}"
+anchor = "name"
+
+[[rules]]
+id = "js-process-env-index"
+query = "process_env_index.scm"
+languages = ["typescript", "tsx", "javascript", "jsx"]
+kind = "env_name"
+role = "consumer"
+key = "{name}"
+anchor = "name"
+resolve = ["name"]
+
+[[rules]]
+id = "go-getenv"
+query = "getenv.scm"
+languages = ["go"]
+kind = "env_name"
+role = "consumer"
+key = "{name}"
+anchor = "name"
+resolve = ["name"]
+
+[[rules]]
+id = "go-helper"
+query = "helper.scm"
+languages = ["go"]
+kind = "env_name"
+role = "consumer"
+key = "{name}"
+anchor = "name"
+evidence = "heuristic"
+key_shape = "upper-snake"
+
+[[rules]]
+id = "python-environ"
+query = "environ.scm"
+languages = ["python"]
+kind = "env_name"
+role = "consumer"
+key = "{name}"
+anchor = "name"
+resolve = ["name"]
+
+[[rules]]
+id = "python-settings"
+query = "settings.scm"
+languages = ["python"]
+kind = "env_name"
+role = "consumer"
+key = "{field|upper}"
+anchor = "field"
+
+[[rules]]
+id = "rust-env-var"
+query = "env_var.scm"
+languages = ["rust"]
+kind = "env_name"
+role = "consumer"
+key = "{name}"
+anchor = "name"
+resolve = ["name"]
+
+[[rules]]
+id = "rust-helper"
+query = "helper.scm"
+languages = ["rust"]
+kind = "env_name"
+role = "consumer"
+key = "{name}"
+anchor = "name"
+evidence = "heuristic"
+key_shape = "upper-snake"
+
+[[rules]]
+id = "java-getenv"
+query = "getenv.scm"
+languages = ["java"]
+kind = "env_name"
+role = "consumer"
+key = "{name}"
+anchor = "name"
+resolve = ["name"]
+
+[[rules]]
+id = "kotlin-getenv"
+query = "getenv.scm"
+languages = ["kotlin"]
+kind = "env_name"
+role = "consumer"
+key = "{name}"
+anchor = "name"
+
+[[rules]]
+id = "csharp-getenv"
+query = "getenv.scm"
+languages = ["csharp"]
+kind = "env_name"
+role = "consumer"
+key = "{name}"
+anchor = "name"
+
+[[rules]]
+id = "dart-from-environment"
+query = "from_environment.scm"
+languages = ["dart"]
+kind = "env_name"
+role = "consumer"
+key = "{name}"
+anchor = "name"

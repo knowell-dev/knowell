@@ -1,0 +1,5 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+bind group-prefix v2 = /v2
+producer endpoint DELETE /v2/crates/{} @ Routes
+producer endpoint GET /v1/crates/{} @ Routes
+producer endpoint POST /v2/crates @ Routes

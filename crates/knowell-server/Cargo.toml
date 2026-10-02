@@ -1,0 +1,52 @@
+[package]
+name = "knowell-server"
+description = "HTTP server for Knowell: versioned REST API with SSE progress, embedded panel, webhooks, MCP over Streamable HTTP mount."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
+# `build.rs` embeds `panel/dist` when it exists, the placeholder page otherwise.
+build = "build.rs"
+
+[dependencies]
+axum.workspace = true
+# The SSE progress stream is built with `futures::stream::unfold`.
+futures.workspace = true
+hmac.workspace = true
+include_dir.workspace = true
+knowell-auth.workspace = true
+knowell-config.workspace = true
+knowell-core.workspace = true
+knowell-store.workspace = true
+mime_guess.workspace = true
+# Webhook secrets are held as `SecretString` (redacted `Debug`, zeroized on drop).
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+tower.workspace = true
+# `catch-panic`: a panicking dependency answers 500 problem+json instead of dropping the connection.
+tower-http = { workspace = true, features = ["catch-panic"] }
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+# Store-backed tests create and drop their own databases.
+sqlx.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+# `ServiceExt::oneshot` drives the router in tests.
+tower = { workspace = true, features = ["util"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,6 @@
+{
+  "dock": {
+    "banner": { "title": "Dock", "subtitle": "Übersicht" },
+    "status": { "open": "Offen", "closed": "Geschlossen" }
+  }
+}

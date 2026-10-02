@@ -1,0 +1,5 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+producer endpoint DELETE /v1/widgets/{} @ WidgetsController.remove
+producer endpoint GET /v1/widgets @ WidgetsController.list
+producer endpoint GET /v1/widgets/{} @ WidgetsController.get
+producer endpoint POST /v1/widgets/{}/archive @ WidgetsController.archive

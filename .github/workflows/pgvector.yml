@@ -1,0 +1,139 @@
+# pgvector bundles for managed PostgreSQL mode.
+#
+# Builds pgvector from a checksum-verified source tarball against the PostgreSQL
+# binaries the managed mode installs (theseus-rs/postgresql-binaries, digests pinned in
+# dist/pg-binaries.json), once per PostgreSQL major (17, 18) and platform. Each bundle:
+#   lib/vector.<so|dylib|dll>, share/extension/vector.control,
+#   share/extension/vector--*.sql, LICENSE-pgvector, manifest.json
+# The release workflow calls this with attest=true and attaches the files to the release.
+# Windows on ARM is not built: no PostgreSQL binaries exist for that target.
+name: pgvector
+
+on:
+  workflow_call:
+    inputs:
+      attest:
+        description: Create build provenance attestations for the bundles
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      attest:
+        description: Create build provenance attestations for the bundles
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  # Bump version and checksum together; the checksum is of the GitHub source tarball.
+  PGVECTOR_VERSION: 0.8.7
+  PGVECTOR_SHA256: cac0b10c360f05b2d521200105ba3697e773d4cd3731f5a915a7e37ebe0bea85
+  PGVECTOR_URL: https://github.com/pgvector/pgvector/archive/refs/tags/v0.8.7.tar.gz
+
+jobs:
+  bundle:
+    name: pgvector pg${{ matrix.pg_major }} ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write # build provenance (only used when attest is true)
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_major: ["17", "18"]
+        include:
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
+          - { target: x86_64-apple-darwin, os: macos-15-intel }
+          - { target: aarch64-apple-darwin, os: macos-14 }
+          - { target: x86_64-pc-windows-msvc, os: windows-2022 }
+    defaults:
+      run:
+        shell: bash
+    env:
+      PG_MAJOR: ${{ matrix.pg_major }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Fetch PostgreSQL binaries (digest pinned)
+        id: pg
+        run: |
+          set -euo pipefail
+          root=$(python dist/pgvector_bundle.py fetch-pg --major "$PG_MAJOR" --target "$TARGET" --dest "$RUNNER_TEMP/pg")
+          version=$(python -c 'import json,sys; sys.stdout.write(json.load(open("dist/pg-binaries.json"))["majors"][sys.argv[1]]["version"])' "$PG_MAJOR")
+          echo "root=$root" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch pgvector source (checksum verified)
+        run: |
+          set -euo pipefail
+          python dist/pgvector_bundle.py fetch-src --url "$PGVECTOR_URL" --sha256 "$PGVECTOR_SHA256" --dest "$RUNNER_TEMP/pgvector.tar.gz"
+          mkdir -p "$RUNNER_TEMP/pgvector-src"
+          tar -xzf "$RUNNER_TEMP/pgvector.tar.gz" -C "$RUNNER_TEMP/pgvector-src" --strip-components=1
+
+      - name: Build and install (Unix)
+        if: runner.os != 'Windows'
+        env:
+          PGROOT: ${{ steps.pg.outputs.root }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/pgvector-src"
+          # OPTFLAGS="" drops -march=native so the bundle runs on any CPU of the target.
+          make -j4 PG_CONFIG="$PGROOT/bin/pg_config" OPTFLAGS=""
+          make PG_CONFIG="$PGROOT/bin/pg_config" install
+
+      - name: Set up MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          arch: x64
+
+      - name: Build and install (Windows, MSVC)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          PGROOT: ${{ steps.pg.outputs.root }}
+        run: |
+          Set-Location (Join-Path $env:RUNNER_TEMP 'pgvector-src')
+          nmake /NOLOGO /F Makefile.win
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          nmake /NOLOGO /F Makefile.win install
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Package bundle and manifest
+        env:
+          PGROOT: ${{ steps.pg.outputs.root }}
+          PG_VERSION: ${{ steps.pg.outputs.version }}
+        run: |
+          set -euo pipefail
+          python dist/pgvector_bundle.py package \
+            --root "$PGROOT" --src "$RUNNER_TEMP/pgvector-src" \
+            --target "$TARGET" --pg-major "$PG_MAJOR" --pg-version "$PG_VERSION" \
+            --pgvector-version "$PGVECTOR_VERSION" \
+            --source-url "$PGVECTOR_URL" --source-sha256 "$PGVECTOR_SHA256" \
+            --out "$GITHUB_WORKSPACE/out"
+          ls -l out
+
+      - name: Attest build provenance
+        if: inputs.attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: out/pgvector-*.tar.gz
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pgvector-${{ matrix.pg_major }}-${{ matrix.target }}
+          path: out/pgvector-*
+          if-no-files-found: error
+          retention-days: 14

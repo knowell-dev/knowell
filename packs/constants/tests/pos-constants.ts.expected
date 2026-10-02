@@ -1,0 +1,3 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+bind ts-const DOCK_TOPIC = dock.updated
+bind ts-const PATHS = /a | /b

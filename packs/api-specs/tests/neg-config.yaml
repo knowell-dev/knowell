@@ -1,0 +1,6 @@
+# Looks like YAML with paths, but is not an OpenAPI document.
+paths:
+  /v1/trucks:
+    get: true
+build:
+  target: release

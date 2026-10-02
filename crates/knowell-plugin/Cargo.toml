@@ -1,0 +1,36 @@
+[package]
+name = "knowell-plugin"
+description = "Sandboxed WebAssembly plugin host for Knowell language, framework, source and provider adapters."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
+
+[dependencies]
+knowell-core.workspace = true
+serde.workspace = true
+# SHA-256 pins plugin components in manifests. Already in the dependency
+# graph through wasmtime-environ, so this adds no new crate.
+sha2 = { version = "0.10", default-features = false }
+thiserror.workspace = true
+toml.workspace = true
+tracing.workspace = true
+# Minimal feature set: compile (cranelift) and run components, plus the
+# on-disk compilation cache. No WAT parser, GC, threads, profiling, debug
+# builtins, pooling allocator or component-model async.
+wasmtime = { workspace = true, features = ["runtime", "cranelift", "component-model", "cache", "std"] }
+# WASI preview 2 only (p2 needs wasmtime's `async` feature internally; the
+# host uses the synchronous bindings).
+wasmtime-wasi = { workspace = true, features = ["p2"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

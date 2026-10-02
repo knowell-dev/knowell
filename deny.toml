@@ -1,0 +1,39 @@
+# cargo-deny: licenses, advisories, bans, sources. Run: cargo deny check
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+# Permissive licenses only. Strong copyleft (GPL/LGPL/AGPL) is deliberately absent.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "Unlicense",
+    # PostgreSQL License (OSI approved, permissive): the managed-PostgreSQL downloader.
+    "PostgreSQL",
+    # Permissive data licence of the Mozilla root certificate bundle (webpki-roots).
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -1,0 +1,4 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+bind py-stub stub = RouteService
+consumer rpc RouteService/GetRoute @ lookup
+producer rpc RouteService/GetRoute @ RouteServicer.GetRoute

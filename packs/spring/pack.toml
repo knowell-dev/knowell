@@ -1,0 +1,51 @@
+name = "spring"
+version = "1.0.0"
+description = "Spring MVC / WebFlux controllers in Java and Kotlin: @RestController/@Controller classes with @RequestMapping prefixes and @GetMapping/@PostMapping/... or @RequestMapping(method = ...) handlers."
+languages = ["java", "kotlin"]
+limits = """
+- Only the first path of a mapping is read (`@GetMapping({"/a", "/b"})` gives `/a`).
+- `server.servlet.context-path` and `spring.mvc.servlet.path` are not applied.
+- Prefixes inherited from superclasses or interfaces are not applied.
+- Functional routes (`RouterFunctions.route()`, Kotlin `router { }`) are not recognised.
+"""
+
+[detect]
+maven = ["org.springframework.boot:", "org.springframework:spring-web"]
+imports = ["org.springframework.web.bind.annotation"]
+
+[[bindings]]
+id = "class-prefix"
+query = "class_prefix.scm"
+languages = ["java", "kotlin"]
+scope = "file"
+name = "class"
+value = "{prefix}"
+
+[[rules]]
+id = "mapping"
+query = "mapping.scm"
+languages = ["java", "kotlin"]
+kind = "endpoint"
+role = "producer"
+key = "{verb|strip_suffix:Mapping|upper} {prefix}/{path}"
+symbol = "handler"
+anchor = "mapping"
+
+[rules.lookup]
+prefix = { binding = "class-prefix", by = "class" }
+
+[[rules]]
+id = "request-mapping"
+query = "request_mapping.scm"
+languages = ["java"]
+kind = "endpoint"
+role = "producer"
+key = "{method|http_method} {prefix}/{path}"
+symbol = "handler"
+anchor = "mapping"
+
+[rules.lookup]
+prefix = { binding = "class-prefix", by = "class" }
+
+[rules.defaults]
+method = "*"

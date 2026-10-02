@@ -1,0 +1,6 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+bind router-prefix bp = /v1/ledgers
+producer endpoint GET /status @ status
+producer endpoint GET /v1/ledgers/{} @ ledger
+producer endpoint PATCH /v1/ledgers/{} @ ledger
+producer endpoint POST /v1/ledgers/close @ close

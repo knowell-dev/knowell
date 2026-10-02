@@ -1,0 +1,3 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+consumer topic conveyor.stopped @ Wire
+producer topic conveyor.started @ Wire

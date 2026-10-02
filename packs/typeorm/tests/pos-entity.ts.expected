@@ -1,0 +1,6 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+reads table docks @ DockEntity {column=capacity, entity=DockEntity}
+reads table docks @ DockEntity {column=created_at, entity=DockEntity}
+reads table docks @ DockEntity {column=dock_code, entity=DockEntity}
+reads table docks @ DockEntity {column=id, entity=DockEntity}
+reads table docks @ DockEntity {entity=DockEntity}

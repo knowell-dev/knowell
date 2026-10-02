@@ -1,0 +1,13 @@
+services:
+  depot:
+    image: example/depot:1.0
+    environment:
+      DEPOT_REGION: eu-west
+      DEPOT_TOKEN: ${DEPOT_TOKEN}
+    ports:
+      - "8080:8080"
+  worker:
+    image: example/worker:1.0
+    environment:
+      - WORKER_CONCURRENCY=4
+      - WORKER_SECRET

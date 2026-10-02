@@ -1,0 +1,149 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/knowell-dev/knowell"
+homepage = "https://github.com/knowell-dev/knowell"
+authors = ["Knowell contributors"]
+keywords = ["code-search", "semantic-search", "mcp", "code-intelligence", "embeddings"]
+categories = ["development-tools", "command-line-utilities"]
+publish = false
+
+[workspace.dependencies]
+# Internal crates
+knowell-core = { path = "crates/knowell-core", version = "0.0.0" }
+knowell-config = { path = "crates/knowell-config", version = "0.0.0" }
+knowell-secrets = { path = "crates/knowell-secrets", version = "0.0.0" }
+knowell-source = { path = "crates/knowell-source", version = "0.0.0" }
+knowell-lexical = { path = "crates/knowell-lexical", version = "0.0.0" }
+knowell-eval = { path = "crates/knowell-eval", version = "0.0.0" }
+knowell-store = { path = "crates/knowell-store", version = "0.0.0" }
+knowell-pg-managed = { path = "crates/knowell-pg-managed", version = "0.0.0" }
+knowell-parse = { path = "crates/knowell-parse", version = "0.0.0" }
+knowell-embed = { path = "crates/knowell-embed", version = "0.0.0" }
+knowell-mcp = { path = "crates/knowell-mcp", version = "0.0.0" }
+knowell-knowledge = { path = "crates/knowell-knowledge", version = "0.0.0" }
+knowell-query = { path = "crates/knowell-query", version = "0.0.0" }
+knowell-graph = { path = "crates/knowell-graph", version = "0.0.0" }
+knowell-auth = { path = "crates/knowell-auth", version = "0.0.0" }
+knowell-scip = { path = "crates/knowell-scip", version = "0.0.0" }
+knowell-judge = { path = "crates/knowell-judge", version = "0.0.0" }
+knowell-plugin = { path = "crates/knowell-plugin", version = "0.0.0" }
+knowell-setup = { path = "crates/knowell-setup", version = "0.0.0" }
+knowell-server = { path = "crates/knowell-server", version = "0.0.0" }
+knowell-link = { path = "crates/knowell-link", version = "0.0.0" }
+knowell-index = { path = "crates/knowell-index", version = "0.0.0" }
+knowell-engine = { path = "crates/knowell-engine", version = "0.0.0" }
+
+# External crates — add new ones here, never directly in a member crate.
+anyhow = "1"
+async-trait = "0.1"
+axum = "0.8"
+bytes = "1"
+futures = "0.3"
+getrandom = "0.4"
+gix = { version = "0.88", default-features = false }
+notify = "8"
+petgraph = "0.8"
+pgvector = { version = "0.4", features = ["sqlx"] }
+postgresql_archive = { version = "0.21", default-features = false, features = ["theseus", "tls-rustls-aws-lc-rs"] }
+protobuf = "=3.7.2"
+reqwest = { version = "0.13", default-features = false }
+rmcp = "3.5"
+scip = "0.10"
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres", "migrate", "macros", "uuid", "json", "time"] }
+streaming-iterator = "0.1"
+time = { version = "0.3", features = ["serde", "formatting", "parsing", "macros"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "process", "signal", "net"] }
+tokio-util = "0.7"
+tower = "0.5"
+tower-http = { version = "0.7", default-features = false }
+tree-sitter = "0.27"
+tree-sitter-language = "0.1"
+url = { version = "2.5", features = ["serde"] }
+uuid = { version = "1.26", features = ["v7", "serde"] }
+wasmtime = { version = "49", default-features = false }
+wasmtime-wasi = { version = "49", default-features = false }
+# tree-sitter grammars (knowell-parse)
+tree-sitter-bash = "0.25"
+tree-sitter-c = "0.24"
+tree-sitter-c-sharp = "0.23"
+tree-sitter-cpp = "0.23"
+tree-sitter-css = "0.25"
+tree-sitter-dart = "0.2"
+tree-sitter-go = "0.25"
+tree-sitter-java = "0.23"
+tree-sitter-javascript = "0.25"
+tree-sitter-json = "0.24"
+tree-sitter-kotlin-ng = "1.1"
+tree-sitter-md = "0.5"
+tree-sitter-php = "0.24"
+tree-sitter-proto = "0.6"
+tree-sitter-python = "0.25"
+tree-sitter-ruby = "0.23"
+tree-sitter-rust = "0.24"
+tree-sitter-scala = "0.26"
+tree-sitter-sequel = "0.3"
+tree-sitter-swift = "0.7"
+tree-sitter-toml-ng = "0.7"
+tree-sitter-typescript = "0.23"
+tree-sitter-yaml = "0.7"
+blake3 = "1.8"
+clap = { version = "4.6", features = ["derive"] }
+globset = "0.4"
+hmac = "0.13"
+ignore = "0.4"
+include_dir = "0.7"
+mime_guess = "2"
+regex = "1.13"
+schemars = "1.2"
+secrecy = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+subtle = "2.6"
+tantivy = "0.26"
+thiserror = "2"
+toml = "1.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Dev-only
+pretty_assertions = "1.4"
+tempfile = "3.27"
+wiremock = "0.6"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+# Knowell processes untrusted repository content inside long-running servers:
+# a panic is an outage, so panicking shortcuts are denied outside tests.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+print_stdout = "warn"
+print_stderr = "warn"
+
+[profile.dev]
+# Smaller debug info keeps incremental builds and CI caches light.
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = "symbols"

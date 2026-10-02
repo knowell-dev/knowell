@@ -1,0 +1,3 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+bind python-const DOCK_TOPIC = dock.updated
+bind python-const QUEUE = dock.queue

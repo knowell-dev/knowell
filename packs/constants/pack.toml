@@ -1,0 +1,89 @@
+name = "constants"
+version = "1.0.0"
+description = "Module-level string constants (and string lists) of TS/JS, Python, Go, Rust, Java, Kotlin, Dart and C#; other packs resolve identifiers such as topic or URL constants through them."
+languages = ["typescript", "tsx", "javascript", "python", "go", "rust", "java", "kotlin", "dart", "csharp"]
+limits = """
+- Only module-level (top-level or static) declarations initialised with a string literal, a list of string literals, or another such constant.
+- A name defined with different values in several files is not resolved unless the use is in one of those files.
+- Values that look like secrets are redacted before they are read.
+"""
+
+[[bindings]]
+id = "ts-const"
+query = "const.scm"
+languages = ["typescript", "tsx", "javascript"]
+scope = "project"
+name = "name"
+value = "{value}"
+resolve = ["value"]
+constant = true
+
+[[bindings]]
+id = "python-const"
+query = "const.scm"
+languages = ["python"]
+scope = "project"
+name = "name"
+value = "{value}"
+resolve = ["value"]
+constant = true
+
+[[bindings]]
+id = "go-const"
+query = "const.scm"
+languages = ["go"]
+scope = "project"
+name = "name"
+value = "{value}"
+resolve = ["value"]
+constant = true
+
+[[bindings]]
+id = "rust-const"
+query = "const.scm"
+languages = ["rust"]
+scope = "project"
+name = "name"
+value = "{value}"
+resolve = ["value"]
+constant = true
+
+[[bindings]]
+id = "java-const"
+query = "const.scm"
+languages = ["java"]
+scope = "project"
+name = "name"
+value = "{value}"
+resolve = ["value"]
+constant = true
+
+[[bindings]]
+id = "kotlin-const"
+query = "const.scm"
+languages = ["kotlin"]
+scope = "project"
+name = "name"
+value = "{value}"
+resolve = ["value"]
+constant = true
+
+[[bindings]]
+id = "dart-const"
+query = "const.scm"
+languages = ["dart"]
+scope = "project"
+name = "name"
+value = "{value}"
+resolve = ["value"]
+constant = true
+
+[[bindings]]
+id = "csharp-const"
+query = "const.scm"
+languages = ["csharp"]
+scope = "project"
+name = "name"
+value = "{value}"
+resolve = ["value"]
+constant = true

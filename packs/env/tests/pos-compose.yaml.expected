@@ -1,0 +1,6 @@
+# path: deploy/docker-compose.yml
+# Expected extractions (order-insensitive); empty for negative fixtures.
+definition env_name DEPOT_REGION @ <file> {service=depot}
+definition env_name DEPOT_TOKEN @ <file> {service=depot}
+definition env_name WORKER_CONCURRENCY @ <file> {service=worker}
+definition env_name WORKER_SECRET @ <file> {service=worker}

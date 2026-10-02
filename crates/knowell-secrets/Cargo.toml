@@ -1,0 +1,27 @@
+[package]
+name = "knowell-secrets"
+description = "Secret boundaries for Knowell: sensitive-file exclusion, secret scanning, redaction, secret resolution."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
+
+[dependencies]
+knowell-core.workspace = true
+globset.workspace = true
+regex.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

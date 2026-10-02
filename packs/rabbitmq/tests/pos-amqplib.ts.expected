@@ -1,0 +1,4 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+consumer topic pallet.repairs @ setup
+producer topic pallet.damaged @ setup {exchange=warehouse}
+producer topic pallet.inspections @ setup

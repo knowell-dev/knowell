@@ -1,0 +1,38 @@
+[package]
+name = "knowell-mcp"
+description = "MCP server for Knowell: tool definitions and stdio / Streamable HTTP transports."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Router type returned by the Streamable HTTP builder, and the `http` types
+# the request-context seam reads (rmcp inserts `http::request::Parts`).
+axum.workspace = true
+knowell-core.workspace = true
+# `server` (handler + async read/write transport), `transport-io` (stdio),
+# `transport-streamable-http-server` (tower service for axum).
+rmcp = { workspace = true, features = ["server", "transport-io", "transport-streamable-http-server"] }
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# In-process MCP client for the contract tests.
+rmcp = { workspace = true, features = ["client"] }
+tokio.workspace = true
+# `ServiceExt::oneshot` to drive the axum router in the HTTP tests.
+tower = { workspace = true, features = ["util"] }
+
+[lints]
+workspace = true

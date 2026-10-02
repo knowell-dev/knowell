@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.example.com/events/rack.created.v2.json",
+  "title": "rack.created",
+  "type": "object",
+  "required": ["rackId"],
+  "properties": {
+    "rackId": { "type": "string" },
+    "aisle": { "type": "integer" }
+  }
+}

@@ -1,0 +1,3 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+consumer topic crate.opened @ CrateEvents.onOpened
+producer topic crate.sealed @ CrateEvents.sealed {exchange=warehouse}

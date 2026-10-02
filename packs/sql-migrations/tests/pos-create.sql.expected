@@ -1,0 +1,7 @@
+# path: db/migrations/0001_create_bays.sql
+# Expected extractions (order-insensitive); empty for negative fixtures.
+definition table bays @ <file> {column=capacity, op=create}
+definition table bays @ <file> {column=created_at, op=create}
+definition table bays @ <file> {column=id, op=create}
+definition table bays @ <file> {column=name, op=create}
+definition table bays @ <file> {op=create}

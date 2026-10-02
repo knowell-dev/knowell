@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# curl shim for the action tests: answers the two GitHub endpoints the scripts use and
+# forwards everything else (file:// downloads) to the real curl.
+#   FAKE_REDIRECT   value returned for `-w %{redirect_url}` (the releases/latest lookup)
+#   FAKE_OIDC_JWT   token returned by the OIDC endpoint (a fake value built by the test)
+#   FAKE_CURL_LOG   receives the URLs requested through the shim
+set -eu
+url=""
+write_out=""
+prev=""
+for a in "$@"; do
+  [ "$prev" != "-w" ] || write_out="$a"
+  prev="$a"
+  url="$a"
+done
+printf '%s\n' "$url" >>"${FAKE_CURL_LOG:-/dev/null}"
+case "$url" in
+  */releases/latest)
+    if [ "$write_out" = '%{redirect_url}' ]; then printf '%s' "${FAKE_REDIRECT:-}"; exit 0; fi
+    ;;
+  *token-request*)
+    printf '{"count":1,"value":"%s"}' "${FAKE_OIDC_JWT:-}"
+    exit 0
+    ;;
+esac
+dir=$(cd "$(dirname "$0")" && pwd)
+real=$(PATH=$(printf '%s' "$PATH" | awk -v d="$dir" 'BEGIN{RS=":";ORS=":"} $0!=d' | sed 's/:$//') command -v curl)
+exec "$real" "$@"

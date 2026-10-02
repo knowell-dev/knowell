@@ -1,0 +1,55 @@
+{
+  "source": "https://github.com/theseus-rs/postgresql-binaries/releases/download",
+  "majors": {
+    "17": {
+      "version": "17.11.0",
+      "targets": {
+        "x86_64-unknown-linux-gnu": {
+          "asset": "postgresql-17.11.0-x86_64-unknown-linux-gnu.tar.gz",
+          "sha256": "b7a1ba6bae6499d8296e3e81b0171eecfd1766ca9aaa0057e41ad3e844e5e2e0"
+        },
+        "aarch64-unknown-linux-gnu": {
+          "asset": "postgresql-17.11.0-aarch64-unknown-linux-gnu.tar.gz",
+          "sha256": "abffda09209280ec1502b73720dc4d254fb7fff9a072e324926c600a5b16c221"
+        },
+        "x86_64-apple-darwin": {
+          "asset": "postgresql-17.11.0-x86_64-apple-darwin.tar.gz",
+          "sha256": "e43a81b15e1cfe7f9d8fd79c6d4d0366e9001a5f690e322224dca704656602f7"
+        },
+        "aarch64-apple-darwin": {
+          "asset": "postgresql-17.11.0-aarch64-apple-darwin.tar.gz",
+          "sha256": "fd4b62794b160e26973a768a1eef3248aef9d2ff23ebd6d884a4299485e28e57"
+        },
+        "x86_64-pc-windows-msvc": {
+          "asset": "postgresql-17.11.0-x86_64-pc-windows-msvc.zip",
+          "sha256": "85829f743e2697c55f1a5e8b210c53b90dd1f578448fc01cb9c4dc9e0a8e3827"
+        }
+      }
+    },
+    "18": {
+      "version": "18.6.0",
+      "targets": {
+        "x86_64-unknown-linux-gnu": {
+          "asset": "postgresql-18.6.0-x86_64-unknown-linux-gnu.tar.gz",
+          "sha256": "bb3d09f876b2383e25a8c9ce09e32d185a03656a23d074f5195542b1b1b3ca61"
+        },
+        "aarch64-unknown-linux-gnu": {
+          "asset": "postgresql-18.6.0-aarch64-unknown-linux-gnu.tar.gz",
+          "sha256": "5d2b5e8be9e96bfc3d7f22090057a836ec36d5d092542d8d3b93cc145cf4ee13"
+        },
+        "x86_64-apple-darwin": {
+          "asset": "postgresql-18.6.0-x86_64-apple-darwin.tar.gz",
+          "sha256": "f8918fbe747e0d79bda58ad8f8afcf23ac384b847ff3af18856f0825ba54b031"
+        },
+        "aarch64-apple-darwin": {
+          "asset": "postgresql-18.6.0-aarch64-apple-darwin.tar.gz",
+          "sha256": "a257bcdb8aa3301a13d6a5bcec48f8c9517045b7cbae71e50788b2615539e95b"
+        },
+        "x86_64-pc-windows-msvc": {
+          "asset": "postgresql-18.6.0-x86_64-pc-windows-msvc.zip",
+          "sha256": "dd4bcd50b38bf5b9f8a6e0d6736bd4412a79a066639cb855479d4d58b1dd74ac"
+        }
+      }
+    }
+  }
+}

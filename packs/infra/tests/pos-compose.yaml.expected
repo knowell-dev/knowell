@@ -1,0 +1,4 @@
+# path: deploy/docker-compose.yml
+# Expected extractions (order-insensitive); empty for negative fixtures.
+definition infra cache @ <file> {image=redis:7, ports=6379, source=compose}
+definition infra gateway @ <file> {image=example/gateway:2, ports=8080,9090, source=compose}

@@ -1,0 +1,3 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+consumer endpoint GET /v1/routes/{} (dynamic) @ get_route {host=api.example.com}
+consumer endpoint POST /v1/routes/{}/close (dynamic) @ close_route {host=api.example.com}

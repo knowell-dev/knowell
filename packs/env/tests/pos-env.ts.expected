@@ -1,0 +1,5 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+consumer env_name DOCK_DATABASE_URL @ config
+consumer env_name PORT @ config
+consumer env_name VITE_REGION @ config
+consumer env_name {} (unresolved) @ flag

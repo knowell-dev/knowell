@@ -1,0 +1,40 @@
+name = "typeorm"
+version = "1.0.0"
+description = "TypeORM entities: @Entity classes as table readers with the column set of their @Column / @PrimaryColumn / @CreateDateColumn ... properties."
+languages = ["typescript", "tsx"]
+limits = """
+- TypeORM's default naming is applied: table = snake_case(class name) unless `@Entity("name")` / `@Entity({ name })`; column = property name unless `{ name: "..." }`. Custom naming strategies are not.
+- Relations (`@ManyToOne` join columns), embedded entities and inherited columns are not added to the column set.
+- An entity mapping is recorded as a read: it proves a dependency on the table's shape, not that the code writes it.
+"""
+
+[detect]
+npm = ["typeorm", "@nestjs/typeorm"]
+imports = ["typeorm"]
+
+[[rules]]
+id = "entity"
+query = "entity.scm"
+languages = ["typescript", "tsx"]
+kind = "table"
+role = "reads"
+key = "{table|else:entity|snake}"
+symbol = "entity"
+anchor = "entity"
+
+[rules.attrs]
+entity = "{entity}"
+
+[[rules]]
+id = "column"
+query = "column.scm"
+languages = ["typescript", "tsx"]
+kind = "table"
+role = "reads"
+key = "{table|else:entity|snake}"
+symbol = "entity"
+anchor = "property"
+
+[rules.attrs]
+entity = "{entity}"
+column = "{column|else:property}"

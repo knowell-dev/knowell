@@ -1,0 +1,43 @@
+name = "go-http"
+version = "1.0.0"
+description = "Go HTTP servers: net/http ServeMux (Go 1.22 method patterns), chi, gin and echo route registrations, with gin/echo group prefixes."
+languages = ["go"]
+limits = """
+- Nested groups only carry their own prefix (`v2.Group("/admin")` gives `/admin`, not `/v2/admin`).
+- chi `r.Route("/prefix", func(r chi.Router) { ... })` and `r.Mount` prefixes are not applied.
+- Host patterns of Go 1.22 (`GET example.com/x`) are kept in the path.
+- Only literal route strings are read.
+"""
+
+[detect]
+go = ["github.com/go-chi/chi*", "github.com/gin-gonic/gin", "github.com/labstack/echo*"]
+imports = ["net/http", "github.com/go-chi/chi", "github.com/gin-gonic/gin", "github.com/labstack/echo"]
+
+[[bindings]]
+id = "group-prefix"
+query = "group.scm"
+languages = ["go"]
+scope = "file"
+name = "group"
+value = "{prefix}"
+
+[[rules]]
+id = "servemux"
+query = "servemux.scm"
+languages = ["go"]
+kind = "endpoint"
+role = "producer"
+key = "{pattern}"
+anchor = "pattern"
+
+[[rules]]
+id = "router"
+query = "router.scm"
+languages = ["go"]
+kind = "endpoint"
+role = "producer"
+key = "{verb|upper} {group_prefix}{path}"
+anchor = "path"
+
+[rules.lookup]
+group_prefix = { binding = "group-prefix", by = "receiver" }

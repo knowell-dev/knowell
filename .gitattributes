@@ -1,0 +1,5 @@
+# Normalise line endings so generated fixtures, query sets and committed
+# baselines hash identically on every platform.
+* text=auto eol=lf
+*.png binary
+*.ico binary

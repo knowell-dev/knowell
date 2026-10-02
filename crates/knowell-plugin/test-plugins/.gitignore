@@ -1,0 +1,3 @@
+# Built by `build.py` into the repository's shared target/ directory; this
+# only catches a direct `cargo build` inside this folder.
+/target/

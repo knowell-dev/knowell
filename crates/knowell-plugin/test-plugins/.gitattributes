@@ -1,0 +1,2 @@
+# Prebuilt components are binary; their SHA-256 must not change on checkout.
+*.wasm binary

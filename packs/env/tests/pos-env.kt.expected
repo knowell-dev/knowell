@@ -1,0 +1,2 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+consumer env_name DEPOT_KT_REGION @ region

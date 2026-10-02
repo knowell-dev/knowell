@@ -1,0 +1,4 @@
+# Parallel Rust builds can exhaust a developer machine's memory. Keep the
+# default low; CI runners override it with CARGO_BUILD_JOBS.
+[build]
+jobs = 4

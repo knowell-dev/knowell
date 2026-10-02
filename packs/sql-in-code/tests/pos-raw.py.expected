@@ -1,0 +1,4 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+reads table bays @ archive
+writes table bay_archive @ archive
+writes table bays @ archive

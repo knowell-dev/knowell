@@ -1,0 +1,19 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Dock {
+  id        String   @id @default(uuid())
+  code      String   @unique @map("dock_code")
+  createdAt DateTime @default(now()) @map("created_at")
+  bays      Bay[]
+
+  @@map("docks")
+}
+
+model Bay {
+  id     String @id
+  dockId String @map("dock_id")
+  dock   Dock   @relation(fields: [dockId], references: [id])
+}

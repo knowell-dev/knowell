@@ -1,0 +1,4 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+bind ts-client client = RouteService
+consumer rpc RouteService/getRoute @ lookup
+producer rpc RouteService/getRoute @ serve

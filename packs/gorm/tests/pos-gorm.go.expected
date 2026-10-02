@@ -1,0 +1,7 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+bind table-name Forklift = forklifts
+reads table forklifts @ Forklift {column=id, entity=Forklift}
+reads table forklifts @ Forklift {column=max_load, entity=Forklift}
+reads table forklifts @ Forklift {column=serial_no, entity=Forklift}
+reads table forklifts @ Forklift {column=updated_at, entity=Forklift}
+reads table forklifts @ Forklift {entity=Forklift}

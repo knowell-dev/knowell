@@ -1,0 +1,14 @@
+name = "infra"
+version = "1.0.0"
+description = "Services and their container ports from docker-compose files and Kubernetes Deployments / StatefulSets / DaemonSets / Services, as infra definitions (same name = same service)."
+languages = ["yaml"]
+limits = """
+- Compose `extends`, profiles and override files are read as independent files.
+- Kubernetes objects are keyed by `metadata.name` only (namespaces are not part of the key).
+- Helm templates and Kustomize overlays are not rendered.
+"""
+
+[[extractors]]
+id = "services"
+extractor = "infra"
+files = ["**/*.yaml", "**/*.yml"]

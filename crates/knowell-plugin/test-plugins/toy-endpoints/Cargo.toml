@@ -1,0 +1,13 @@
+[package]
+name = "toy-endpoints"
+description = "Well-behaved Knowell test plugin: extracts HTTP endpoints from a toy route language."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen.workspace = true

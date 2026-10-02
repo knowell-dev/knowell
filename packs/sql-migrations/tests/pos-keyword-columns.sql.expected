@@ -1,0 +1,7 @@
+# path: db/migrations/0003_create_tariffs.sql
+# Expected extractions (order-insensitive); empty for negative fixtures.
+definition table tariffs @ <file> {column=active, op=create}
+definition table tariffs @ <file> {column=active, new_name=enabled, op=rename_column}
+definition table tariffs @ <file> {column=id, op=create}
+definition table tariffs @ <file> {column=interval, op=create}
+definition table tariffs @ <file> {op=create}

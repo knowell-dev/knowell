@@ -1,0 +1,75 @@
+name = "i18n"
+version = "1.0.0"
+description = "i18n message keys: uses in TS/JS (`t('key')`, `i18n.t`, `$t`, `<Trans i18nKey>`) and Flutter (`AppLocalizations.of(context)!.key`, `l10n.key`), definitions in nested locale JSON files and ARB files (with their locale)."
+languages = ["typescript", "tsx", "javascript", "jsx", "dart", "json"]
+limits = """
+- Keys are workspace-wide: the same key in two apps' catalogs is one contract.
+- i18next namespaces (`t("ns:key")`, `useTranslation("ns")`) are not split; namespace files (`locales/en/common.json`) record their keys without the namespace prefix.
+- Template-literal keys (`t(\\`status.${s}\\`)`) become patterns that link ambiguously to every matching defined key.
+- Flutter: `l10n.key` is recognised when `l10n` is assigned from `AppLocalizations.of(...)` in the same function.
+"""
+
+[detect]
+npm = ["i18next", "react-i18next", "next-i18next", "vue-i18n", "next-intl", "@lingui/core", "react-intl"]
+pub = ["flutter_localizations", "intl"]
+imports = ["i18next", "react-i18next", "next-i18next", "vue-i18n", "next-intl", "package:flutter_gen/gen_l10n/"]
+files = ["**/locales/**/*.json", "**/locale/**/*.json", "**/i18n/**/*.json", "**/lang/**/*.json", "**/translations/**/*.json", "**/messages/**/*.json", "**/*.arb"]
+
+[[extractors]]
+id = "locale-json"
+extractor = "locale-json"
+files = ["**/*.json"]
+
+[[extractors]]
+id = "arb"
+extractor = "arb"
+files = ["**/*.arb"]
+
+[[rules]]
+id = "js-t-call"
+query = "t_call.scm"
+languages = ["typescript", "tsx", "javascript", "jsx"]
+kind = "i18n_key"
+role = "consumer"
+key = "{key}"
+anchor = "key"
+resolve = ["key"]
+
+[[rules]]
+id = "jsx-trans"
+query = "trans.scm"
+languages = ["tsx", "jsx"]
+kind = "i18n_key"
+role = "consumer"
+key = "{key}"
+anchor = "key"
+
+[[bindings]]
+id = "flutter-l10n"
+query = "l10n_binding.scm"
+languages = ["dart"]
+scope = "symbol"
+name = "name"
+value = "{class}"
+
+[[rules]]
+id = "flutter-direct"
+query = "l10n_direct.scm"
+languages = ["dart"]
+kind = "i18n_key"
+role = "consumer"
+key = "{key}"
+anchor = "key"
+
+[[rules]]
+id = "flutter-variable"
+query = "l10n_variable.scm"
+languages = ["dart"]
+kind = "i18n_key"
+role = "consumer"
+key = "{key}"
+anchor = "key"
+require = ["localizations"]
+
+[rules.lookup]
+localizations = { binding = "flutter-l10n", by = "receiver" }

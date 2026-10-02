@@ -1,0 +1,4 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+reads table charging_stations @ ChargingStation {column=station_id, entity=ChargingStation}
+reads table charging_stations @ ChargingStation {column=watts, entity=ChargingStation}
+reads table charging_stations @ ChargingStation {entity=ChargingStation}

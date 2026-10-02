@@ -1,0 +1,2 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+bind kotlin-const DOCK_UPDATED = dock.updated

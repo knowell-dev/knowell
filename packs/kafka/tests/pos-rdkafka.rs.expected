@@ -1,0 +1,5 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+consumer topic tote.lost @ route
+consumer topic tote.packed @ subscribe
+consumer topic tote.picked @ subscribe
+producer topic tote.shipped @ record

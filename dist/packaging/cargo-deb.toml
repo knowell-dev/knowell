@@ -1,0 +1,22 @@
+# Appended to a CI checkout's crates/knowell/Cargo.toml by the release workflow
+# (the checkout is ephemeral; the committed manifest is never changed).
+# `cargo deb --no-build --target <triple> -p knowell`
+[package.metadata.deb]
+name = "knowell"
+maintainer = "Knowell contributors <noreply@users.noreply.github.com>"
+copyright = "Knowell contributors"
+extended-description = """\
+Knowell indexes multi-project codebases (meaning, words, and relations), keeps a \
+sourced and versioned memory, and serves both to AI coding agents over MCP. \
+The installed command is `know`."""
+section = "devel"
+priority = "optional"
+# Explicit, not $auto: the arm64 package is assembled on an x86-64 host, where dependency
+# detection cannot run the binary. The binaries are built on Ubuntu 22.04 (glibc 2.35).
+depends = "libc6 (>= 2.35), libgcc-s1"
+assets = [
+    ["target/release/know", "usr/bin/know", "755"],
+    ["../../README.md", "usr/share/doc/knowell/README.md", "644"],
+    ["../../LICENSE-MIT", "usr/share/doc/knowell/LICENSE-MIT", "644"],
+    ["../../LICENSE-APACHE", "usr/share/doc/knowell/LICENSE-APACHE", "644"],
+]

@@ -1,0 +1,5 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+bind class-prefix DepotController = /v1/depots
+producer endpoint GET /v1/depots/{} @ DepotController.get
+producer endpoint POST /v1/depots @ DepotController.create
+producer endpoint PUT /v1/depots/{}/close @ DepotController.close

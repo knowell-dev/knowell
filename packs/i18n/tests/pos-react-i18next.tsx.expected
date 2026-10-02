@@ -1,0 +1,4 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+consumer i18n_key dock.banner.subtitle @ DockBanner
+consumer i18n_key dock.banner.title @ DockBanner
+consumer i18n_key dock.status.{} (dynamic) @ DockBanner

@@ -1,0 +1,3 @@
+# Expected extractions (order-insensitive); empty for negative fixtures.
+consumer topic cache.invalidated @ wire
+producer topic cache.warmed @ wire
