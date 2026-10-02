@@ -12,6 +12,7 @@ is released. Nothing has been released yet.
 
 - Keep worktree identities stable across Windows short and long path spellings.
 - Resolve test binaries and fixture paths at runtime when CI relocates a Nextest archive.
+- Fix CLI help markup and ambiguous links that failed Rustdoc with warnings denied.
 - Preserve executable Action test shims and reject unexpected network requests in the
   offline harness; make the OIDC prerequisite check explicit for shellcheck.
 

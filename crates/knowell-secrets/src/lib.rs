@@ -8,21 +8,21 @@
 //!    before a single byte of the file is read. Sensitive files (`.env*`,
 //!    private keys, credentials, Terraform state, kubeconfig, ...) are never
 //!    opened. Built-in rules cannot be disabled; users can only add patterns.
-//! 2. **Content scan and redaction** ([`scan`]) — files that pass layer 1
+//! 2. **Content scan and redaction** ([`mod@scan`]) — files that pass layer 1
 //!    are scanned for secret-shaped content (provider tokens, private key
 //!    blocks, URLs with passwords, high-entropy assignments) and each hit is
 //!    replaced with `[REDACTED:<kind>]` before the text goes anywhere.
 //!    A [`scan::Finding`] records where and what kind, never the secret.
 //! 3. **Output masking** ([`mask`]) — the engine knows some secrets for
-//!    certain (API keys it resolved via [`resolve`]). A [`mask::Masker`]
+//!    certain (API keys it resolved via [`resolve()`]). A [`mask::Masker`]
 //!    removes those exact values from any text that leaves the process (logs,
 //!    MCP responses, errors), as a last line of defence.
 //!
-//! [`resolve`] turns a configuration [`knowell_core::SecretRef`] (`env:` /
+//! [`resolve()`] turns a configuration [`knowell_core::SecretRef`] (`env:` /
 //! `file:`) into a [`secrecy::SecretString`] at the moment of use. Errors in
 //! this crate name the reference and the failure kind only.
 //!
-//! No layer is perfect (see the limits documented on [`scan`]); they are
+//! No layer is perfect (see the limits documented on [`mod@scan`]); they are
 //! deliberately redundant and biased towards over-redaction.
 
 pub mod error;

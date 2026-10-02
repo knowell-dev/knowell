@@ -29,7 +29,7 @@ pub(crate) struct InitArgs {
     #[arg(long, value_name = "REF")]
     database_url_ref: Option<String>,
     /// Directory of a pgvector bundle for the managed PostgreSQL
-    /// [default: $KNOWELL_HOME/pgvector/pg<major>, when it exists].
+    /// Defaults to `$KNOWELL_HOME/pgvector/pg<major>` when that directory exists.
     #[arg(long, value_name = "DIR")]
     pgvector_bundle: Option<PathBuf>,
 }
