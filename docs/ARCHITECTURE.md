@@ -363,6 +363,9 @@ nodes.
   key; parity gaps between clients (web/Flutter/iOS).
 - **`know check`** runs these insights and architecture rules deterministically. It needs no
   embeddings or API key, so it is safe as a CI gate (including on fork pull requests).
+  SARIF source paths are URI-encoded and resolve through explicit project-directory bases,
+  including monorepo sub-roots. Code-scanning uploads use the scanned checkout as their
+  repository root; a finding in a different repository retains its external location.
 
 ## 9. Embeddings and model providers
 

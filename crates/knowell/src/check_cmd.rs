@@ -134,7 +134,7 @@ pub(crate) fn run(args: CheckArgs, env: &Env, out: &mut Output) -> anyhow::Resul
         .iter()
         .filter(|f| args.fail_on.fails(f.severity))
         .count();
-    let report = render(&findings, args.format)?;
+    let report = render(&findings, args.format, &inputs)?;
     match &args.output {
         Some(path) => std::fs::write(path, report)
             .with_context(|| format!("cannot write {}", path.display()))?,
@@ -236,12 +236,30 @@ fn touches(finding: &Finding, changed: &BTreeSet<(Name, RepoPath)>) -> bool {
         .any(|l| changed.contains(&(l.project.clone(), l.path.clone())))
 }
 
-fn render(findings: &[Finding], format: Format) -> anyhow::Result<String> {
+fn render(findings: &[Finding], format: Format, inputs: &[ProjectInput]) -> anyhow::Result<String> {
     Ok(match format {
-        Format::Sarif => serde_json::to_string_pretty(&knowell_link::to_sarif(
-            findings,
-            env!("CARGO_PKG_VERSION"),
-        ))?,
+        Format::Sarif => {
+            let roots = inputs
+                .iter()
+                .map(|input| {
+                    let path = std::fs::canonicalize(&input.dir).with_context(|| {
+                        format!("cannot resolve SARIF root for project `{}`", input.name)
+                    })?;
+                    let uri = url::Url::from_directory_path(path).map_err(|_| {
+                        anyhow::anyhow!(
+                            "cannot represent SARIF root for project `{}` as a file URI",
+                            input.name
+                        )
+                    })?;
+                    Ok((input.name.clone(), uri))
+                })
+                .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
+            serde_json::to_string_pretty(&knowell_link::to_sarif(
+                findings,
+                env!("CARGO_PKG_VERSION"),
+                &roots,
+            )?)?
+        }
         Format::Json => serde_json::to_string_pretty(findings)?,
         Format::Text => {
             if findings.is_empty() {

@@ -122,6 +122,10 @@ Set `comment: false` to only produce the report file.
 
 - **Monorepo**: one workspace config at the root (`knowell.toml`), one workflow. Use
   `working-directory` and `workspace-config` if the config lives in a subdirectory.
+  Each project's `path` and optional `root` identify its source directory. SARIF records
+  that directory as an absolute file URI, so annotations resolve to the checkout's files
+  even when the command runs in a subdirectory. Files in other repositories remain external
+  to the uploaded checkout.
 - **Multi-repo with a hub**: every repository runs `check` (local, no secret) and `index`
   (pushes to its hub); `impact` asks the hub which other projects a change touches. The hub
   trusts the repositories through GitHub OIDC claims (repository, ref, workflow), so there is

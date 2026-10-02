@@ -87,6 +87,20 @@ fn run() -> &'static Run {
     RUN.get_or_init(execute)
 }
 
+fn sarif(run: &Run, version: &str) -> serde_json::Value {
+    let roots = run
+        .projects
+        .iter()
+        .map(|project| {
+            (
+                project.project.clone(),
+                url::Url::parse(&format!("file:///fixture/{}/", project.project)).unwrap(),
+            )
+        })
+        .collect();
+    to_sarif(&run.findings, version, &roots).unwrap()
+}
+
 fn name(project: &str) -> Name {
     Name::new(project).unwrap()
 }
@@ -609,7 +623,7 @@ fn check_reports_the_planted_issues_and_nothing_spurious() {
 fn outputs_text(run: &Run) -> String {
     let mut text = format!("{:?}\n{:?}\n", run.projects, run.findings);
     text.push_str(&format!("{:?}\n", run.linked));
-    text.push_str(&to_sarif(&run.findings, "test").to_string());
+    text.push_str(&sarif(run, "test").to_string());
     for delta in run
         .linked
         .deltas(
@@ -682,7 +696,7 @@ fn secrets_are_never_read_or_emitted() {
 #[test]
 fn sarif_output_is_valid_and_fingerprinted() {
     let run = run();
-    let sarif = to_sarif(&run.findings, "0.0.0");
+    let sarif = sarif(run, "0.0.0");
     assert_eq!(sarif["version"], "2.1.0");
     let tool = &sarif["runs"][0]["tool"]["driver"];
     let rules = tool["rules"].as_array().unwrap();
@@ -722,6 +736,10 @@ fn sarif_output_is_valid_and_fingerprinted() {
     );
     let bases = sarif["runs"][0]["originalUriBaseIds"].as_object().unwrap();
     assert!(bases.contains_key("ledger-service"));
+    assert_eq!(
+        bases["ledger-service"]["uri"],
+        "file:///fixture/ledger-service/"
+    );
 }
 
 #[test]
@@ -731,10 +749,7 @@ fn results_are_deterministic() {
     assert_eq!(first.projects, second.projects);
     assert_eq!(first.linked, second.linked);
     assert_eq!(first.findings, second.findings);
-    assert_eq!(
-        to_sarif(&first.findings, "x"),
-        to_sarif(&second.findings, "x")
-    );
+    assert_eq!(sarif(first, "x"), sarif(&second, "x"));
 }
 
 #[test]
