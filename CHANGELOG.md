@@ -10,6 +10,8 @@ is released. Nothing has been released yet.
 
 ### Fixed
 
+- Let redirected `know init` output close on Windows while managed PostgreSQL keeps
+  running, by preventing the server launcher from inheriting the CLI's pipe handles.
 - Resolve SARIF findings to explicit project roots, including monorepo subdirectories,
   and encode reserved characters in source paths.
 - Keep worktree identities stable across Windows short and long path spellings.

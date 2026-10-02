@@ -133,28 +133,17 @@ impl Sandbox {
         self.run_in(&self.work(), args)
     }
 
-    /// Like [`Sandbox::run`], with stdout and stderr going to files instead
-    /// of pipes. Needed for commands that start the managed PostgreSQL: on
-    /// Windows the server inherits the caller's inheritable handles, so a
-    /// pipe would stay open (and the read block) until the server stops.
-    pub(crate) fn run_to_files(&self, args: &[&str]) -> Run {
-        let out_path = self
-            .root
-            .path()
-            .join(format!("out-{}.txt", uuid::Uuid::now_v7().simple()));
-        let err_path = out_path.with_extension("err.txt");
-        let status = self
-            .command(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(std::fs::File::create(&out_path).unwrap()))
-            .stderr(Stdio::from(std::fs::File::create(&err_path).unwrap()))
-            .status()
-            .unwrap();
-        Run {
-            code: status.code().unwrap_or(-1),
-            stdout: std::fs::read_to_string(&out_path).unwrap_or_default(),
-            stderr: std::fs::read_to_string(&err_path).unwrap_or_default(),
-        }
+    /// Capture both pipes with a deadline, including EOF from descendants.
+    pub(crate) fn run_with_timeout(&self, args: &[&str], timeout: Duration) -> Run {
+        block_on(async {
+            let mut command = tokio::process::Command::from(self.command(args));
+            command.stdin(Stdio::null()).kill_on_drop(true);
+            tokio::time::timeout(timeout, command.output())
+                .await
+                .expect("CLI did not exit and close its output pipes before the deadline")
+                .unwrap()
+                .into()
+        })
     }
 
     pub(crate) fn run_in(&self, dir: &Path, args: &[&str]) -> Run {

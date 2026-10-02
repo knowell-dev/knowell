@@ -44,7 +44,6 @@ Other operations: `backup`, `restore`, `upgrade`, `install_extension_bundle`,
                          from postgresql.conf and holds listen_addresses and port
     state.json           {"schema":1,"port":54321}
     postgres.log         server log
-    pg_ctl.out           output of the last pg_ctl start
 ```
 
 ## How the binaries are obtained
@@ -60,6 +59,13 @@ unpacking happens in a staging directory that is renamed into place.
 server (unsafe for a daemon that outlives a CLI call), it cannot install without
 also running `initdb`, and it probes ports on `0.0.0.0`. The crate drives
 `initdb`, `pg_ctl`, `psql`, `pg_dump`, `pg_restore` and `pg_upgrade` directly.
+
+`pg_ctl start` has null standard streams; PostgreSQL writes to `postgres.log`.
+On Windows, the small `windows-spawn` dependency restricts handle inheritance to
+those three null-device handles. Redirected CLI pipes therefore close when `know`
+exits, while PostgreSQL continues running. A failed start reports the exit code and
+server log path. Cancelling or timing out the launcher kills it; successful startup
+does not attach the server to a kill-on-drop job.
 
 An already cached minor version is reused without network access. Resolving a new
 download pages through the unauthenticated GitHub API (60 requests per hour per IP);
@@ -131,7 +137,12 @@ attestation is what vouches for it.
 
 ## Tests
 
-Unit tests run everywhere. `tests/e2e.rs` downloads and runs a real PostgreSQL and is
+Unit tests run everywhere, including a synthetic three-process regression which
+checks that the caller's stdout/stderr reach EOF while its server remains alive.
+They also cover launcher timeout/cancellation, environment isolation and invalid
+process input. The CLI's ignored `managed_init_backup_restore` test exercises real
+`know init` with bounded piped output and checks that PostgreSQL is still running.
+`tests/e2e.rs` downloads and runs a real PostgreSQL and is
 `#[ignore]`d (nightly or manual):
 
 ```text
@@ -142,6 +153,7 @@ python scripts/buildlock.py cargo test -p knowell-pg-managed --test e2e -- --ign
 
 * Windows: see the ACL note above. `psql` decodes its arguments with the ANSI code
   page, so non-ASCII SQL literals passed to `run_sql` must use `U&'\00f6'` escapes.
-  `pg_ctl start` and `pg_upgrade` write to files instead of pipes (their child
-  servers inherit pipe handles on Windows and would block reading forever).
+  `pg_upgrade` writes to a file because its temporary servers can inherit its
+  output handles. `pg_ctl start` uses the restricted null-stream launch described
+  above; it cannot inherit the CLI's output pipes.
 * One process at a time should manage a given home; there is no cross-process lock.
