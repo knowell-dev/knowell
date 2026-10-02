@@ -279,6 +279,9 @@ ready view keeps serving.
 
 - Worktrees of registered repositories are discovered automatically; each opens as a
   **personal layer**.
+- Existing worktree roots have canonical absolute paths, so Windows short-name aliases
+  and the checkout used for discovery do not change a worktree's identity. Missing
+  worktrees retain their registered paths and are marked prunable.
 - A layer is the difference between the tracked view and the worktree's real state (its own
   HEAD plus saved changes). It does not modify the shared index, so changes on
   `feature/payment` never leak into the `development` view.

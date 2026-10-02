@@ -51,7 +51,9 @@ fi
 # It runs in the main shell (not a command substitution) so the mask command reaches the runner.
 fetch_oidc_token() {
   local url="${ACTIONS_ID_TOKEN_REQUEST_URL:-}" bearer="${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" enc body tok
-  [ -n "$url" ] && [ -n "$bearer" ] || die "no OIDC token request URL; grant the job 'permissions: id-token: write'"
+  if [ -z "$url" ] || [ -z "$bearer" ]; then
+    die "no OIDC token request URL; grant the job 'permissions: id-token: write'"
+  fi
   enc=$(printf '%s' "$aud" | sed -e 's/%/%25/g' -e 's/:/%3A/g' -e 's#/#%2F#g' -e 's/?/%3F/g' -e 's/&/%26/g' -e 's/=/%3D/g' -e 's/#/%23/g' -e 's/+/%2B/g')
   body=$(curl -fsS --max-time 30 --retry 2 -H "Authorization: bearer $bearer" "$url&audience=$enc") ||
     die "could not request an OIDC token from GitHub"

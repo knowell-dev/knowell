@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # curl shim for the action tests: answers the two GitHub endpoints the scripts use and
-# forwards everything else (file:// downloads) to the real curl.
+# forwards only file:// downloads to the real curl.
 #   FAKE_REDIRECT   value returned for `-w %{redirect_url}` (the releases/latest lookup)
 #   FAKE_OIDC_JWT   token returned by the OIDC endpoint (a fake value built by the test)
 #   FAKE_CURL_LOG   receives the URLs requested through the shim
@@ -23,6 +23,13 @@ case "$url" in
     exit 0
     ;;
 esac
-dir=$(cd "$(dirname "$0")" && pwd)
+case "$url" in
+  file://*) ;;
+  *)
+    printf 'test curl refuses an unexpected network request\n' >&2
+    exit 1
+    ;;
+esac
+dir=$(cd "$(dirname "$0")" && pwd -P)
 real=$(PATH=$(printf '%s' "$PATH" | awk -v d="$dir" 'BEGIN{RS=":";ORS=":"} $0!=d' | sed 's/:$//') command -v curl)
 exec "$real" "$@"

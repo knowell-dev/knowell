@@ -235,3 +235,5 @@ shellcheck -x -P SCRIPTDIR action/scripts/*.sh action/test/*.sh action/test/bin/
 CI (`.github/workflows/action-test.yml`) runs the harness on Linux, macOS and Windows, and runs
 `action.yml` itself against a fake release served from disk. The scripts also read
 `KNOWELL_DOWNLOAD_URL` and `KNOWELL_RELEASES_URL` (test overrides of the release location).
+The shims must retain their executable bits in Git. The harness checks this before running,
+and its curl shim refuses unexpected network requests instead of contacting real services.

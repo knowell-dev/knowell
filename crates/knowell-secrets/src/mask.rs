@@ -1,6 +1,6 @@
 //! Output masking of *known* secret values.
 //!
-//! Unlike [`crate::scan`], which guesses from shape, a [`Masker`] knows the
+//! Unlike [`crate::scan()`], which guesses from shape, a [`Masker`] knows the
 //! exact secrets (for example API keys resolved from configuration) and
 //! removes every occurrence from arbitrary text: log lines, error messages,
 //! MCP and HTTP responses.

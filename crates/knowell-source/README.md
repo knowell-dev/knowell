@@ -57,6 +57,10 @@ repository, its index or working tree. It resolves track targets exactly (a miss
 checks ancestry (force-push detection), lists worktrees and groups them into task views,
 and reports a worktree's uncommitted changes.
 
+Worktree listings canonicalize existing paths, including Windows short-name aliases, so
+opening the main checkout or any linked worktree yields the same identities. A missing
+worktree retains its registered path and is reported as prunable.
+
 ## Watching
 
 `watch::Watcher` is a debounced file-system watcher for one worktree that reports saved
@@ -71,3 +75,7 @@ python scripts/buildlock.py cargo test -p knowell-source
 
 Git tests create repositories with the git CLI under isolated settings in temporary
 directories; no network is used.
+
+Invalid UTF-8 path validation and lossy reporting are tested directly on Unix. Linux also
+tests a real directory containing an invalid filename; APFS rejects that filename before
+the walker can inspect it.

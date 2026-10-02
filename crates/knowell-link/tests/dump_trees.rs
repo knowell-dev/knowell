@@ -59,7 +59,9 @@ fn dump(label: &str, language: Language, text: &str) {
 #[test]
 #[ignore = "developer aid"]
 fn dump_pack_fixtures() {
-    let packs = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs");
+    let manifest =
+        std::env::var_os("CARGO_MANIFEST_DIR").unwrap_or_else(|| env!("CARGO_MANIFEST_DIR").into());
+    let packs = Path::new(&manifest).join("../../packs");
     let filter = std::env::var("DUMP_FILTER").unwrap_or_default();
     let mut files = Vec::new();
     for pack in std::fs::read_dir(&packs).unwrap() {

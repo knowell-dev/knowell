@@ -21,7 +21,7 @@ use crate::output::Output;
 
 #[derive(Debug, Args)]
 pub(crate) struct LoginArgs {
-    /// Base URL of the hub, e.g. https://knowell.example.com.
+    /// Base URL of the hub, e.g. <https://knowell.example.com>.
     hub_url: String,
     /// Reference to the access token issued by the hub: `env:NAME` or
     /// `file:/path`. Never the token itself.

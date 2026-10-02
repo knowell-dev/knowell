@@ -21,14 +21,20 @@
 )]
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use knowell_core::{Name, RepoPath};
 use knowell_link::{Pack, PackSet, run_pack_on_file};
 use pretty_assertions::assert_eq;
 
 fn packs_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs")
+    manifest_dir().join("../../packs")
+}
+
+fn manifest_dir() -> PathBuf {
+    std::env::var_os("CARGO_MANIFEST_DIR")
+        .unwrap_or_else(|| env!("CARGO_MANIFEST_DIR").into())
+        .into()
 }
 
 fn disk_packs() -> Vec<Pack> {
@@ -159,7 +165,7 @@ fn disk_pack_files() -> Vec<(String, String)> {
 }
 
 fn builtin_source() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("src/pack/builtin.rs")
+    manifest_dir().join("src/pack/builtin.rs")
 }
 
 fn embedded_pack_files() -> Vec<(String, String)> {

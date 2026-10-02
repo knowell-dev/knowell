@@ -11,7 +11,12 @@ use std::time::{Duration, Instant};
 use sqlx::postgres::PgConnectOptions;
 use sqlx::{ConnectOptions, Connection};
 
-pub(crate) const BIN: &str = env!("CARGO_BIN_EXE_know");
+/// Nextest remaps this path when tests run from an archive on another runner.
+fn binary_path() -> std::ffi::OsString {
+    std::env::var_os("NEXTEST_BIN_EXE_know")
+        .or_else(|| std::env::var_os("CARGO_BIN_EXE_know"))
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_know").into())
+}
 
 /// Admin URL of the throwaway test server (see the knowell-store README).
 pub(crate) const DB_ENV: &str = "KNOWELL_TEST_DATABASE_URL";
@@ -109,7 +114,7 @@ impl Sandbox {
     }
 
     pub(crate) fn command_in(&self, dir: &Path, args: &[&str]) -> Command {
-        let mut cmd = Command::new(BIN);
+        let mut cmd = Command::new(binary_path());
         cmd.args(args).current_dir(dir);
         for name in SCRUBBED {
             cmd.env_remove(name);

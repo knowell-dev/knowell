@@ -6,9 +6,17 @@
 #   bash action/test/run-tests.sh
 set -uo pipefail
 
-here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 scripts="$here/../scripts"
 shim="$here/bin"
+# Refuse to run before a missing executable shim can fall through to a real
+# network client installed on the runner.
+for tool in curl gh know; do
+  if [ ! -x "$shim/$tool" ]; then
+    printf 'test shim is not executable: %s\n' "$tool" >&2
+    exit 1
+  fi
+done
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
@@ -47,6 +55,12 @@ sh_run() {
 }
 
 PATH_SHIM="$shim:$PATH"
+for tool in curl gh; do
+  if [ "$(PATH="$PATH_SHIM" command -v "$tool")" != "$shim/$tool" ]; then
+    printf 'test shim is not first on PATH: %s\n' "$tool" >&2
+    exit 1
+  fi
+done
 
 # --- fixtures -----------------------------------------------------------------------------
 sum_of() {
@@ -84,6 +98,13 @@ z.close()" "$dir/v$version/$name.zip" "$name/$exe" "$name/$exe")
 }
 
 # --- resolve-version ----------------------------------------------------------------------
+begin "curl shim: unexpected network requests are refused"
+log=$("$shim/curl" https://unexpected.example.test 2>&1)
+assert_eq 1 "$?" rc
+assert_contains "$log" "refuses an unexpected network request" message
+log=$("$shim/curl" https://github.com/knowell-dev/knowell/releases/latest 2>&1)
+assert_eq 1 "$?" "rc without the expected redirect option"
+
 begin "resolve-version: pins"
 sh_run resolve-version.sh KNOWELL_VERSION=1.2.3
 assert_eq 0 "$rc" rc
@@ -91,9 +112,8 @@ assert_eq 1.2.3 "$(out "$gho" version)" version
 assert_eq v1.2.3 "$(out "$gho" tag)" tag
 sh_run resolve-version.sh KNOWELL_VERSION=v2.0.0-rc.1
 assert_eq 2.0.0-rc.1 "$(out "$gho" version)" "prerelease version"
-for bad in 1.2 '1.2.3;id' 'v1.2.3 ' '../x' ''; do
+for bad in 1.2 '1.2.3;id' 'v1.2.3 ' '../x'; do
   sh_run resolve-version.sh "KNOWELL_VERSION=$bad"
-  if [ -z "$bad" ]; then continue; fi # empty means latest, covered below
   assert_eq 1 "$rc" "rc for '$bad'"
 done
 
@@ -101,6 +121,9 @@ begin "resolve-version: latest follows the redirect"
 sh_run resolve-version.sh KNOWELL_VERSION=latest PATH="$PATH_SHIM" FAKE_REDIRECT=https://github.com/knowell-dev/knowell/releases/tag/v0.9.1
 assert_eq 0 "$rc" rc
 assert_eq 0.9.1 "$(out "$gho" version)" version
+sh_run resolve-version.sh KNOWELL_VERSION= PATH="$PATH_SHIM" FAKE_REDIRECT=https://github.com/knowell-dev/knowell/releases/tag/v0.9.1
+assert_eq 0 "$rc" "rc with an empty version"
+assert_eq 0.9.1 "$(out "$gho" version)" "empty version resolves latest"
 sh_run resolve-version.sh KNOWELL_VERSION=latest PATH="$PATH_SHIM" FAKE_REDIRECT=
 assert_eq 1 "$rc" "rc without a release"
 assert_contains "$log" "no redirect" "message"

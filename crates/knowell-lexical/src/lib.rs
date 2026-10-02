@@ -3,7 +3,7 @@
 //! # Design
 //!
 //! * **Own tokenizer, pre-tokenized documents.** Instead of registering a
-//!   Tantivy `Tokenizer`, [`tokenize`] runs in this crate and its output is fed
+//!   Tantivy `Tokenizer`, [`tokenize()`] runs in this crate and its output is fed
 //!   to Tantivy as `PreTokenizedString` values. The query side uses the very
 //!   same function, so index-time and query-time tokenization cannot drift
 //!   apart, and splitting rules (camelCase, snake_case, Turkish folding) live
