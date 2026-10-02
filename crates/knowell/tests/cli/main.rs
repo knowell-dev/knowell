@@ -18,6 +18,7 @@
 
 mod common;
 
+mod check;
 mod ci;
 mod connect;
 mod context;

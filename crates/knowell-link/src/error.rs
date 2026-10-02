@@ -69,6 +69,14 @@ pub enum LinkError {
     /// A generation is missing for a project that has link output.
     #[error("no view generation given for project `{0}`")]
     MissingGeneration(Name),
+    /// SARIF cannot resolve a finding's project to its source directory.
+    #[error("no SARIF root given for project `{0}`; provide its absolute file URI")]
+    MissingSarifRoot(Name),
+    /// A SARIF root must be an absolute file URI for a directory.
+    #[error(
+        "invalid SARIF root for project `{0}`; use a file URI ending in / without credentials, query or fragment"
+    )]
+    InvalidSarifRoot(Name),
     /// Building or updating the graph failed.
     #[error("graph: {0}")]
     Graph(#[from] GraphError),

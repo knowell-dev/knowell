@@ -21,7 +21,8 @@ for delta in linked.deltas(&generations, Some(&graph))? {   // or replacing_delt
     graph.apply(delta)?;
 }
 let findings = check(&projects, &linked, &CheckOptions::default())?;
-let sarif = to_sarif(&findings, env!("CARGO_PKG_VERSION"));
+// project_roots: BTreeMap<Name, url::Url>, each an absolute directory file URI.
+let sarif = to_sarif(&findings, env!("CARGO_PKG_VERSION"), &project_roots)?;
 ```
 
 ## Public API
@@ -36,7 +37,7 @@ let sarif = to_sarif(&findings, env!("CARGO_PKG_VERSION"));
 | `link(&[ProjectExtractions], &LinkOptions) -> Result<LinkOutput, LinkError>` | Link all projects of a view. |
 | `LinkOutput::{deltas, replacing_deltas, graph, contracts, edges, sources, tables, entities}` | Graph deltas per project (fenced by generation), a fresh `CodeGraph`, table histories, ORM mappings. |
 | `check(&[ProjectExtractions], &LinkOutput, &CheckOptions) -> Result<Vec<Finding>, LinkError>` | Graph insights + link checks, sorted. |
-| `to_sarif(&[Finding], tool_version) -> serde_json::Value`, `fingerprint(&Finding)` | SARIF 2.1.0 log; stable partial fingerprints. |
+| `to_sarif(&[Finding], tool_version, &BTreeMap<Name, url::Url>) -> Result<serde_json::Value, LinkError>`, `fingerprint(&Finding)` | SARIF 2.1.0 log with explicit source roots; stable partial fingerprints. |
 | `normalize_key(ContractKind, &str) -> Option<String>` | Key normalisation for callers building contract ids from user input. |
 | `CHECK_RULES`, `LINK_FORMAT_VERSION` | Finding code metadata; output format version. |
 
@@ -252,6 +253,14 @@ are sorted by code, project, subject, location and message. `to_sarif` lists eve
 rule, gives each result a physical location relative to its project root (`uriBaseId` = the
 project name), related locations, and a `partialFingerprints` entry (`knowellFinding/v1`)
 that ignores line numbers.
+
+The caller supplies an absolute `file:` URI ending in `/` for every project referenced by
+a finding. `originalUriBaseIds` records those roots; file paths are percent-encoded so
+spaces, reserved characters and Unicode resolve to the original files. Missing roots and
+invalid directory URIs are errors. For a monorepo, use each project's subdirectory as its
+root. `know check` resolves these directories from `knowell.toml`, including its `root`
+setting, and canonicalizes them before rendering. A code-scanning upload uses the scanned
+repository's checkout as its source root; locations in other repositories remain external.
 
 ## Safety
 

@@ -10,6 +10,8 @@ is released. Nothing has been released yet.
 
 ### Fixed
 
+- Resolve SARIF findings to explicit project roots, including monorepo subdirectories,
+  and encode reserved characters in source paths.
 - Keep worktree identities stable across Windows short and long path spellings.
 - Test invalid UTF-8 path handling on Unix without requiring filesystem support for
   invalid filenames; retain the Linux filesystem regression test.
