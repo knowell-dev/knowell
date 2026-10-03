@@ -29,6 +29,7 @@ mod graph;
 mod local;
 mod login;
 mod mcp;
+mod profiles;
 mod project;
 mod records;
 mod serve;

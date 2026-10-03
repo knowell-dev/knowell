@@ -11,6 +11,7 @@ mod graph;
 mod ids;
 mod memory;
 mod patch;
+mod profiles;
 mod rest;
 mod scope;
 mod search;
@@ -27,4 +28,5 @@ pub use memory::{
     BoxFuture, CheckpointRow, InMemoryMemory, MemoryError, MemoryRepo, RecordQuery, RecordRow,
     StoreMemory, TaskRow,
 };
+pub use profiles::{ProfileMetadata, ProfileSelector};
 pub use settings::{DomainConfig, EngineSettings, RelationStageInfo};

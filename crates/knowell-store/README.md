@@ -76,6 +76,11 @@ two vector-free variants and the optional vector DDL.
 operations return `StoreError::SemanticUnavailable` when that storage is absent.
 Profiles and index-generation metadata remain core tables.
 
+`embeddings::get_profile_in_organization` filters UUID lookups by tenant in SQL
+before decoding metadata. Profile queries decode registration times through a
+checked epoch projection: unsupported or infinite PostgreSQL timestamps return
+`StoreError::Corrupt` without a panic or echoing the stored value.
+
 | Module | Functions |
 |---|---|
 | `hierarchy` | organizations, workspaces, sources, projects (create / get / find / list / rename / delete) |

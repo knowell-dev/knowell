@@ -32,6 +32,7 @@ let state = AppState::builder(config).with_engine(Arc::new(engine));      // RES
 | `MemoryRepo` (+ `StoreMemory`, `InMemoryMemory`, `RecordQuery`, `RecordRow`, `TaskRow`, `CheckpointRow`, `MemoryError`) | persistence seam for knowledge records and tasks; the store implementation is the default |
 | `EngineSettings` (+ `DomainConfig`, `RelationStageInfo`) | search knobs, caches, context TTL, glossary, domains, eval report directory, prices, acceptance policy, role |
 | `HybridRetriever`, `HYBRID_RETRIEVER` | `knowell_eval::Retriever` named `hybrid` for `know eval run` |
+| `Engine::list_embedding_profiles`, `get_embedding_profile`, `ProfileMetadata`, `ProfileSelector` | organization-authorized, provider-free persisted profile catalogue |
 | `EngineError` | construction and non-tool failures; maps to `ToolError` and `knowell_server::EngineError` |
 
 ## Data flow
@@ -206,6 +207,16 @@ keyset pagination. Retry receipts fail explicitly when linked records are unavai
 Local memory/task CLI reads use configured profiles and policy without preparing
 provider clients or credentials. Source gaps do not prevent unsourced record reads.
 Freeform symbol labels and progress remain untrusted record content, not source ids.
+
+The native profile catalogue resolves the real caller and requires `ReadCode` on the
+organization before acquiring a profile connection. Workspace/project-only grants do
+not authorize it, and current grants and token scopes apply on every call. UUID lookups
+filter the tenant in SQL before decoding; missing and foreign ids return the same empty result.
+Metadata retains stored dimensions and input-format version, with an RFC3339 UTC
+registration timestamp preserving fractional precision. Unsupported stored times
+return a safe error without a panic. It uses no provider clients,
+source registration or configuration-derived activity/locality claims. The standalone
+CLI opens this catalogue without a workspace or provider credentials.
 
 ## Known limits
 

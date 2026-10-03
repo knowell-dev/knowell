@@ -3,6 +3,7 @@
 //! These commands act as the standalone installation's local caller. They
 //! never start watchers or substitute workspaces. Index and search prepare every
 //! selected provider; explicit record reads retain profiles without transports.
+//! Profile catalogue reads use the engine configuration without selecting sources.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -56,6 +57,64 @@ pub(crate) struct Prepared {
     pub(crate) workspace: ResolvedWorkspace,
     organization: Name,
     providers: ProviderPreparation,
+}
+
+/// Validated catalogue selection, with no workspace or provider preparation.
+pub(crate) struct CataloguePrepared {
+    config: EngineConfig,
+    organization: Name,
+}
+
+impl CataloguePrepared {
+    /// Requires only a standalone engine configuration; credential references stay unresolved.
+    pub(crate) fn load(env: &Env, organization: Name) -> anyhow::Result<Self> {
+        Ok(Self {
+            config: standalone_config(env)?,
+            organization,
+        })
+    }
+
+    /// Opens the real engine with zero provider clients and no source registration.
+    /// Existing migrations and organization setup are the only database initialization writes.
+    pub(crate) async fn open(self, env: &Env) -> anyhow::Result<CatalogueEngine> {
+        let store = db::connect(env, &self.config, Duration::from_secs(15), 10)
+            .await
+            .context("cannot open the local catalogue database; run `know doctor` for details")?;
+        let result: anyhow::Result<CatalogueEngine> = async {
+            store
+                .migrate()
+                .await
+                .context("cannot apply the database migrations")?;
+            let user =
+                knowell_auth::UserId::new(uuid::Uuid::from_u128(crate::serve_cmd::LOCAL_USER));
+            let access =
+                StoreAccess::new(store.clone(), self.organization.clone()).with_local_user(user);
+            let engine = Engine::builder(
+                store.clone(),
+                IndexerConfig::new(env.home.join("data"), self.organization.clone()),
+            )
+            .engine_config(&self.config)
+            .access(Arc::new(access))
+            .build()
+            .await
+            .context("cannot start the local catalogue engine")?;
+            Ok(CatalogueEngine {
+                engine,
+                organization: self.organization,
+            })
+        }
+        .await;
+        if result.is_err() {
+            store.close().await;
+        }
+        result
+    }
+}
+
+/// A source-free engine owned by one profile catalogue command.
+pub(crate) struct CatalogueEngine {
+    pub(crate) engine: Engine,
+    pub(crate) organization: Name,
 }
 
 impl Prepared {
@@ -164,6 +223,13 @@ impl Prepared {
 }
 
 fn selected_config(env: &Env) -> anyhow::Result<(EngineConfig, ResolvedWorkspace)> {
+    let config = standalone_config(env)?;
+    let file = env.require_workspace()?;
+    let workspace = knowell_config::load_workspace(&file)?.resolve(&env::parent_dir(&file)?)?;
+    Ok((config, workspace))
+}
+
+fn standalone_config(env: &Env) -> anyhow::Result<EngineConfig> {
     let config = env.require_engine()?;
     if config.server.role != ServerRole::Standalone {
         bail!(
@@ -171,9 +237,7 @@ fn selected_config(env: &Env) -> anyhow::Result<(EngineConfig, ResolvedWorkspace
             config.server.role.as_str()
         );
     }
-    let file = env.require_workspace()?;
-    let workspace = knowell_config::load_workspace(&file)?.resolve(&env::parent_dir(&file)?)?;
-    Ok((config, workspace))
+    Ok(config)
 }
 
 fn validate_projects(workspace: &ResolvedWorkspace, projects: &[Name]) -> anyhow::Result<()> {
@@ -525,5 +589,51 @@ mod tests {
         let output = terminal_text("file\n\u{1b}[31m\tname");
         assert_eq!(output, "file  [31m name");
         assert!(!output.chars().any(char::is_control));
+    }
+
+    #[test]
+    fn catalogue_preparation_needs_no_workspace_or_provider_credentials() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("engine.toml");
+        std::fs::write(
+            &config_path,
+            "version = 1\n[providers.unavailable]\nkind = 'gemini'\nmodel = 'synthetic-model'\napi_key = 'env:KNOWELL_CANARY_UNAVAILABLE_PROVIDER'\n",
+        )
+        .unwrap();
+        let env = Env::from_globals(&crate::GlobalArgs {
+            engine_config: Some(config_path),
+            workspace_file: Some(temp.path().join("does-not-exist.toml")),
+            verbose: 0,
+            quiet: false,
+        })
+        .unwrap();
+        let organization = Name::new("synthetic-organization").unwrap();
+        let prepared = CataloguePrepared::load(&env, organization.clone()).unwrap();
+        assert_eq!(prepared.organization, organization);
+        assert_eq!(prepared.config.providers.len(), 1);
+        assert!(
+            prepared
+                .config
+                .providers
+                .contains_key(&Name::new("unavailable").unwrap())
+        );
+    }
+
+    #[test]
+    fn catalogue_preparation_refuses_hub_configuration() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("engine.toml");
+        std::fs::write(&config_path, "version = 1\n[server]\nrole = 'hub'\n").unwrap();
+        let env = Env::from_globals(&crate::GlobalArgs {
+            engine_config: Some(config_path),
+            workspace_file: None,
+            verbose: 0,
+            quiet: false,
+        })
+        .unwrap();
+        let error = CataloguePrepared::load(&env, Name::new("local").unwrap())
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("require role `standalone`"));
     }
 }

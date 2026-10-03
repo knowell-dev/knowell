@@ -10,6 +10,8 @@ is released. Nothing has been released yet.
 
 ### Fixed
 
+- Filter profile UUID lookups by organization before decoding and reject unsupported
+  registration timestamps through checked conversion without a panic or value echo.
 - Recheck current grants on stored memory evidence, replacement links and task
   decisions/manifests, preserve persisted workspace identity across equal project names,
   and filter task ownership before limits with precise database pagination.
@@ -74,6 +76,8 @@ is released. Nothing has been released yet.
 
 ### Added
 
+- Standalone `know profile list/show` reads tenant-authorized persisted profile metadata
+  without a workspace, provider clients, credentials or source/profile registration.
 - Standalone `know memory list/show` and `know task list/show` over persisted Engine
   records, with native JSON, sourced text/Markdown and no provider preparation or calls.
 - Standalone `know trace` and `know impact` over the real engine graph, with versioned

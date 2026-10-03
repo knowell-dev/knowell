@@ -154,7 +154,53 @@ struct ProfileRow {
     model: String,
     dimensions: i32,
     input_format_version: String,
-    created_at: OffsetDateTime,
+    created_at_epoch: String,
+}
+
+// PostgreSQL timestamps can exceed time's date range. Decode the exact
+// numeric epoch instead of letting SQLx construct an unchecked date first.
+fn profile_timestamp(epoch: &str) -> Result<OffsetDateTime, StoreError> {
+    epoch_nanoseconds(epoch)
+        .and_then(|nanos| OffsetDateTime::from_unix_timestamp_nanos(nanos).ok())
+        .ok_or_else(|| StoreError::Corrupt("embedding profile registration time is invalid".into()))
+}
+
+fn epoch_nanoseconds(epoch: &str) -> Option<i128> {
+    if epoch.is_empty() || epoch.len() > 64 {
+        return None;
+    }
+    let negative = epoch.starts_with('-');
+    let unsigned = epoch.strip_prefix('-').unwrap_or(epoch);
+    let decimal = |digits: &str| {
+        if digits.is_empty() {
+            return None;
+        }
+        digits.bytes().try_fold(0_i128, |value, byte| {
+            if !byte.is_ascii_digit() {
+                return None;
+            }
+            value.checked_mul(10)?.checked_add(i128::from(byte - b'0'))
+        })
+    };
+    let (whole, fraction) = match unsigned.split_once('.') {
+        Some((whole, fraction)) => {
+            if fraction.is_empty() || fraction.len() > 9 {
+                return None;
+            }
+            let digits = u32::try_from(fraction.len()).ok()?;
+            let scale = 10_i128.checked_pow(9_u32.checked_sub(digits)?)?;
+            (whole, decimal(fraction)?.checked_mul(scale)?)
+        }
+        None => (unsigned, 0),
+    };
+    let nanos = decimal(whole)?
+        .checked_mul(1_000_000_000)?
+        .checked_add(fraction)?;
+    if negative {
+        nanos.checked_neg()
+    } else {
+        Some(nanos)
+    }
 }
 
 impl TryFrom<ProfileRow> for EmbeddingProfile {
@@ -169,14 +215,15 @@ impl TryFrom<ProfileRow> for EmbeddingProfile {
             model: row.model,
             dimensions: from_i32(row.dimensions, "dimensions")?,
             input_format_version: row.input_format_version,
-            created_at: row.created_at,
+            created_at: profile_timestamp(&row.created_at_epoch)?,
         })
     }
 }
 
 macro_rules! profile_columns {
     () => {
-        "id, organization_id, name, provider, model, dimensions, input_format_version, created_at"
+        "id, organization_id, name, provider, model, dimensions, input_format_version,
+         EXTRACT(EPOCH FROM created_at)::text AS created_at_epoch"
     };
 }
 
@@ -383,6 +430,27 @@ pub async fn get_profile(
         profile_columns!(),
         " FROM embedding_profile WHERE id = $1"
     ))
+    .bind(id)
+    .fetch_optional(conn)
+    .await?;
+    row.map(TryInto::try_into).transpose()
+}
+
+/// Looks up a profile UUID only within `organization`.
+///
+/// The tenant predicate is applied before decoding any stored row. Missing
+/// UUIDs and UUIDs owned by another organization both return `None`.
+pub async fn get_profile_in_organization(
+    conn: &mut PgConnection,
+    organization: OrganizationId,
+    id: ProfileId,
+) -> Result<Option<EmbeddingProfile>, StoreError> {
+    let row = sqlx::query_as::<_, ProfileRow>(concat!(
+        "SELECT ",
+        profile_columns!(),
+        " FROM embedding_profile WHERE organization_id = $1 AND id = $2"
+    ))
+    .bind(organization)
     .bind(id)
     .fetch_optional(conn)
     .await?;
@@ -1005,6 +1073,84 @@ mod tests {
             input_format_version: "1".into(),
             created_at: OffsetDateTime::UNIX_EPOCH,
         }
+    }
+
+    #[test]
+    fn profile_epoch_preserves_exact_signed_fractional_seconds() {
+        for (epoch, nanos) in [
+            ("0", 0),
+            ("-0", 0),
+            ("0.000001", 1_000),
+            ("-0.000001", -1_000),
+            ("1.000001", 1_000_001_000),
+            ("-1.000001", -1_000_001_000),
+            ("0.123456789", 123_456_789),
+            ("-0.123456789", -123_456_789),
+            ("1791019845.123456", 1_791_019_845_123_456_000),
+            ("-1791019845.123456", -1_791_019_845_123_456_000),
+        ] {
+            assert_eq!(epoch_nanoseconds(epoch), Some(nanos), "{epoch}");
+            assert_eq!(
+                profile_timestamp(epoch).unwrap().unix_timestamp_nanos(),
+                nanos,
+                "{epoch}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_profile_epochs_fail_without_echoing_stored_input() {
+        for epoch in [
+            "",
+            "-",
+            ".",
+            "1.",
+            ".1",
+            "-.1",
+            "1.2.3",
+            "1.0000000001",
+            "+1",
+            " 1",
+            "1\n",
+            "1e6",
+            "--1",
+            "Infinity",
+            "-Infinity",
+            "NaN",
+            "１２３",
+            "KNOWELL_CANARY_FAKE_PROFILE_EPOCH",
+            "170141183460469231731687303715884105728",
+            "170141183460469231731687303715884105727.999999999",
+            "99999999999999999999999999999999999999999999999999999999999999999",
+        ] {
+            assert_eq!(epoch_nanoseconds(epoch), None);
+            let error = profile_timestamp(epoch).unwrap_err();
+            assert!(matches!(error, StoreError::Corrupt(_)));
+            assert_eq!(
+                error.to_string(),
+                "stored data is inconsistent: embedding profile registration time is invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn profile_epoch_outside_native_timestamp_range_is_rejected() {
+        let max = time::Date::MAX.with_time(time::Time::MAX).assume_utc();
+        let seconds_beyond_max = max.unix_timestamp() + 1;
+        let epoch = seconds_beyond_max.to_string();
+        assert!(epoch_nanoseconds(&epoch).is_some());
+        assert!(matches!(
+            profile_timestamp(&epoch),
+            Err(StoreError::Corrupt(_))
+        ));
+        let min = time::Date::MIN.midnight().assume_utc();
+        let seconds_before_min = min.unix_timestamp() - 1;
+        let epoch = seconds_before_min.to_string();
+        assert!(epoch_nanoseconds(&epoch).is_some());
+        assert!(matches!(
+            profile_timestamp(&epoch),
+            Err(StoreError::Corrupt(_))
+        ));
     }
 
     #[test]

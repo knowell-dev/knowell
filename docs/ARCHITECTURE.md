@@ -661,6 +661,16 @@ text remain untrusted scoped record content; they are not parsed as source ident
 Task ownership filtering precedes the limit, and database pagination keeps full
 timestamp precision.
 
+Local `profile list/show` reads only persisted organization catalogue metadata through
+a native Engine API. Each call resolves actual authority and requires organization
+`ReadCode` and read token scope before lookup; workspace/project grants alone do not
+authorize the catalogue. UUID selectors are tenant-checked, with identical missing and
+foreign results. Stored provider/model/dimensions/input-format identity and precise UTC
+registration time do not imply activity, locality, readiness, quality or spending.
+The standalone opener needs engine configuration without a workspace; it may migrate
+and set up organization identity, but constructs no provider clients and registers no
+source or profile. Estimates, switches, rollback and Hub transport remain open.
+
 `index` refreshes each selected workspace view, then drains and recovers leases only
 within its frozen registered view scope. Its completion report checks the observed
 commit or directory tree, required tiers and embedding coverage. Missing or superseded

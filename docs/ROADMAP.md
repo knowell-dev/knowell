@@ -44,6 +44,9 @@ dependencies; completion of the whole is defined by the acceptance scenarios at 
   and saved index, report versioned evidence and coverage gaps, and keep source targets
   and job recovery scoped. Hub transport and the other planned terminal commands remain
   open; this does not complete the milestone.
+- **Profile catalogue:** standalone list/show reads registered metadata without a
+  provider connection or workspace. Activation, estimates, switching, rollback and
+  measured real-embedding quality remain open.
 
 ### M4: Graph and contracts (planned)
 
