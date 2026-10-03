@@ -1,6 +1,8 @@
 //! `know init`, `workspace add|list`, `serve`, `backup|restore` against real
 //! databases.
 
+use knowell_store::{Store, StoreError, StoreOptions};
+
 use crate::common::{
     Sandbox, ScratchDb, Server, admin_url, generate_fixture, git_available, http_get, http_request,
     password_of, session_cookie,
@@ -287,6 +289,98 @@ fn managed_init_backup_restore() {
             .unwrap()
             .contains("semantic search is disabled")
     );
+
+    let options = StoreOptions {
+        max_connections: 1,
+        acquire_timeout: std::time::Duration::from_secs(5),
+        ..StoreOptions::default()
+    };
+    crate::common::block_on(async {
+        let url = pg.connection_url("knowell").unwrap();
+        let store = Store::connect(&url, &options).await.unwrap();
+        let mut conn = store.acquire().await.unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE public.synthetic_maintenance_restore_guard (marker text PRIMARY KEY);
+             INSERT INTO public.synthetic_maintenance_restore_guard VALUES ('preserved synthetic backup marker')",
+        )
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+        drop(conn);
+        store.close().await;
+    });
+    let maintenance_dump = sb.work().join("freshManaged.dump");
+    let operation_id = uuid::Uuid::now_v7();
+    let operation = operation_id.to_string();
+    let maintained = sb.run_with_timeout(
+        &[
+            "maintain",
+            "--operation",
+            &operation,
+            "--migrate",
+            "--backup",
+            maintenance_dump.to_str().unwrap(),
+        ],
+        std::time::Duration::from_secs(120),
+    );
+    assert_eq!(maintained.code, 0, "managed maintenance backup failed");
+    let metadata = std::fs::metadata(&maintenance_dump).unwrap();
+    assert!(metadata.is_file() && metadata.len() > 0);
+    let maintenance_restore = sb.run_with_timeout(
+        &[
+            "restore",
+            maintenance_dump.to_str().unwrap(),
+            "--into",
+            "knowell_maintenance_copy",
+        ],
+        std::time::Duration::from_secs(120),
+    );
+    assert_eq!(
+        maintenance_restore.code, 0,
+        "managed pre-migration backup could not be restored"
+    );
+    crate::common::block_on(async {
+        let url = pg.connection_url("knowell_maintenance_copy").unwrap();
+        let admin = Store::connect(&url, &options).await.unwrap();
+        let mut conn = admin.acquire().await.unwrap();
+        let marker: String =
+            sqlx::query_scalar("SELECT marker FROM public.synthetic_maintenance_restore_guard")
+                .fetch_one(&mut *conn)
+                .await
+                .unwrap();
+        drop(conn);
+        assert_eq!(marker, "preserved synthetic backup marker");
+        assert_eq!(admin.maintenance_owner().await.unwrap(), Some(operation_id));
+        assert_eq!(
+            admin.validate_schema().await.unwrap(),
+            Store::latest_schema()
+        );
+        assert!(matches!(
+            Store::connect_runtime(&url, &options).await,
+            Err(StoreError::MaintenanceRequired { owner }) if owner == operation_id
+        ));
+
+        // The backup captures admission intent. Recovery is explicit and scoped
+        // to the restored database; elapsed time cannot reopen its runtime gate.
+        let mut maintenance = admin.begin_maintenance(operation_id).await.unwrap();
+        maintenance
+            .acquire_exclusive(std::time::Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(
+            maintenance.validate_schema().await.unwrap(),
+            Store::latest_schema()
+        );
+        maintenance.finish().await.unwrap();
+        admin.close().await;
+        let runtime = Store::connect_runtime(&url, &options).await.unwrap();
+        assert_eq!(runtime.maintenance_owner().await.unwrap(), None);
+        assert_eq!(
+            runtime.validate_schema().await.unwrap(),
+            Store::latest_schema()
+        );
+        runtime.close().await;
+    });
 
     let dump = sb.work().join("knowell.dump");
     let backup = sb.run(&["backup", dump.to_str().unwrap()]);

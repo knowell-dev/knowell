@@ -2,14 +2,17 @@
 
 use std::fmt;
 use std::str::FromStr;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use secrecy::{ExposeSecret, SecretString};
 use sqlx::pool::PoolConnection;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{ConnectOptions, Connection, PgPool, Postgres, Transaction};
+use sqlx::{ConnectOptions, Connection, PgConnection, PgPool, Postgres, Transaction};
 
 use crate::error::{StoreError, scrub};
+use crate::maintenance::{self, Maintenance};
+use crate::migrations::SchemaIdentity;
 
 /// Connection query parameters accepted in a database URL. Anything else is
 /// rejected up front, because the driver would log unknown parameters
@@ -73,6 +76,8 @@ impl Default for StoreOptions {
 #[derive(Clone)]
 pub struct Store {
     pool: PgPool,
+    runtime: bool,
+    admission_error: Arc<Mutex<Option<StoreError>>>,
 }
 
 impl fmt::Debug for Store {
@@ -80,16 +85,38 @@ impl fmt::Debug for Store {
         // The pool's own Debug output includes connect options; keep it out.
         f.debug_struct("Store")
             .field("size", &self.pool.size())
+            .field("runtime", &self.runtime)
             .finish_non_exhaustive()
     }
 }
 
 impl Store {
-    /// Connects to `url` (`postgres://user:password@host:port/database`).
+    /// Opens an administrative/bootstrap pool without runtime admission locks.
     ///
     /// The URL may contain a password, so it is held as a secret, and no
-    /// error returned from here contains it (or the password).
+    /// error returned from here contains it (or the password). Runtime engines
+    /// must use [`Self::connect_runtime`]; raw administrator access is not fenced.
     pub async fn connect(url: &SecretString, options: &StoreOptions) -> Result<Self, StoreError> {
+        Self::connect_url(url, options, false).await
+    }
+
+    /// Opens an exact-schema runtime pool fenced against cooperative maintenance.
+    ///
+    /// Every physical pooled connection, including reconnects, takes a session
+    /// shared gate before schema validation. Pending maintenance is reported
+    /// explicitly; startup never migrates or waits indefinitely for a gate.
+    pub async fn connect_runtime(
+        url: &SecretString,
+        options: &StoreOptions,
+    ) -> Result<Self, StoreError> {
+        Self::connect_url(url, options, true).await
+    }
+
+    async fn connect_url(
+        url: &SecretString,
+        options: &StoreOptions,
+        runtime: bool,
+    ) -> Result<Self, StoreError> {
         let url = url.expose_secret();
         let connect = parse_url(url)?;
         let password = url_password(url);
@@ -101,22 +128,33 @@ impl Store {
         if let Some(p) = decoded.as_deref() {
             secrets.push(p);
         }
-        Self::open(connect, options, &secrets).await
+        Self::open(connect, options, &secrets, runtime).await
     }
 
-    /// Connects with already-built options (used by the managed PostgreSQL
-    /// mode, which knows host, port and password separately).
+    /// Opens an administrative/bootstrap pool with already-built options.
+    ///
+    /// This low-level handle does not participate in runtime fencing. Use
+    /// [`Self::connect_runtime_with`] for engine data access.
     pub async fn connect_with(
         connect: PgConnectOptions,
         options: &StoreOptions,
     ) -> Result<Self, StoreError> {
-        Self::open(connect, options, &[]).await
+        Self::open(connect, options, &[], false).await
+    }
+
+    /// Opens a fenced runtime pool with already-built connection options.
+    pub async fn connect_runtime_with(
+        connect: PgConnectOptions,
+        options: &StoreOptions,
+    ) -> Result<Self, StoreError> {
+        Self::open(connect, options, &[], true).await
     }
 
     async fn open(
         connect: PgConnectOptions,
         options: &StoreOptions,
         secrets: &[&str],
+        runtime: bool,
     ) -> Result<Self, StoreError> {
         let connect = connect.application_name(&options.application_name);
         let failed = |err: sqlx::Error| StoreError::Connect(scrub(&err.to_string(), secrets));
@@ -124,7 +162,12 @@ impl Store {
         // until its timeout and then reports only "timed out", while the
         // direct attempt surfaces the real cause (refused, auth, missing db).
         match tokio::time::timeout(options.acquire_timeout, connect.connect()).await {
-            Ok(Ok(conn)) => {
+            Ok(Ok(mut conn)) => {
+                if runtime {
+                    tokio::time::timeout(options.acquire_timeout, maintenance::admit(&mut conn))
+                        .await
+                        .map_err(|_| StoreError::MaintenanceTimeout)??;
+                }
                 let _ = conn.close().await;
             }
             Ok(Err(err)) => return Err(failed(err)),
@@ -135,80 +178,232 @@ impl Store {
                 )));
             }
         }
-        let pool = PgPoolOptions::new()
+        let admission_error: Arc<Mutex<Option<StoreError>>> = Arc::new(Mutex::new(None));
+        let mut pool_options = PgPoolOptions::new()
             .max_connections(options.max_connections)
             .min_connections(options.min_connections)
             .acquire_timeout(options.acquire_timeout)
             .idle_timeout(options.idle_timeout)
-            .max_lifetime(options.max_lifetime)
-            .connect_with(connect)
-            .await
-            .map_err(failed)?;
-        Ok(Self { pool })
+            .max_lifetime(options.max_lifetime);
+        if runtime {
+            let failure = Arc::clone(&admission_error);
+            pool_options = pool_options.after_connect(move |conn, _| {
+                let failure = Arc::clone(&failure);
+                Box::pin(async move {
+                    match maintenance::admit(conn).await {
+                        Ok(()) => {
+                            failure
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .take();
+                            Ok(())
+                        }
+                        Err(error) => {
+                            // SQLx retries rejected connections. Retain the
+                            // typed refusal so maintenance is never mistaken for
+                            // an unavailable optional database.
+                            *failure.lock().unwrap_or_else(PoisonError::into_inner) = Some(error);
+                            Err(sqlx::Error::Protocol(
+                                "database runtime admission refused".into(),
+                            ))
+                        }
+                    }
+                })
+            });
+        }
+        let pool = pool_options.connect_with(connect).await.map_err(|error| {
+            admission_error
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take()
+                .unwrap_or_else(|| failed(error))
+        })?;
+        Ok(Self {
+            pool,
+            runtime,
+            admission_error,
+        })
     }
 
-    /// Wraps an existing pool.
+    /// Wraps an administrative/legacy pool without installing runtime hooks.
+    ///
+    /// The caller owns its safety. Engine entry points must use the runtime
+    /// constructors; this adapter cannot retroactively fence existing sessions.
     pub fn from_pool(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            runtime: false,
+            admission_error: Arc::new(Mutex::new(None)),
+        }
     }
 
-    /// The underlying pool.
+    /// The underlying pool; runtime constructors install connection-level hooks.
+    ///
+    /// Direct access bypasses the per-operation maintenance-intent check but
+    /// retains physical session locks, so exclusive migration still waits for
+    /// pool closure. Prefer [`Self::acquire`] and [`Self::begin`].
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
 
     /// Takes a connection from the pool.
     pub async fn acquire(&self) -> Result<PoolConnection<Postgres>, StoreError> {
-        Ok(self.pool.acquire().await?)
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|error| self.pool_error(error))?;
+        if self.runtime
+            && let Err(error) = maintenance::check_open(&mut conn).await
+        {
+            conn.close_on_drop();
+            return Err(error);
+        }
+        Ok(conn)
     }
 
     /// Starts a transaction on a pooled connection.
     pub async fn begin(&self) -> Result<Transaction<'static, Postgres>, StoreError> {
-        Ok(self.pool.begin().await?)
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| self.pool_error(error))?;
+        if self.runtime {
+            maintenance::check_open(&mut tx).await?;
+        }
+        Ok(tx)
     }
 
-    /// Applies all pending embedded migrations. Safe to call concurrently
-    /// from several processes (the migrator takes an advisory lock). Core
-    /// storage works without pgvector; a later call installs vector storage
-    /// once pgvector 0.8 or newer becomes available.
+    /// Explicit administrative migration under the database-wide exclusive gate.
+    ///
+    /// Concurrent administrator calls serialize within the acquire timeout.
+    /// Runtime pools refuse this method. Cancellation after maintenance intent
+    /// was persisted leaves its UUID recorded for explicit recovery.
     pub async fn migrate(&self) -> Result<(), StoreError> {
-        let info = self.check_server().await?;
-        if !info.supports_core() {
-            return Err(StoreError::invalid("postgresql 17 or newer is required"));
+        if self.runtime {
+            return Err(StoreError::RuntimeMigrationForbidden);
         }
-        crate::migrations::run(&self.pool, info.is_supported()).await
+        let timeout = self.pool.options().get_acquire_timeout();
+        let conn = self.pool.acquire().await?.detach();
+        let mut maintenance = Maintenance::start(conn, uuid::Uuid::now_v7(), timeout, true).await?;
+        maintenance.acquire_exclusive(timeout).await?;
+        maintenance.migrate().await?;
+        maintenance.finish().await
+    }
+
+    /// Exact numbered domain schema and admission protocol required by this build.
+    pub const fn latest_schema() -> SchemaIdentity {
+        SchemaIdentity::current()
+    }
+
+    /// Checks immutable migration history without applying migrations or DDL.
+    pub async fn validate_schema(&self) -> Result<SchemaIdentity, StoreError> {
+        let mut conn = self.acquire().await?;
+        crate::migrations::validate(&mut conn).await
+    }
+
+    /// Inspects known history without DDL, accepting missing known migrations.
+    ///
+    /// Uninitialized/empty history has version zero; corrupt, dirty and newer
+    /// histories remain errors. This does not establish runtime compatibility.
+    pub async fn inspect_schema(&self) -> Result<SchemaIdentity, StoreError> {
+        let mut conn = self.acquire().await?;
+        crate::migrations::inspect(&mut conn).await
+    }
+
+    /// Returns a persisted maintenance operation, without normal data admission.
+    ///
+    /// Runtime handles use a dedicated, read-only control connection so this
+    /// remains available when every pooled session is checked out or replacement
+    /// runtime connections are refused. This never admits a data connection;
+    /// administrator handles may use it for explicit recovery.
+    pub async fn maintenance_owner(&self) -> Result<Option<uuid::Uuid>, StoreError> {
+        if self.runtime {
+            let timeout = self.pool.options().get_acquire_timeout();
+            let connect = self.pool.connect_options();
+            return tokio::time::timeout(timeout, async {
+                // A control query may bypass data admission, but connection
+                // options and driver errors must never expose its credentials.
+                let mut conn = connect.connect().await.map_err(|_| {
+                    StoreError::Connect("cannot open the maintenance status connection".into())
+                })?;
+                let result = maintenance::owner_on(&mut conn).await;
+                let _ = conn.close().await;
+                result
+            })
+            .await
+            .map_err(|_| StoreError::MaintenanceTimeout)?;
+        }
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|error| self.pool_error(error))?;
+        maintenance::owner_on(&mut conn).await
+    }
+
+    /// Begins or resumes `owner` on a detached administrator control connection.
+    ///
+    /// The coordinator lock is tried once; other owners fail immediately. This
+    /// persists admission intent but does not yet wait for runtime sessions.
+    pub async fn begin_maintenance(&self, owner: uuid::Uuid) -> Result<Maintenance, StoreError> {
+        if self.runtime {
+            return Err(StoreError::RuntimeMigrationForbidden);
+        }
+        let conn = self.pool.acquire().await?.detach();
+        Maintenance::start(
+            conn,
+            owner,
+            self.pool.options().get_acquire_timeout(),
+            false,
+        )
+        .await
+    }
+
+    fn pool_error(&self, error: sqlx::Error) -> StoreError {
+        self.admission_error
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .unwrap_or(StoreError::Database(error))
     }
 
     /// Reports the server version and the `vector` extension's availability
     /// and version. Works before migrations have run (`know doctor`).
     pub async fn check_server(&self) -> Result<ServerInfo, StoreError> {
-        let (server_version, server_version_num): (String, String) = sqlx::query_as(
-            "SELECT current_setting('server_version'), current_setting('server_version_num')",
-        )
-        .fetch_one(&self.pool)
-        .await?;
-        let server_version_num = server_version_num.parse::<u32>().map_err(|_| {
-            StoreError::Corrupt("server reported a non-numeric server_version_num".to_owned())
-        })?;
-        let vector: Option<(String, Option<String>)> = sqlx::query_as(
-            "SELECT default_version, installed_version FROM pg_available_extensions WHERE name = 'vector'",
-        )
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(ServerInfo {
-            server_version,
-            server_version_num,
-            vector: vector.map(|(default_version, installed_version)| VectorExtension {
-                default_version,
-                installed_version,
-            }),
-        })
+        let mut conn = self.acquire().await?;
+        check_server_on(&mut conn).await
     }
 
     /// Closes every pooled connection and waits for them to finish.
     pub async fn close(&self) {
         self.pool.close().await;
     }
+}
+
+pub(crate) async fn check_server_on(conn: &mut PgConnection) -> Result<ServerInfo, StoreError> {
+    let (server_version, server_version_num): (String, String) = sqlx::query_as(
+        "SELECT current_setting('server_version'), current_setting('server_version_num')",
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    let server_version_num = server_version_num.parse::<u32>().map_err(|_| {
+        StoreError::Corrupt("server reported a non-numeric server_version_num".to_owned())
+    })?;
+    let vector: Option<(String, Option<String>)> = sqlx::query_as(
+            "SELECT default_version, installed_version FROM pg_available_extensions WHERE name = 'vector'",
+        )
+        .fetch_optional(&mut *conn)
+        .await?;
+    Ok(ServerInfo {
+        server_version,
+        server_version_num,
+        vector: vector.map(|(default_version, installed_version)| VectorExtension {
+            default_version,
+            installed_version,
+        }),
+    })
 }
 
 /// Server facts reported by [`Store::check_server`].

@@ -32,6 +32,7 @@ test('asset names match the release naming used by the install scripts', () => {
   assert.deepEqual(assetNames('1.2.3', info), {
     dir: 'knowell-1.2.3-x86_64-pc-windows-msvc',
     archive: 'knowell-1.2.3-x86_64-pc-windows-msvc.zip',
+    engine: 'knowell-1.2.3-x86_64-pc-windows-msvc-engine.exe',
   });
   assert.equal(
     assetNames('1.0.0-rc.1', resolveTarget('darwin', 'arm64')).archive,

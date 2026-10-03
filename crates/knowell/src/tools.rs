@@ -97,15 +97,45 @@ pub(crate) async fn build_engine(
 /// Starts background indexing: an initial sync of every workspace, a job
 /// worker, and file watching with periodic reconciliation. Everything stops
 /// when `shutdown` is cancelled.
+pub(crate) struct Background {
+    shutdown: CancellationToken,
+    initial: tokio::task::JoinHandle<()>,
+    worker: tokio::task::JoinHandle<Result<(), knowell_index::IndexError>>,
+    watcher: Option<knowell_index::WatchHandle>,
+}
+
+impl Background {
+    /// Joins every writer before its database and runtime leases are released.
+    pub(crate) async fn finish(self) -> anyhow::Result<()> {
+        self.shutdown.cancel();
+        if let Some(watcher) = self.watcher {
+            watcher.stop().await;
+        }
+        self.initial
+            .await
+            .context("initial indexing did not stop cleanly")?;
+        self.worker
+            .await
+            .context("index worker did not stop cleanly")??;
+        Ok(())
+    }
+}
+
 pub(crate) fn start_indexing(
     engine: &Engine,
     workspaces: Vec<ResolvedWorkspace>,
     shutdown: &CancellationToken,
-) {
+) -> Background {
     let indexer = engine.indexer().clone();
-    tokio::spawn(async move {
+    let token = shutdown.clone();
+    let initial = tokio::spawn(async move {
         for workspace in &workspaces {
-            match indexer.index_workspace(workspace, Priority::Active).await {
+            let outcome = tokio::select! {
+                biased;
+                () = token.cancelled() => return,
+                outcome = indexer.index_workspace(workspace, Priority::Active) => outcome,
+            };
+            match outcome {
                 Ok((_, outcomes)) => {
                     for outcome in outcomes {
                         if let knowell_index::SyncOutcome::Failed { .. } = &outcome {
@@ -118,18 +148,22 @@ pub(crate) fn start_indexing(
         }
     });
     let worker = Worker::new(engine.indexer(), WorkerConfig::default());
-    let _worker = worker.spawn(shutdown.clone());
-    match engine.indexer().watch(shutdown.clone()) {
+    let worker = worker.spawn(shutdown.clone());
+    let watcher = match engine.indexer().watch(shutdown.clone()) {
         Ok(handle) => {
             tracing::info!("watching {} working tree(s)", handle.watched().len());
-            // Kept alive until shutdown; dropping the handle stops watching.
-            let token = shutdown.clone();
-            tokio::spawn(async move {
-                token.cancelled().await;
-                drop(handle);
-            });
+            Some(handle)
         }
-        Err(err) => tracing::warn!("file watching is off: {err}"),
+        Err(err) => {
+            tracing::warn!("file watching is off: {err}");
+            None
+        }
+    };
+    Background {
+        shutdown: shutdown.clone(),
+        initial,
+        worker,
+        watcher,
     }
 }
 

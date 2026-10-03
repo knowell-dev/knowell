@@ -18,6 +18,55 @@ pub enum StoreError {
     /// Applying the embedded migrations failed.
     #[error("database migration failed: {0}")]
     Migrate(#[source] sqlx::migrate::MigrateError),
+    /// No migration history exists; initialization must be an administrator action.
+    #[error("database schema is not initialized; run `know init` before starting the engine")]
+    SchemaUninitialized,
+    /// Known migrations are missing; opening a runtime never applies them.
+    #[error(
+        "database schema {current} needs migration to {required}; stop runtime processes and use `know maintain --operation UUID --migrate` with explicit backup authorization"
+    )]
+    SchemaMigrationRequired {
+        /// Highest applied migration, or zero for an empty history.
+        current: i64,
+        /// Latest migration required by this binary.
+        required: i64,
+    },
+    /// This binary cannot safely read or write a newer domain schema.
+    #[error(
+        "database schema {current} is newer than supported schema {supported}; update the engine"
+    )]
+    SchemaNewer {
+        /// Highest applied migration.
+        current: i64,
+        /// Latest migration understood by this binary.
+        supported: i64,
+    },
+    /// Another control connection owns maintenance coordination.
+    #[error("database maintenance is already being coordinated; retry after it finishes")]
+    MaintenanceBusy,
+    /// A persisted maintenance operation blocks runtime admission until explicitly recovered.
+    #[error(
+        "database maintenance {owner} is pending; finish or recover that operation before starting the engine"
+    )]
+    MaintenanceRequired {
+        /// Non-secret operation UUID retained after coordinator cancellation or a crash.
+        owner: uuid::Uuid,
+    },
+    /// A coordinator may not clear or mutate another operation's maintenance state.
+    #[error(
+        "database maintenance ownership changed; reopen the recorded operation before recovery"
+    )]
+    MaintenanceOwnershipLost,
+    /// An exclusive data gate was not obtained in the requested bounded time.
+    #[error(
+        "database maintenance timed out waiting for runtime connections; close them and recover the recorded operation"
+    )]
+    MaintenanceTimeout,
+    /// Administrative operations cannot borrow a runtime's shared-gated pool.
+    #[error(
+        "runtime database connections cannot migrate; close the runtime and use an administrator connection"
+    )]
+    RuntimeMigrationForbidden,
     /// A referenced record does not exist.
     #[error("{entity} not found: {key}")]
     NotFound {
@@ -131,6 +180,26 @@ pub enum StoreError {
 }
 
 impl StoreError {
+    /// Whether startup must stop instead of treating the database as unavailable.
+    ///
+    /// Deliberate maintenance, incompatible/corrupt schema and migration misuse
+    /// must never be turned into a reduced engine or another storage fallback.
+    pub fn requires_maintenance(&self) -> bool {
+        matches!(
+            self,
+            Self::SchemaUninitialized
+                | Self::SchemaMigrationRequired { .. }
+                | Self::SchemaNewer { .. }
+                | Self::MaintenanceBusy
+                | Self::MaintenanceRequired { .. }
+                | Self::MaintenanceOwnershipLost
+                | Self::MaintenanceTimeout
+                | Self::RuntimeMigrationForbidden
+                | Self::Migrate(_)
+                | Self::Corrupt(_)
+        )
+    }
+
     pub(crate) fn not_found(entity: &'static str, key: impl ToString) -> Self {
         Self::NotFound {
             entity,

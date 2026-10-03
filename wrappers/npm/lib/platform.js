@@ -9,7 +9,7 @@ function isGlibc() {
     const header = process.report.getReport().header;
     return Boolean(header && header.glibcVersionRuntime);
   } catch {
-    return true;
+    throw new Error('could not determine the Linux libc; no binary target was substituted');
   }
 }
 
@@ -37,7 +37,7 @@ function resolveTarget(platform, arch, glibc = isGlibc) {
 /** Release asset names, identical to the ones scripts/install.sh and dist/render.py use. */
 function assetNames(version, info) {
   const base = `knowell-${version}-${info.target}`;
-  return { dir: base, archive: `${base}.${info.ext}` };
+  return { dir: base, archive: `${base}.${info.ext}`, engine: `${base}-engine${info.exe.endsWith('.exe') ? '.exe' : ''}` };
 }
 
 module.exports = { resolveTarget, assetNames, isGlibc };

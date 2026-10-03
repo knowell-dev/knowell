@@ -11,7 +11,7 @@ Contents: [1 Overview](#1-overview) · [2 Principles](#2-principles) ·
 [9 Embeddings](#9-embeddings-and-model-providers) · [10 Search](#10-search-and-context) ·
 [11 Memory](#11-memory-knowledge-and-tasks) · [12 MCP, CLI, REST](#12-mcp-cli-and-rest) ·
 [13 Panel](#13-panel) · [14 Advanced modules](#14-advanced-modules) ·
-[15 Security and privacy](#15-security-and-privacy)
+[15 Security and privacy](#15-security-and-privacy) · [16 Software updates](#16-software-updates)
 
 ## 1. Overview
 
@@ -780,3 +780,59 @@ Opt-in modules planned for 1.0. Each is tested; experimental ones are behind fla
 - Tests use synthetic data. Private project code is never a public fixture or benchmark.
 - Supply chain: dependencies are permissive-licensed only (`cargo-deny`), CI actions are
   pinned to commit SHAs with least-privilege permissions, and PR workflows have no secrets.
+
+## 16. Software updates
+
+The direct installer owns a dedicated software root, separate from every `KNOWELL_HOME`.
+Its stable launcher verifies and runs the selected immutable `versions/<version>/<target>/know`
+engine. A strict receipt records ownership, platform, and launcher protocol; strict bounded
+current/previous records bind exact semantic version, SHA-256, and byte length. Native
+updaters do not adopt an arbitrary binary or write into package-manager/container ownership.
+
+Tough 0.24 implements TUF threshold signatures, root rotation, metadata version high-water marks,
+and expiry. Knowell supplies a bounded credential-free HTTPS/file transport, rejects duplicate
+JSON keys and noncanonical release targets, and consumes every raw target stream through
+verified EOF before execution. Metadata state is scoped to a pinned bootstrap/source identity,
+staged in immutable generations, flushed, and committed under an exclusive metadata lock.
+Accepted earlier-role advances survive later verification failure. Interruption requires
+explicit recovery of valid pending state; corrupt history never falls back to an older cache.
+Explicit source configuration can relocate endpoints under the same original bootstrap
+root; it preserves every accepted high-water mark and commits the endpoint pin only after
+the new repository verifies. Ordinary loads reject source changes.
+The production trust root/signing/hosting ceremony is a release prerequisite, not generated
+by a developer update command. GitHub release attestations complement, and do not replace,
+the native TUF trust decision.
+
+Preparation downloads and inspects the exact engine/paired launcher without changing the
+current image. Application takes a single updater lock and exclusive local runtime admission;
+every production engine entry path, including raw retained executables, holds a shared runtime
+lease until its writers and pool stop. The launcher has its own replacement lease and a
+private lifetime channel: launcher exit cancels its engine, with bounded orphan teardown,
+without killing the independent managed PostgreSQL server. Ordinary starts never print
+update text onto MCP stdout and never perform update network checks.
+
+The journal UUID is also the persistent database maintenance owner. Durable activation intent
+is written before database intent. Each physical runtime pool connection, including reconnects,
+holds a shared PostgreSQL session advisory gate and validates exact migration history. Admin
+maintenance uses a detached control connection, persistent owner, and exclusive gate; it never
+borrows a shared-gated pool while migrating. Local active engines yield busy; remote compliant
+engines must be stopped explicitly. A timeout/crash keeps admission closed until the same UUID
+is recovered. Older builds and raw/admin SQL clients are not retroactively fenced; external
+operators must attest direct/session connectivity and stop such clients. Transaction/statement
+poolers cannot satisfy the session-gate precondition and are unsupported.
+
+A signed compatibility contract covers schema read/write ranges, configuration, index, durable
+jobs, deployment protocol, and launcher protocol. Release 1 freezes non-schema runtime formats
+at 1; future index/job/protocol changes require persisted format inspection and explicit
+converters before this updater accepts them. A stateless bounded candidate handshake must
+agree with its signed version/platform/schema contract. The verified candidate owns migration
+and activation, with backup preconditions. Exact schema checks and binary pointer reconciliation
+complete before database admission reopens; journal deletion is the last step. Rollback checks
+the retained binary against the actual selected database and never restores a backup implicitly.
+Each separately configured database/home needs its own maintenance.
+
+Same-volume record publication is file-flushed and journaled; Unix also flushes directory
+entries. Windows rejects reparse points and relies on the installer root's protected ACLs.
+Directory flush after rename is not provided by the current safe Rust implementation on
+Windows, so hardware power-loss durability still needs a platform-specific validation gate;
+process-crash recovery and deliberate filesystem corruption are tested separately.

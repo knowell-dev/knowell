@@ -21,6 +21,8 @@ pub(crate) struct Env {
     pub(crate) engine_config: PathBuf,
     /// `--workspace`, if given.
     workspace_flag: Option<PathBuf>,
+    /// Supervisor lifetime cancellation; absent supervisors leave it uncancelled.
+    pub(crate) parent_shutdown: tokio_util::sync::CancellationToken,
 }
 
 impl Env {
@@ -34,6 +36,7 @@ impl Env {
             home,
             engine_config,
             workspace_flag: global.workspace_file.clone(),
+            parent_shutdown: tokio_util::sync::CancellationToken::new(),
         })
     }
 

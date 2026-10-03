@@ -88,6 +88,17 @@ is released. Nothing has been released yet.
 
 ### Added
 
+- Explicit signed software updates for direct installer-owned installations, with
+  immutable engine versions, a stable launcher, verified preparation, activation,
+  rollback and interruption recovery. Package-managed installations retain their
+  original update method; no background updater or forced MCP restart is installed.
+- TUF repository verification and an offline threshold-signing publisher, with
+  persistent trust history, release revocations and reviewed compatibility contracts.
+  Production root keys, metadata hosting and renewal remain release prerequisites.
+- Explicit database maintenance with persistent operation ownership, runtime admission
+  gates, exact schema-history validation and protected fresh managed backups. Ordinary
+  startup never migrates an existing schema; restored maintenance backups require
+  explicit recovery before runtime admission reopens.
 - Restart-safe blue-green embedding profile switches (migration 0013). Switches and each
   view's serving profile are stored; T2 builds the old and the target profile while a
   switch builds, so semantic search never has a gap; all member views flip in one

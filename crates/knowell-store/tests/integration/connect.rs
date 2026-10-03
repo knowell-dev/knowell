@@ -117,6 +117,7 @@ async fn migrations_apply_from_empty_and_rerun_cleanly() {
     .await
     .unwrap();
     let expected = [
+        "_knowell_maintenance",
         "access_grant",
         "api_token",
         "audit_log",

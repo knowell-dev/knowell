@@ -45,6 +45,12 @@ pub(crate) fn run(_args: McpArgs, env: &Env) -> anyhow::Result<ExitCode> {
         let store = match crate::serve_cmd::open_store(env, &engine).await {
             Ok(store) => Some(store),
             Err(err) => {
+                if err
+                    .downcast_ref::<knowell_store::StoreError>()
+                    .is_some_and(knowell_store::StoreError::requires_maintenance)
+                {
+                    return Err(err);
+                }
                 tracing::warn!("{err:#}");
                 None
             }
@@ -65,13 +71,19 @@ pub(crate) fn run(_args: McpArgs, env: &Env) -> anyhow::Result<ExitCode> {
         // Agents may run `know mcp` without a `know serve` running, so the
         // session keeps its workspaces current itself. Jobs are idempotent
         // and claimed with SKIP LOCKED, so several sessions share the work.
-        if let Some((engine, workspaces)) = &built {
-            tools::start_indexing(engine, workspaces.clone(), &indexing);
-        }
-        let result = knowell_mcp::serve_stdio(Arc::new(tools::Tools::new(engine_ref)))
-            .await
-            .context("the MCP stdio session failed");
+        let background = built.as_ref().map(|(engine, workspaces)| {
+            tools::start_indexing(engine, workspaces.clone(), &indexing)
+        });
+        let result = tokio::select! {
+            result = knowell_mcp::serve_stdio(Arc::new(tools::Tools::new(engine_ref))) => {
+                result.context("the MCP stdio session failed")
+            }
+            () = env.parent_shutdown.cancelled() => Ok(()),
+        };
         indexing.cancel();
+        if let Some(background) = background {
+            background.finish().await?;
+        }
         // Buffered tool usage reaches the database before the pool closes.
         if let Some((engine, _)) = &built
             && let Err(error) = engine.flush_usage().await

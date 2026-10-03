@@ -173,6 +173,56 @@ jobs:
           # Offline: no token is needed, so none is provided.
           "$HOME/.local/bin/zizmor" --offline --format plain .github/workflows
 
+  tooling-tests:
+    name: tooling-tests (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - name: Enable Git Bash installer test tools on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($toolDirectory in @('C:\Program Files\Git\usr\bin', 'C:\Program Files\Git\mingw64\bin')) {
+            if (-not (Test-Path -LiteralPath $toolDirectory -PathType Container)) {
+              throw 'required Git Bash tooling directory is missing'
+            }
+            Add-Content -LiteralPath $env:GITHUB_PATH -Value $toolDirectory -Encoding utf8
+          }
+      - name: Require native installer fixture tools
+        shell: python
+        run: |
+          import shutil
+          import sys
+
+          required = ("sh", "curl", "awk", "head", "sha256sum")
+          if sys.platform == "win32":
+              required += ("powershell",)
+          missing = [tool for tool in required if shutil.which(tool) is None]
+          if missing:
+              sys.exit("required installer fixture tools are missing: " + ", ".join(missing))
+      - name: Test distribution manifests, archives and native bootstrap fixtures
+        run: python -m unittest discover -s dist -v
+      - name: Test pinned npm engines, cache integrity and Windows ACLs
+        working-directory: wrappers/npm
+        run: python ../../scripts/buildlock.py npm test
+
   test-linux-build:
     name: test-linux-build
     needs: changes
@@ -193,7 +243,9 @@ jobs:
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-nextest
-      - run: cargo nextest archive --workspace --locked --archive-file nextest-archive.tar.zst
+      - name: Build the stable launcher for process tests and the test archive
+        run: python scripts/buildlock.py cargo build --locked -p knowell-launcher
+      - run: python scripts/buildlock.py cargo nextest archive --workspace --locked --archive-file nextest-archive.tar.zst
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nextest-archive
@@ -256,7 +308,7 @@ jobs:
         env:
           PARTITION: ${{ matrix.partition }}
         run: >
-          cargo nextest run
+          python scripts/buildlock.py cargo nextest run
           --archive-file nextest-archive.tar.zst
           --workspace-remap .
           --partition "count:${PARTITION}/3"
@@ -281,7 +333,7 @@ jobs:
         with:
           tool: cargo-nextest
       # Path- and OS-sensitive crates only; the full matrix runs in the merge queue.
-      - run: cargo nextest run --locked -p knowell-core -p knowell-secrets -p knowell-source -p knowell-config
+      - run: python scripts/buildlock.py cargo nextest run --locked -p knowell-core -p knowell-secrets -p knowell-source -p knowell-config -p knowell-update -p knowell-launcher
 
   eval:
     name: eval
@@ -373,7 +425,9 @@ jobs:
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-nextest
-      - run: cargo nextest run --workspace --locked
+      - name: Build the stable launcher for process tests
+        run: python scripts/buildlock.py cargo build --locked -p knowell-launcher
+      - run: python scripts/buildlock.py cargo nextest run --workspace --locked
 
   storage-pg18:
     name: storage-pg18
@@ -468,6 +522,7 @@ jobs:
       - deny
       - secrets
       - workflows
+      - tooling-tests
       - test-linux-build
       - test-linux
       - test-windows

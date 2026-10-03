@@ -82,9 +82,9 @@ impl CataloguePrepared {
             .context("cannot open the local catalogue database; run `know doctor` for details")?;
         let result: anyhow::Result<CatalogueEngine> = async {
             store
-                .migrate()
+                .validate_schema()
                 .await
-                .context("cannot apply the database migrations")?;
+                .context("database upgrade required; run an explicit maintenance migration")?;
             let user =
                 knowell_auth::UserId::new(uuid::Uuid::from_u128(crate::serve_cmd::LOCAL_USER));
             let access =
@@ -187,9 +187,9 @@ impl Prepared {
             .context("cannot open the local index database; run `know doctor` for details")?;
         let result: anyhow::Result<LocalEngine> = async {
             store
-                .migrate()
+                .validate_schema()
                 .await
-                .context("cannot apply the database migrations")?;
+                .context("database upgrade required; run an explicit maintenance migration")?;
             let user =
                 knowell_auth::UserId::new(uuid::Uuid::from_u128(crate::serve_cmd::LOCAL_USER));
             let access =
