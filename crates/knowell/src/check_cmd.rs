@@ -122,7 +122,7 @@ pub(crate) fn run(args: CheckArgs, env: &Env, out: &mut Output) -> anyhow::Resul
     let mut findings = knowell_link::check(&extractions, &linked, &CheckOptions::default())?;
 
     if let Some(base) = &args.diff_base {
-        match changed_files(&inputs, base) {
+        match changed_files(&inputs, base)? {
             Some(changed) => findings.retain(|f| touches(f, &changed)),
             None => tracing::warn!(
                 "--diff-base {base} was not found in any project repository; reporting all findings"
@@ -179,8 +179,13 @@ fn extract(input: &ProjectInput, packs: &PackSet) -> anyhow::Result<ProjectExtra
 /// Files changed between `base` and `HEAD`, as (project, project-relative
 /// path), for every project whose repository contains `base`. `None` when no
 /// repository knows the commit.
-fn changed_files(inputs: &[ProjectInput], base: &str) -> Option<BTreeSet<(Name, RepoPath)>> {
-    let base_target: TrackTarget = format!("commit:{base}").parse().ok()?;
+fn changed_files(
+    inputs: &[ProjectInput],
+    base: &str,
+) -> anyhow::Result<Option<BTreeSet<(Name, RepoPath)>>> {
+    let base_target: TrackTarget = format!("commit:{base}")
+        .parse()
+        .map_err(|_| anyhow::anyhow!("--diff-base must name a full commit id"))?;
     let mut changed = BTreeSet::new();
     let mut found = false;
     for input in inputs {
@@ -193,9 +198,17 @@ fn changed_files(inputs: &[ProjectInput], base: &str) -> Option<BTreeSet<(Name, 
         ) else {
             continue;
         };
-        let Ok(changes) = repo.diff(&old.commit, &new.commit) else {
-            continue;
-        };
+        let changes = repo
+            .diff_scoped(
+                &old.commit,
+                &new.commit,
+                input.root.as_ref(),
+                &input.policy,
+                &WalkOptions::default(),
+            )
+            .with_context(|| {
+                format!("cannot compare selected files in project `{}`", input.name)
+            })?;
         found = true;
         for change in changes {
             for path in change_paths(&change) {
@@ -205,7 +218,7 @@ fn changed_files(inputs: &[ProjectInput], base: &str) -> Option<BTreeSet<(Name, 
             }
         }
     }
-    found.then_some(changed)
+    Ok(found.then_some(changed))
 }
 
 fn change_paths(change: &Change) -> Vec<&RepoPath> {

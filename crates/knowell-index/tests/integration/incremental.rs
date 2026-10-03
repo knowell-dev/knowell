@@ -3,8 +3,13 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use knowell_index::{Priority, SyncOutcome, TierState, parser_version_tag, split_symbol_key};
+use knowell_config::{Origin, Sourced};
+use knowell_core::ContentHash;
+use knowell_index::{
+    Priority, SyncOutcome, TierSkip, TierState, parser_version_tag, split_symbol_key,
+};
 use knowell_store::content;
+use knowell_store::jobs;
 use knowell_store::symbols;
 use knowell_store::views::GenerationPin;
 use knowell_store::{OccurrenceRole, SymbolId};
@@ -406,5 +411,523 @@ async fn remote_branch_views_read_git_objects_and_leave_the_checkout_alone() {
     );
     assert_eq!(ws.read("mirror", readme.as_str()), dirty);
     assert!(!ws.project_dir("mirror").join("notes/upstream.md").exists());
+    drop(indexer);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unchanged_commit_with_changed_exclusions_reconciles_the_active_generation() {
+    let db = require_db!();
+    if !git_available() {
+        return;
+    }
+    let mut ws = fixture_workspace(Some(&[PROJECT]));
+    embed_with(&mut ws.resolved, "local");
+    let removed = path("policy/removed.ts");
+    let retained = path("policy/retained.ts");
+    ws.write(
+        PROJECT,
+        removed.as_str(),
+        "export const qzxvmbnptlkrs = 1;\n",
+    );
+    ws.write(
+        PROJECT,
+        retained.as_str(),
+        "export const qzplmnbvtsrjk = 2;\n",
+    );
+    let commit = ws.commit_all(PROJECT, "add synthetic policy probes");
+    let data = tempfile::tempdir().unwrap();
+    let embedder = Arc::new(CountingEmbedder::new());
+    let original = indexer(&db, data.path(), &embedder);
+    let (registration, _) = original
+        .index_workspace(&ws.resolved, Priority::Interactive)
+        .await
+        .unwrap();
+    let view = view_of(&registration, PROJECT);
+    let before = active_pin(&db, view).await;
+    let mut expected_files = active_files(&db, view).await;
+    assert!(expected_files.remove(&removed).is_some());
+    assert!(expected_files.contains_key(&retained));
+    let lexical = original.lexical(view).await.unwrap().unwrap();
+    let removed_hits = lexical.search("qzxvmbnptlkrs", 5).unwrap();
+    assert_eq!(removed_hits.len(), 1);
+    assert_eq!(
+        removed_hits.first().map(|hit| hit.path.as_str()),
+        Some(removed.as_str())
+    );
+    drop(lexical);
+    drop(original);
+
+    // A fresh process sees a new policy but the exact same Git commit.
+    ws.resolved
+        .projects
+        .iter_mut()
+        .find(|project| project.name.as_str() == PROJECT)
+        .unwrap()
+        .exclude
+        .push(Sourced {
+            value: removed.as_str().to_owned(),
+            origin: Origin::Workspace,
+        });
+    let changed = indexer(&db, data.path(), &embedder);
+    let registration = changed.register(&ws.resolved).await.unwrap();
+    assert_eq!(view_of(&registration, PROJECT), view);
+    let sync = changed
+        .refresh_view(view, Priority::Interactive)
+        .await
+        .unwrap();
+    assert!(matches!(sync, SyncOutcome::Queued { created: true, .. }));
+    let run = changed.run_until_idle().await.unwrap();
+    assert!(run.jobs > 0);
+    assert_eq!(run.failed, 0);
+    assert_eq!(changed.stats().plans_full, 1);
+    let after = active_pin(&db, view).await;
+    assert_eq!(after.generation, before.generation + 1);
+    assert_eq!(active_files(&db, view).await, expected_files);
+    assert_eq!(
+        changed.status(view).await.unwrap().active_commit.as_deref(),
+        Some(commit.as_str())
+    );
+    assert_eq!(ws.head(PROJECT), commit);
+    let lexical = changed.lexical(view).await.unwrap().unwrap();
+    assert!(lexical.search("qzxvmbnptlkrs", 5).unwrap().is_empty());
+    let retained_hits = lexical.search("qzplmnbvtsrjk", 5).unwrap();
+    assert_eq!(retained_hits.len(), 1);
+    assert_eq!(
+        retained_hits.first().map(|hit| hit.path.as_str()),
+        Some(retained.as_str())
+    );
+    drop(lexical);
+
+    assert!(matches!(
+        changed
+            .refresh_view(view, Priority::Interactive)
+            .await
+            .unwrap(),
+        SyncOutcome::UpToDate { .. }
+    ));
+    assert_eq!(changed.run_until_idle().await.unwrap().jobs, 0);
+    assert_eq!(active_pin(&db, view).await, after);
+    drop(changed);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unchanged_commit_with_missing_or_corrupt_policy_manifest_rebuilds_conservatively() {
+    let db = require_db!();
+    if !git_available() {
+        return;
+    }
+    let mut ws = fixture_workspace(Some(&[PROJECT]));
+    embed_with(&mut ws.resolved, "local");
+    let commit = ws.head(PROJECT);
+    let data = tempfile::tempdir().unwrap();
+    let embedder = Arc::new(CountingEmbedder::new());
+    let indexer = indexer(&db, data.path(), &embedder);
+    let (registration, _) = indexer
+        .index_workspace(&ws.resolved, Priority::Interactive)
+        .await
+        .unwrap();
+    let view = view_of(&registration, PROJECT);
+    let files = active_files(&db, view).await;
+    assert!(!files.is_empty());
+    let calls = embedder.calls();
+
+    for corrupt in [false, true] {
+        let before = active_pin(&db, view).await;
+        let manifest = data
+            .path()
+            .join("views")
+            .join(view.to_string())
+            .join(format!("manifest-{}.json", before.generation));
+        if corrupt {
+            std::fs::write(&manifest, b"{invalid manifest").unwrap();
+        } else {
+            std::fs::remove_file(&manifest).unwrap();
+        }
+        let stats = indexer.stats();
+        assert!(matches!(
+            indexer
+                .refresh_view(view, Priority::Interactive)
+                .await
+                .unwrap(),
+            SyncOutcome::Queued { created: true, .. }
+        ));
+        let run = indexer.run_until_idle().await.unwrap();
+        assert!(run.jobs > 0);
+        assert_eq!(run.failed, 0);
+        assert_eq!(indexer.stats().plans_full - stats.plans_full, 1);
+        assert!(indexer.stats().files_read > stats.files_read);
+        let after = active_pin(&db, view).await;
+        assert_eq!(after.generation, before.generation + 1);
+        assert_eq!(active_files(&db, view).await, files);
+        assert_eq!(
+            indexer.status(view).await.unwrap().active_commit.as_deref(),
+            Some(commit.as_str())
+        );
+        assert_eq!(ws.head(PROJECT), commit);
+        assert_eq!(embedder.calls(), calls, "stored embeddings are reused");
+        assert!(matches!(
+            indexer
+                .refresh_view(view, Priority::Interactive)
+                .await
+                .unwrap(),
+            SyncOutcome::UpToDate { .. }
+        ));
+        assert_eq!(indexer.run_until_idle().await.unwrap().jobs, 0);
+        assert_eq!(active_pin(&db, view).await, after);
+    }
+    drop(indexer);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn advanced_commit_with_missing_or_corrupt_policy_manifest_rechecks_unchanged_file_sizes() {
+    if !git_available() {
+        return;
+    }
+    for (corrupt, disappear_after_queue) in
+        [(false, false), (true, false), (false, true), (true, true)]
+    {
+        let db = require_db!();
+        let mut ws = fixture_workspace(Some(&[PROJECT]));
+        for project in &mut ws.resolved.projects {
+            project.embedding.provider = None;
+        }
+        let oversized = path("policy/oversized.ts");
+        let retained = path("policy/retained.ts");
+        let advanced = path("policy/advanced.ts");
+        let oversized_text = format!(
+            "export const qzxvmbnptlkrs = 1;\n{}",
+            "// synthetic size-limit padding\n".repeat(20)
+        );
+        let retained_text = "export const qzplmnbvtsrjk = 2;\n";
+        ws.write(PROJECT, oversized.as_str(), &oversized_text);
+        ws.write(PROJECT, retained.as_str(), retained_text);
+        ws.write(
+            PROJECT,
+            advanced.as_str(),
+            "export const qzvptmbkrlsn = 1;\n",
+        );
+        let old_commit = ws.commit_all(PROJECT, "add synthetic size policy probes");
+        let data = tempfile::tempdir().unwrap();
+        let embedder = Arc::new(CountingEmbedder::new());
+        let original = indexer(&db, data.path(), &embedder);
+        let (registration, _) = original
+            .index_workspace(&ws.resolved, Priority::Interactive)
+            .await
+            .unwrap();
+        let view = view_of(&registration, PROJECT);
+        let before = active_pin(&db, view).await;
+        let before_files = active_files(&db, view).await;
+        assert_eq!(
+            before_files.get(&oversized),
+            Some(&ContentHash::of(oversized_text.as_bytes()))
+        );
+        assert_eq!(
+            before_files.get(&retained),
+            Some(&ContentHash::of(retained_text.as_bytes()))
+        );
+        let lexical = original.lexical(view).await.unwrap().unwrap();
+        let hits = lexical.search("qzxvmbnptlkrs", 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            hits.first().map(|hit| hit.path.as_str()),
+            Some(oversized.as_str())
+        );
+        drop(lexical);
+
+        let advanced_text = "export const qzvptmbkrlsn = 3;\n";
+        ws.write(PROJECT, advanced.as_str(), advanced_text);
+        let commit = ws.commit_all(PROJECT, "advance only the eligible policy probe");
+        assert_ne!(commit, old_commit);
+        // Exercise a queued unforced job whose trusted manifest later disappears,
+        // as well as a refresh that starts with an unavailable manifest.
+        let queued = if disappear_after_queue {
+            Some(
+                original
+                    .refresh_view(view, Priority::Interactive)
+                    .await
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        drop(original);
+        let manifest = data
+            .path()
+            .join("views")
+            .join(view.to_string())
+            .join(format!("manifest-{}.json", before.generation));
+        if corrupt {
+            std::fs::write(&manifest, b"{invalid manifest").unwrap();
+        } else {
+            std::fs::remove_file(&manifest).unwrap();
+        }
+        let mut settings = config(data.path());
+        settings.limits.max_file_bytes = 128;
+        assert!(oversized_text.len() > 128);
+        assert!(retained_text.len() < 128 && advanced_text.len() < 128);
+        let changed = indexer_with(&db, settings, &embedder);
+        let registration = changed.register(&ws.resolved).await.unwrap();
+        assert_eq!(view_of(&registration, PROJECT), view);
+        let sync = match queued {
+            Some(queued) => queued,
+            None => changed
+                .refresh_view(view, Priority::Interactive)
+                .await
+                .unwrap(),
+        };
+        let SyncOutcome::Queued {
+            target,
+            job,
+            created: true,
+            ..
+        } = sync
+        else {
+            panic!("the advanced synthetic target must queue a build");
+        };
+        assert_eq!(target.commit(), Some(commit.as_str()));
+        let mut conn = db.conn().await;
+        let queued = jobs::get_job(&mut conn, job).await.unwrap().unwrap();
+        assert_eq!(queued.payload["force"], !disappear_after_queue);
+        drop(conn);
+        let run = changed.run_until_idle().await.unwrap();
+        assert!(run.jobs > 0);
+        assert_eq!(run.failed, 0);
+        assert_eq!(changed.stats().plans_full, 1);
+        assert_eq!(changed.stats().plans_incremental, 0);
+        let after = active_pin(&db, view).await;
+        assert_eq!(after.generation, before.generation + 1);
+        let after_files = active_files(&db, view).await;
+        assert!(!after_files.contains_key(&oversized));
+        assert_eq!(after_files.get(&retained), before_files.get(&retained));
+        assert_eq!(
+            after_files.get(&advanced),
+            Some(&ContentHash::of(advanced_text.as_bytes()))
+        );
+        let status = changed.status(view).await.unwrap();
+        assert_eq!(status.active_commit.as_deref(), Some(commit.as_str()));
+        assert_eq!(status.latest_seen_commit.as_deref(), Some(commit.as_str()));
+        assert_eq!(status.tiers.t0, TierState::Done);
+        assert_eq!(status.tiers.t1, TierState::Done);
+        assert_eq!(status.tiers.t3, TierState::Done);
+        assert_eq!(
+            status.tiers.t2,
+            TierState::Skipped {
+                reason: TierSkip::NoProvider
+            }
+        );
+        assert_eq!(embedder.calls(), 0);
+        assert_eq!(ws.head(PROJECT), commit);
+        assert_eq!(ws.read(PROJECT, oversized.as_str()), oversized_text);
+        assert_eq!(ws.read(PROJECT, retained.as_str()), retained_text);
+        let lexical = changed.lexical(view).await.unwrap().unwrap();
+        assert!(lexical.search("qzxvmbnptlkrs", 5).unwrap().is_empty());
+        let hits = lexical.search("qzplmnbvtsrjk", 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            hits.first().map(|hit| hit.path.as_str()),
+            Some(retained.as_str())
+        );
+        drop(lexical);
+        assert!(matches!(
+            changed
+                .refresh_view(view, Priority::Interactive)
+                .await
+                .unwrap(),
+            SyncOutcome::UpToDate { .. }
+        ));
+        assert_eq!(changed.run_until_idle().await.unwrap().jobs, 0);
+        assert_eq!(active_pin(&db, view).await, after);
+        drop(changed);
+    }
+}
+
+fn remove_fixture_blob(ws: &Workspace, commit: &str, relative: &str) {
+    let id = ws.git(PROJECT, &["rev-parse", &format!("{commit}:{relative}")]);
+    assert_eq!(id.len(), 40);
+    assert!(id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    let object = ws
+        .project_dir(PROJECT)
+        .join(".git/objects")
+        .join(&id[..2])
+        .join(&id[2..]);
+    assert!(object.is_file(), "the synthetic blob must be loose");
+    std::fs::remove_file(object).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scoped_incremental_and_overlay_renames_never_read_missing_forbidden_blobs() {
+    let db = require_db!();
+    if !git_available() {
+        return;
+    }
+    let mut ws = fixture_workspace(Some(&[PROJECT]));
+    for project in &mut ws.resolved.projects {
+        project.root = Some(path("selected"));
+        project.embedding.provider = None;
+        project.exclude.push(Sourced {
+            value: "private/**".to_owned(),
+            origin: Origin::Workspace,
+        });
+    }
+    let edited_old = path("edited-old.ts");
+    let edited_new = path("edited-new.ts");
+    let exact_old = path("exact-old.ts");
+    let exact_new = path("exact-new.ts");
+    let edited_text = format!(
+        "export function qzxvmbnptlkrs(value: number): number {{\n  return value + 1;\n}}\n{}",
+        (0..20)
+            .map(|n| format!("export const probe{n} = {n};\n"))
+            .collect::<String>()
+    );
+    let exact_text = "export function qzplmnbvtsrjk(): number {\n  return 7;\n}\n";
+    ws.write(PROJECT, "selected/edited-old.ts", &edited_text);
+    ws.write(PROJECT, "selected/exact-old.ts", exact_text);
+    ws.write(
+        PROJECT,
+        "selected/retained.ts",
+        "export const qzvptmbkrlsn = 9;\n",
+    );
+    for (file, value) in [
+        ("selected/.env.old", "KNOWELL_CANARY_index_env_old\n"),
+        (
+            "selected/private/old.ts",
+            "KNOWELL_CANARY_index_private_old\n",
+        ),
+        ("sibling/old.ts", "KNOWELL_CANARY_index_sibling_old\n"),
+    ] {
+        ws.write(PROJECT, file, value);
+    }
+    let old_commit = ws.commit_all(PROJECT, "old synthetic scoped privacy fixture");
+    let data = tempfile::tempdir().unwrap();
+    let embedder = Arc::new(CountingEmbedder::new());
+    let indexer = indexer(&db, data.path(), &embedder);
+    let (registration, _) = indexer
+        .index_workspace(&ws.resolved, Priority::Interactive)
+        .await
+        .unwrap();
+    let view = view_of(&registration, PROJECT);
+    let before = active_pin(&db, view).await;
+    let before_files = active_files(&db, view).await;
+    assert_eq!(before_files.len(), 3);
+    assert!(before_files.contains_key(&edited_old) && before_files.contains_key(&exact_old));
+    let edited_symbols = definitions(&db, before, &edited_old).await;
+    let exact_symbols = definitions(&db, before, &exact_old).await;
+    assert!(
+        edited_symbols
+            .keys()
+            .any(|key| key.contains("qzxvmbnptlkrs"))
+    );
+    assert!(
+        exact_symbols
+            .keys()
+            .any(|key| key.contains("qzplmnbvtsrjk"))
+    );
+
+    ws.git(
+        PROJECT,
+        &["mv", "selected/edited-old.ts", "selected/edited-new.ts"],
+    );
+    ws.git(
+        PROJECT,
+        &["mv", "selected/exact-old.ts", "selected/exact-new.ts"],
+    );
+    let new_text = edited_text.replace("return value + 1;", "return value + 2;");
+    ws.write(PROJECT, "selected/edited-new.ts", &new_text);
+    for old in [
+        "selected/.env.old",
+        "selected/private/old.ts",
+        "sibling/old.ts",
+    ] {
+        std::fs::remove_file(ws.project_dir(PROJECT).join(old)).unwrap();
+    }
+    for (file, value) in [
+        ("selected/.env.new", "KNOWELL_CANARY_index_env_new\n"),
+        (
+            "selected/private/new.ts",
+            "KNOWELL_CANARY_index_private_new\n",
+        ),
+        ("sibling/new.ts", "KNOWELL_CANARY_index_sibling_new\n"),
+    ] {
+        ws.write(PROJECT, file, value);
+    }
+    let commit = ws.commit_all(PROJECT, "new synthetic scoped privacy fixture");
+    for (version, file) in [
+        (&old_commit, "selected/.env.old"),
+        (&commit, "selected/.env.new"),
+        (&old_commit, "selected/private/old.ts"),
+        (&commit, "selected/private/new.ts"),
+        (&old_commit, "sibling/old.ts"),
+        (&commit, "sibling/new.ts"),
+    ] {
+        remove_fixture_blob(&ws, version, file);
+    }
+    ws.write(
+        PROJECT,
+        "selected/private/local.ts",
+        "KNOWELL_CANARY_index_private_local\n",
+    );
+    let overlay = indexer
+        .build_overlay(view, &ws.project_dir(PROJECT))
+        .await
+        .unwrap();
+    let shadowed = overlay.shadowed_paths();
+    assert_eq!(shadowed.len(), 4);
+    for allowed in [&edited_old, &edited_new, &exact_old, &exact_new] {
+        assert!(shadowed.contains(allowed));
+    }
+    assert_eq!(
+        overlay.file(&edited_new).unwrap().text.as_ref(),
+        new_text.as_str()
+    );
+    assert_eq!(overlay.file(&exact_new).unwrap().text.as_ref(), exact_text);
+    assert!(overlay.file(&path("private/local.ts")).is_none());
+    assert_eq!(active_pin(&db, view).await, before);
+    assert_eq!(active_files(&db, view).await, before_files);
+    drop(overlay);
+
+    let stats = indexer.stats();
+    let sync = indexer
+        .refresh_view(view, Priority::Interactive)
+        .await
+        .unwrap();
+    assert!(matches!(sync, SyncOutcome::Queued { created: true, .. }));
+    let run = indexer.run_until_idle().await.unwrap();
+    assert!(run.jobs > 0);
+    assert_eq!(run.failed, 0);
+    assert_eq!(
+        indexer.stats().plans_incremental - stats.plans_incremental,
+        1
+    );
+    let after = active_pin(&db, view).await;
+    assert_eq!(after.generation, before.generation + 1);
+    assert_eq!(
+        indexer.status(view).await.unwrap().active_commit.as_deref(),
+        Some(commit.as_str())
+    );
+    let mut expected = before_files;
+    expected.remove(&edited_old);
+    expected.remove(&exact_old);
+    expected.insert(edited_new.clone(), ContentHash::of(new_text.as_bytes()));
+    expected.insert(exact_new.clone(), ContentHash::of(exact_text.as_bytes()));
+    assert_eq!(active_files(&db, view).await, expected);
+    assert_eq!(definitions(&db, after, &edited_new).await, edited_symbols);
+    assert_eq!(definitions(&db, after, &exact_new).await, exact_symbols);
+    let mut conn = db.conn().await;
+    for (old, new) in [(&edited_old, &edited_new), (&exact_old, &exact_new)] {
+        let history = content::file_history(&mut conn, view, new, 5)
+            .await
+            .unwrap();
+        assert_eq!(history.first().unwrap().renamed_from.as_ref(), Some(old));
+    }
+    drop(conn);
+    assert_eq!(embedder.calls(), 0);
+    assert!(matches!(
+        indexer
+            .refresh_view(view, Priority::Interactive)
+            .await
+            .unwrap(),
+        SyncOutcome::UpToDate { .. }
+    ));
+    assert_eq!(indexer.run_until_idle().await.unwrap().jobs, 0);
     drop(indexer);
 }

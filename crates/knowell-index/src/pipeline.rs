@@ -289,7 +289,7 @@ impl<E: Embedder + 'static> Inner<E> {
     }
 
     /// Resolves the view's target, records the seen commit and queues a T0
-    /// job when the active generation does not match it.
+    /// job when the active generation does not match it or its content policy.
     pub(crate) async fn sync(
         &self,
         view: knowell_store::ViewId,
@@ -321,6 +321,14 @@ impl<E: Embedder + 'static> Inner<E> {
                 None => false,
             },
         };
+        // Policy changes also affect unchanged files when the source advances.
+        // Without a matching active manifest, fully reconcile rather than reuse
+        // the old generation's content-selection decisions.
+        let force = force
+            || row.active_generation.is_some_and(|generation| {
+                manifest::load(&self.config.data_dir, view, generation)
+                    .is_none_or(|recorded| recorded.policy != ctx.policy_key)
+            });
         if current && !force {
             self.with_runtime(view, |rt| {
                 rt.observed = true;
@@ -597,11 +605,12 @@ impl<E: Embedder + 'static> Inner<E> {
             None => BTreeMap::new(),
         };
         let base_manifest = active.and_then(|a| manifest::load(&self.config.data_dir, p.view, a));
-        // A different content policy (excludes, size limit, root) changes
-        // which unchanged files belong to the view: plan from scratch.
-        let policy_changed = base_manifest
-            .as_ref()
-            .is_some_and(|m| m.policy != ctx.policy_key);
+        // A queued job may outlive the manifest or the policy it was queued
+        // under. Recheck here before reusing any unchanged-file decisions.
+        let policy_untrusted = active.is_some()
+            && base_manifest
+                .as_ref()
+                .is_none_or(|m| m.policy != ctx.policy_key);
         let base_manifest = base_manifest.filter(|m| m.policy == ctx.policy_key);
         let plan = {
             let ctx = Arc::clone(&ctx);
@@ -609,7 +618,7 @@ impl<E: Embedder + 'static> Inner<E> {
             let base_commit = row.active_commit.clone();
             let limits = self.config.limits;
             let git_config = self.config.git_config;
-            let force = p.force || policy_changed;
+            let force = p.force || policy_untrusted;
             tokio::task::spawn_blocking(move || {
                 plan::plan(&PlanInput {
                     ctx: &ctx,

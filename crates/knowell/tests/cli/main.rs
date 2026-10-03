@@ -25,6 +25,8 @@ mod context;
 mod database;
 mod doctor;
 mod eval;
+mod graph;
+mod local;
 mod login;
 mod mcp;
 mod project;

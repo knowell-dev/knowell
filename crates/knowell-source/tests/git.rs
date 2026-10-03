@@ -669,6 +669,363 @@ fn diff_tracks_renames_deletes_modifications_and_additions() {
     assert!(repo.diff(&c2, &c2).unwrap().is_empty());
 }
 
+fn remove_loose_blob(sb: &Sandbox, repository: &std::path::Path, commit: &str, path: &str) {
+    let id = sb.git(repository, &["rev-parse", &format!("{commit}:{path}")]);
+    assert_eq!(id.len(), 40);
+    assert!(id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    let object = repository
+        .join(".git/objects")
+        .join(&id[..2])
+        .join(&id[2..]);
+    assert!(object.is_file(), "the synthetic blob must be loose");
+    std::fs::remove_file(object).unwrap();
+}
+
+#[test]
+fn scoped_diff_filters_both_endpoints_before_rename_blob_access() {
+    let sb = Sandbox::new();
+    let repository = sb.init("scoped-diff");
+    let numbered = |word: &str| -> String { (1..=20).map(|i| format!("{word} {i}\n")).collect() };
+    sb.write(
+        &repository,
+        "selected/exact-old.txt",
+        numbered("line").as_bytes(),
+    );
+    sb.write(
+        &repository,
+        "selected/edited-old.txt",
+        numbered("row").as_bytes(),
+    );
+    sb.write(
+        &repository,
+        "selected/exit-root.txt",
+        b"scope exit unique\n",
+    );
+    sb.write(
+        &repository,
+        "selected/exit-policy.txt",
+        b"policy exit unique\n",
+    );
+    sb.write(
+        &repository,
+        "sibling/entry-root.txt",
+        b"scope entry unique\n",
+    );
+    sb.write(
+        &repository,
+        "selected/private/entry-policy.txt",
+        b"policy entry unique\n",
+    );
+    sb.write(
+        &repository,
+        "selected/.env.old",
+        b"KNOWELL_CANARY_scoped_env_old\n",
+    );
+    sb.write(
+        &repository,
+        "selected/private/old.txt",
+        b"KNOWELL_CANARY_scoped_private_old\n",
+    );
+    sb.write(
+        &repository,
+        "sibling/old.txt",
+        b"KNOWELL_CANARY_scoped_sibling_old\n",
+    );
+    sb.write(
+        &repository,
+        "selected-neighbor/old.txt",
+        b"KNOWELL_CANARY_scoped_neighbor_old\n",
+    );
+    sb.write(&repository, ".gitattributes", b"* -diff\n");
+    let old = sb.commit_all(&repository, "old scoped fixture");
+    for (from, to) in [
+        ("selected/exact-old.txt", "selected/exact-new.txt"),
+        ("selected/edited-old.txt", "selected/edited-new.txt"),
+        ("selected/exit-root.txt", "sibling/exit-root.txt"),
+        (
+            "selected/exit-policy.txt",
+            "selected/private/exit-policy.txt",
+        ),
+        ("sibling/entry-root.txt", "selected/entry-root.txt"),
+        (
+            "selected/private/entry-policy.txt",
+            "selected/entry-policy.txt",
+        ),
+    ] {
+        sb.git(&repository, &["mv", from, to]);
+    }
+    sb.write(
+        &repository,
+        "selected/edited-new.txt",
+        numbered("row")
+            .replace("row 5\n", "row five, edited\n")
+            .as_bytes(),
+    );
+    for path in [
+        "selected/.env.old",
+        "selected/private/old.txt",
+        "sibling/old.txt",
+        "selected-neighbor/old.txt",
+    ] {
+        std::fs::remove_file(repository.join(path)).unwrap();
+    }
+    for (path, content) in [
+        ("selected/.env.new", "KNOWELL_CANARY_scoped_env_new\n"),
+        (
+            "selected/private/new.txt",
+            "KNOWELL_CANARY_scoped_private_new\n",
+        ),
+        ("sibling/new.txt", "KNOWELL_CANARY_scoped_sibling_new\n"),
+        (
+            "selected-neighbor/new.txt",
+            "KNOWELL_CANARY_scoped_neighbor_new\n",
+        ),
+    ] {
+        sb.write(&repository, path, content.as_bytes());
+    }
+    let new = sb.commit_all(&repository, "new scoped fixture");
+    for (commit, path) in [
+        (&old, "selected/.env.old"),
+        (&new, "selected/.env.new"),
+        (&old, "selected/private/old.txt"),
+        (&new, "selected/private/new.txt"),
+        (&old, "sibling/old.txt"),
+        (&new, "sibling/new.txt"),
+        (&old, "selected-neighbor/old.txt"),
+        (&new, "selected-neighbor/new.txt"),
+        (&old, ".gitattributes"),
+    ] {
+        remove_loose_blob(&sb, &repository, commit, path);
+    }
+    // Similarity must ignore all configured attributes, including ancestor files.
+    sb.write(&repository, ".git/info/attributes", b"* -diff\n");
+    let attributes = sb.path().join("global-attributes");
+    std::fs::write(&attributes, b"* -diff\n").unwrap();
+    sb.git(
+        &repository,
+        &[
+            "config",
+            "core.attributesFile",
+            attributes.to_str().unwrap(),
+        ],
+    );
+    let before_objects = sb.git(&repository, &["count-objects", "-v"]);
+    let before_index = std::fs::read(repository.join(".git/index")).unwrap();
+    let repo = open(&repository);
+    let root = p("selected");
+    let policy = ExclusionPolicy::with_patterns(&["private/**".to_owned()]).unwrap();
+    let changes = repo
+        .diff_scoped(&old, &new, Some(&root), &policy, &WalkOptions::default())
+        .unwrap();
+    let similarity = match changes
+        .iter()
+        .find(|change| change.path() == &p("selected/edited-new.txt"))
+    {
+        Some(Change::Renamed { similarity, .. }) => *similarity,
+        other => panic!("expected a permitted edited rename, got {other:?}"),
+    };
+    assert!((50..100).contains(&similarity));
+    let mut expected = vec![
+        Change::Renamed {
+            from: p("selected/exact-old.txt"),
+            to: p("selected/exact-new.txt"),
+            similarity: 100,
+        },
+        Change::Renamed {
+            from: p("selected/edited-old.txt"),
+            to: p("selected/edited-new.txt"),
+            similarity,
+        },
+        Change::Deleted(p("selected/exit-root.txt")),
+        Change::Deleted(p("selected/exit-policy.txt")),
+        Change::Added(p("selected/entry-root.txt")),
+        Change::Added(p("selected/entry-policy.txt")),
+    ];
+    expected.sort_by(|left, right| left.path().cmp(right.path()));
+    assert_eq!(changes, expected);
+    assert_eq!(
+        sb.git(&repository, &["count-objects", "-v"]),
+        before_objects
+    );
+    assert_eq!(
+        std::fs::read(repository.join(".git/index")).unwrap(),
+        before_index
+    );
+    assert_eq!(
+        std::fs::read(repository.join(".gitattributes")).unwrap(),
+        b"* -diff\n"
+    );
+}
+
+#[test]
+fn default_diff_excludes_missing_sensitive_blob_candidates() {
+    let sb = Sandbox::new();
+    let repository = sb.init("default-sensitive-diff");
+    sb.write(&repository, ".env.old", b"KNOWELL_CANARY_default_env_old\n");
+    sb.write(&repository, "allowed.txt", b"before\n");
+    let old = sb.commit_all(&repository, "old sensitive fixture");
+    std::fs::remove_file(repository.join(".env.old")).unwrap();
+    sb.write(&repository, ".env.new", b"KNOWELL_CANARY_default_env_new\n");
+    sb.write(&repository, "allowed.txt", b"after\n");
+    let new = sb.commit_all(&repository, "new sensitive fixture");
+    remove_loose_blob(&sb, &repository, &old, ".env.old");
+    remove_loose_blob(&sb, &repository, &new, ".env.new");
+    assert_eq!(
+        open(&repository).diff(&old, &new).unwrap(),
+        [Change::Modified(p("allowed.txt"))]
+    );
+}
+
+#[test]
+fn scoped_diff_limits_inexact_matching_to_permitted_blob_sizes() {
+    let sb = Sandbox::new();
+    let repository = sb.init("size-limited-diff");
+    let original: String = (1..=20).map(|i| format!("row {i}\n")).collect();
+    sb.write(&repository, "exact-old.txt", b"exact content unchanged\n");
+    sb.write(&repository, "edited-old.txt", original.as_bytes());
+    let old = sb.commit_all(&repository, "old size fixture");
+    sb.git(&repository, &["mv", "exact-old.txt", "exact-new.txt"]);
+    sb.git(&repository, &["mv", "edited-old.txt", "edited-new.txt"]);
+    sb.write(
+        &repository,
+        "edited-new.txt",
+        original.replace("row 5\n", "row five, edited\n").as_bytes(),
+    );
+    let new = sb.commit_all(&repository, "new size fixture");
+    let repo = open(&repository);
+    for limit in [0, 1] {
+        let options = WalkOptions {
+            max_file_bytes: limit,
+            ..WalkOptions::default()
+        };
+        assert_eq!(
+            repo.diff_scoped(&old, &new, None, &ExclusionPolicy::builtin(), &options)
+                .unwrap(),
+            [
+                Change::Added(p("edited-new.txt")),
+                Change::Deleted(p("edited-old.txt")),
+                Change::Renamed {
+                    from: p("exact-old.txt"),
+                    to: p("exact-new.txt"),
+                    similarity: 100
+                },
+            ]
+        );
+    }
+}
+
+#[test]
+fn scoped_diff_filters_symlink_and_gitlink_modes_before_object_access() {
+    let sb = Sandbox::new();
+    let repository = sb.init("mode-filtered-diff");
+    sb.write(
+        &repository,
+        "regular-to-link.txt",
+        b"old ordinary unique content\n",
+    );
+    sb.write(
+        &repository,
+        "link-to-regular.txt",
+        b"temporary worktree placeholder\n",
+    );
+    let link_old = sb.git_stdin(
+        &repository,
+        &["hash-object", "-w", "--stdin"],
+        b"../old-target",
+    );
+    let link_new = sb.git_stdin(
+        &repository,
+        &["hash-object", "-w", "--stdin"],
+        b"../new-target",
+    );
+    sb.git(&repository, &["add", "-A"]);
+    for (mode, id, file) in [
+        ("120000", link_old.as_str(), "link-to-regular.txt"),
+        ("120000", link_old.as_str(), "link"),
+        (
+            "160000",
+            "1111111111111111111111111111111111111111",
+            "submodule",
+        ),
+    ] {
+        sb.git(
+            &repository,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("{mode},{id},{file}"),
+            ],
+        );
+    }
+    sb.git(&repository, &["commit", "-q", "-m", "old mode fixture"]);
+    let old = sb.git(&repository, &["rev-parse", "HEAD"]);
+    sb.write(
+        &repository,
+        "link-to-regular.txt",
+        b"new entirely different payload\n",
+    );
+    sb.git(&repository, &["add", "link-to-regular.txt"]);
+    // With core.symlinks=false, `add` can retain the fake symlink's index mode.
+    // Set the intended regular-file transition explicitly on every platform.
+    let regular = sb.git_stdin(
+        &repository,
+        &["hash-object", "-w", "--stdin"],
+        b"new entirely different payload\n",
+    );
+    sb.git(
+        &repository,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("100644,{regular},link-to-regular.txt"),
+        ],
+    );
+    for (mode, id, file) in [
+        ("120000", link_new.as_str(), "regular-to-link.txt"),
+        ("120000", link_new.as_str(), "link"),
+        (
+            "160000",
+            "2222222222222222222222222222222222222222",
+            "submodule",
+        ),
+    ] {
+        sb.git(
+            &repository,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("{mode},{id},{file}"),
+            ],
+        );
+    }
+    sb.git(&repository, &["commit", "-q", "-m", "new mode fixture"]);
+    let new = sb.git(&repository, &["rev-parse", "HEAD"]);
+    assert!(
+        sb.git(&repository, &["ls-tree", "HEAD", "link-to-regular.txt"])
+            .starts_with("100644 blob ")
+    );
+    remove_loose_blob(&sb, &repository, &old, "link-to-regular.txt");
+    remove_loose_blob(&sb, &repository, &new, "regular-to-link.txt");
+    assert_eq!(
+        open(&repository)
+            .diff_scoped(
+                &old,
+                &new,
+                None,
+                &ExclusionPolicy::builtin(),
+                &WalkOptions::default()
+            )
+            .unwrap(),
+        [
+            Change::Added(p("link-to-regular.txt")),
+            Change::Deleted(p("regular-to-link.txt"))
+        ]
+    );
+}
+
 #[test]
 fn force_push_is_detected_through_ancestry() {
     let sb = Sandbox::new();

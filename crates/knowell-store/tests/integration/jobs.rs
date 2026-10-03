@@ -285,6 +285,105 @@ async fn expired_leases_are_reclaimed_after_a_crash() {
 }
 
 #[tokio::test]
+async fn scoped_lease_recovery_leaves_other_views_and_unscoped_jobs_unchanged() {
+    let db = require_db!();
+    let mut c = db.conn().await;
+    let a = fixture(&mut c, "recovery-a").await;
+    let (_, sibling) = crate::common::add_project(&mut c, &a, "recovery-sibling").await;
+    let b = fixture(&mut c, "recovery-b").await;
+    let mut ids = Vec::new();
+    for scope in [
+        JobScope::View(a.view.id),
+        JobScope::Workspace(a.workspace.id),
+        JobScope::View(sibling.id),
+        JobScope::View(b.view.id),
+        JobScope::Organization(a.org.id),
+        JobScope::Unscoped,
+    ] {
+        ids.push(
+            enqueue_scoped(&mut c, &job("index", 1), scope)
+                .await
+                .unwrap()
+                .id,
+        );
+    }
+    while claim(&mut c, "crashed", &["index"], LEASE)
+        .await
+        .unwrap()
+        .is_some()
+    {}
+    sqlx::query(
+        "UPDATE job SET lease_expires_at = now() - interval '1 second' WHERE state = 'running'",
+    )
+    .execute(&mut *c)
+    .await
+    .unwrap();
+    let mut before = Vec::new();
+    for id in &ids {
+        before.push(get_job(&mut c, *id).await.unwrap().unwrap());
+    }
+    assert!(
+        reclaim_expired_leases_scoped(&mut c, &ClaimScope::default())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    for previous in &before {
+        assert_eq!(
+            get_job(&mut c, previous.id).await.unwrap().unwrap(),
+            *previous
+        );
+    }
+    let scope = ClaimScope {
+        views: vec![a.view.id],
+        workspaces: vec![a.workspace.id],
+        include_unscoped: false,
+    };
+    let selected = BTreeSet::from([ids[0], ids[1]]);
+    assert_eq!(
+        reclaim_expired_leases_scoped(&mut c, &scope)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        selected,
+    );
+    for previous in &before {
+        let current = get_job(&mut c, previous.id).await.unwrap().unwrap();
+        if selected.contains(&previous.id) {
+            assert_eq!(current.state, JobState::Queued);
+            assert_eq!(current.attempts, previous.attempts);
+            assert_eq!(current.lease_owner, None);
+            assert_eq!(current.lease_expires_at, None);
+        } else {
+            assert_eq!(
+                current, *previous,
+                "a foreign job's expired lease is untouched"
+            );
+        }
+    }
+    let unscoped = ClaimScope {
+        include_unscoped: true,
+        ..ClaimScope::default()
+    };
+    assert_eq!(
+        reclaim_expired_leases_scoped(&mut c, &unscoped)
+            .await
+            .unwrap(),
+        vec![ids[5]]
+    );
+    assert_eq!(
+        reclaim_expired_leases(&mut c)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([ids[2], ids[3], ids[4]]),
+        "the legacy recovery API still recovers all remaining expired leases",
+    );
+}
+
+#[tokio::test]
 async fn cancelled_jobs_never_run_and_their_workers_stop() {
     let db = require_db!();
     let mut c = db.conn().await;

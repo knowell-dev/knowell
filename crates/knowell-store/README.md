@@ -58,6 +58,10 @@ Repository functions are plain `async fn`s taking `&mut PgConnection`: pass a po
 connection, or a transaction (`&mut tx`) to compose several calls atomically. Functions
 that need several statements open their own transaction (a savepoint when nested).
 
+`jobs::reclaim_expired_leases_scoped` uses the same view, workspace and optional
+unscoped matching rules as `claim_scoped`. It leaves foreign expired leases unchanged;
+the existing unscoped recovery function still recovers every expired running job.
+
 `migrate()` creates core tables without requiring pgvector. If pgvector 0.8 or newer
 is available, it also installs the extension and vector table; rerun it after adding
 the extension files to enable semantic storage. Existing migration checksums and

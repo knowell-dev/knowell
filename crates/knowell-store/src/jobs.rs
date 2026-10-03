@@ -608,6 +608,26 @@ pub async fn cancel(conn: &mut PgConnection, id: JobId) -> Result<bool, StoreErr
 /// Crash recovery: running jobs whose lease expired go back to the queue
 /// (or to `dead` if that was their last attempt). Returns their ids.
 pub async fn reclaim_expired_leases(conn: &mut PgConnection) -> Result<Vec<JobId>, StoreError> {
+    reclaim_expired_leases_matching(conn, None).await
+}
+
+/// Crash recovery restricted to the view, workspace and unscoped jobs selected
+/// by `scope`, using the same matching rules as [`claim_scoped`]. Jobs outside
+/// the scope keep their state, attempts and lease, even when it has expired.
+pub async fn reclaim_expired_leases_scoped(
+    conn: &mut PgConnection,
+    scope: &ClaimScope,
+) -> Result<Vec<JobId>, StoreError> {
+    reclaim_expired_leases_matching(conn, Some(scope)).await
+}
+
+async fn reclaim_expired_leases_matching(
+    conn: &mut PgConnection,
+    scope: Option<&ClaimScope>,
+) -> Result<Vec<JobId>, StoreError> {
+    let include_all = scope.is_none();
+    let empty = ClaimScope::default();
+    let scope = scope.unwrap_or(&empty);
     let mut ids: Vec<JobId> = sqlx::query_scalar(
         "UPDATE job SET
            state = CASE WHEN attempts >= max_attempts THEN 'dead'::job_state
@@ -617,9 +637,17 @@ pub async fn reclaim_expired_leases(conn: &mut PgConnection) -> Result<Vec<JobId
            lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
          WHERE id IN (SELECT id FROM job
                       WHERE state = 'running' AND lease_expires_at < now()
+                        AND ($1::boolean
+                             OR view_id = ANY($2::uuid[])
+                             OR (view_id IS NULL AND workspace_id = ANY($3::uuid[]))
+                             OR (organization_id IS NULL AND $4::boolean))
                       FOR UPDATE SKIP LOCKED)
          RETURNING id",
     )
+    .bind(include_all)
+    .bind(&scope.views)
+    .bind(&scope.workspaces)
+    .bind(scope.include_unscoped)
     .fetch_all(conn)
     .await?;
     ids.sort();

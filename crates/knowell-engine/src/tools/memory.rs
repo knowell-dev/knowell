@@ -27,12 +27,14 @@ use knowell_mcp::{
     CheckpointId, CommitId, Evidence, FreshnessTier, Gap, GapReason, IndexState, MatchReason,
     MemoryId, ResultId, TaskId, Timestamp, ToolError, UntrustedText, ViewLayer,
 };
-use knowell_source::git::{Change, GitRepo};
+use knowell_source::WalkOptions;
+use knowell_source::git::Change;
 use knowell_store::content;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
+use super::relations::{is_missing_git_ref, open_git_repo};
 use crate::access::Access;
 use crate::engine::Engine;
 use crate::error::store_tool;
@@ -186,7 +188,7 @@ fn record_evidence(e: &KEvidence, pinned: Option<&Pinned>) -> Option<Evidence> {
     let view: TrackTarget = e.view.as_str().parse().ok()?;
     let index_state = match pinned.and_then(|p| p.projects.get(&e.project)) {
         Some(project) if project.commit.as_deref() == Some(e.commit.as_str()) => {
-            IndexState::Current
+            project.index_state()
         }
         Some(_) => IndexState::Stale,
         None => IndexState::NotIndexed,
@@ -652,6 +654,7 @@ impl Engine {
         &self,
         access: &Access,
         pinned: &Pinned,
+        projects: &[Name],
         query: &str,
         limit: usize,
     ) -> Result<Vec<MemoryHit>, ToolError> {
@@ -665,7 +668,17 @@ impl Engine {
         if words.is_empty() {
             return Ok(Vec::new());
         }
-        let scopes = self.readable_scopes(access, pinned);
+        // Narrow before retrieval and its per-word limit, so unrelated
+        // project records cannot crowd out the selected project's memory.
+        // Wider scopes and unindexed selected projects remain reachable.
+        let scopes: Vec<Scope> = self
+            .readable_scopes(access, pinned)
+            .into_iter()
+            .filter(|scope| match scope {
+                Scope::Project { project, .. } => projects.is_empty() || projects.contains(project),
+                _ => true,
+            })
+            .collect();
         let mut by_id: BTreeMap<RecordId, (usize, KnowledgeRecord)> = BTreeMap::new();
         for word in &words {
             for row in self
@@ -985,11 +998,12 @@ impl Engine {
                 .await
             {
                 Ok(list) => changed_since.extend(list),
-                Err(message) => gaps.push(Gap::for_project(
+                Err(ToolError::NotFound(message)) => gaps.push(Gap::for_project(
                     GapReason::NotFound,
                     change.project.clone(),
                     message,
                 )),
+                Err(error) => return Err(error),
             }
         }
         let by_id: BTreeMap<RecordId, &KnowledgeRecord> =
@@ -1097,24 +1111,45 @@ impl Engine {
         project: &Name,
         from: &str,
         to: &str,
-    ) -> Result<Vec<SourceChange>, String> {
+    ) -> Result<Vec<SourceChange>, ToolError> {
         let entry = pinned
-            .workspace
-            .project(project)
-            .ok_or_else(|| format!("{project} is not visible in this context"))?
+            .projects
+            .get(project)
+            .ok_or_else(|| {
+                ToolError::not_found(format!("{project} is not visible in this context"))
+            })?
+            .entry
             .clone();
         let (Ok(from_id), Ok(to_id)) = (CommitId::new(from), CommitId::new(to)) else {
-            return Err("the recorded commits are not full commit ids".to_owned());
+            return Err(ToolError::not_found(
+                "the recorded commits are not full commit ids",
+            ));
+        };
+        let policy = self.project_exclusion_policy(pinned, project)?;
+        let config = self.inner.indexer.config();
+        let mode = config.git_config;
+        let options = WalkOptions {
+            max_file_bytes: config.limits.max_file_bytes,
+            ..WalkOptions::default()
         };
         let path = entry.path.clone();
+        let root = entry.root.clone();
         let (from_s, to_s) = (from.to_owned(), to.to_owned());
         let changes = tokio::task::spawn_blocking(move || {
-            let repo = GitRepo::open(&path).map_err(|e| e.to_string())?;
-            repo.diff(&from_s, &to_s).map_err(|e| e.to_string())
+            let repo = open_git_repo(&path, mode)?;
+            repo.diff_scoped(&from_s, &to_s, root.as_ref(), &policy, &options)
         })
         .await
-        .map_err(|e| format!("reading git history: {e}"))?
-        .map_err(|_| format!("the commits of {project} could not be compared in its repository"))?;
+        .map_err(|error| ToolError::internal(format!("reading git history task: {error}")))?
+        .map_err(|error| {
+            if is_missing_git_ref(&error) {
+                ToolError::not_found(format!(
+                    "the recorded commits of {project} are not available in its repository"
+                ))
+            } else {
+                ToolError::internal(format!("reading git history: {error}"))
+            }
+        })?;
         let root = entry.root.clone();
         let to_project = |p: &knowell_core::RepoPath| match &root {
             None => Some(p.clone()),

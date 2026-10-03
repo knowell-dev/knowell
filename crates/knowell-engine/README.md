@@ -182,8 +182,17 @@ File-level ids `<project>/<path>`; graph expansion off; the manifest is pinned o
 | `max_fetch_lines` | 2000 lines per fetched item or packed body |
 | `search` | `knowell_query::SearchConfig::default()` (unmeasured defaults) |
 
+Fresh requests resolve each authorized Git target before pinning its saved index;
+missing refs, commits and unborn HEADs produce `ref_not_found` without old source hits.
+Explicit search project filters narrow this check before unrelated source access.
+Existing contexts retain their pinned versions and still recheck current permissions.
+Fresh queries observe the resolved source commit for freshness without writing it to
+the store or indexing it; an advanced ref cannot make its old generation appear current.
+
 ## Known limits
 
+- Directory source views have no Git commit. Search reports missing commit evidence
+  rather than returning source hits with invented commit ids.
 - A snapshot costs two store round trips per file (text, chunks) plus parsing; fine for
   thousands of files, slow for very large views on first use. A store query returning text
   and chunks of a generation in bulk would remove that.

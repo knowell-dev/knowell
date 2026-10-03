@@ -32,7 +32,7 @@ let watch = indexer.watch(shutdown.clone())?;
     ▼
  sync ── resolve target (git refs, exact name only; directory → tree hash)
     │      missing ref → view failed with the reason, nothing else indexed
-    │      same as active → up to date
+    │      same as active + matching content-policy manifest → up to date
     ▼
  index.text (T0) ── begin (or resume) generation g
     │   plan: initial | incremental (git diff) | rewrite (full re-walk) | rebuild | directory
@@ -229,9 +229,17 @@ provider calls do not starve text, symbols and relations of other views.
   queue but serving different views never claim, fail and dead-letter each other's jobs; a
   job of a view nobody serves stays queued until a process registers the view (or the view
   is deleted, which deletes its jobs).
+- **One-workspace runs:** `run_until_idle_scoped_with(concurrency)` freezes the registered
+  view scope at entry, excludes unscoped legacy jobs and recovers expired leases only in
+  that scope. The local `know index` command uses this stricter runner. Concurrent
+  registrations do not expand its scope; foreign job state, attempts and leases remain
+  unchanged. The existing runner and workers retain their legacy recovery behavior.
 - **Idempotency:** two triggers for the same target and state share one job. A target
   whose earlier build ended without result (it was superseded, then the ref moved back, or
   it was dead-lettered) gets a fresh job.
+  An unchanged target is up to date only when its active manifest also matches the
+  configured content policy. Changed exclusions or roots, and missing or corrupt policy
+  manifests, trigger a full reconciliation before another completion report.
 - **Retries / DLQ:** failed attempts are retried with exponential backoff
   (`JobSettings`); after `max_attempts` the job is dead and its generation is failed with
   the error, so the view reports it and the next trigger starts over. A dead T2 fails only

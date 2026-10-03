@@ -177,7 +177,7 @@ fn collect(
         && base != head
     {
         let mut read = Vec::new();
-        for change in repo.diff(base, head)? {
+        for change in repo.diff_scoped(base, head, ctx.root.as_ref(), &ctx.policy, &options)? {
             if let Some(old) = change.old_path().and_then(|p| ctx.to_project_path(p)) {
                 versions.insert(old, Version::Deleted);
             }
@@ -213,12 +213,21 @@ fn collect(
         }
     }
     // Saved but uncommitted changes, read from the working tree.
-    for change in repo.working_changes(&ctx.policy)? {
+    let saved_options = WalkOptions {
+        respect_gitignore: true,
+        ..options.clone()
+    };
+    for change in repo.working_changes_scoped(ctx.root.as_ref(), &ctx.policy, &saved_options)? {
         let Some(path) = ctx.to_project_path(change.path()) else {
             continue;
         };
-        if let Some(old) = change.old_path().and_then(|p| ctx.to_project_path(p)) {
+        if let Some(old) = change.old_path().and_then(|p| ctx.to_project_path(p))
+            && ctx.policy.check(&old).is_none()
+        {
             versions.insert(old, Version::Deleted);
+        }
+        if ctx.policy.check(&path).is_some() {
+            continue;
         }
         let repo_path = change.path().clone();
         match change {

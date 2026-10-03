@@ -1,15 +1,13 @@
 //! `trace_flow`, `analyze_impact` and `contracts` over the code graph of
 //! the pinned manifest.
 //!
-//! What the graph holds today: files, parsed symbols, `defines` and
-//! `contains` structure and file `imports` (syntactic, resolved to files or
-//! left unresolved). Call, HTTP, event, RPC and table relations need a
-//! relation stage (`knowell-link`); until one is installed every answer
-//! carries a gap that says so, and impact is computed at file level over
-//! imports.
+//! The pinned graph combines file and symbol structure, syntactic imports,
+//! and facts from the configured relation stage (by default `knowell-link`).
+//! Missing relation stages and unsupported reference resolution remain
+//! explicit gaps; file-import impact is not presented as call resolution.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 
 use knowell_core::{LineRange, Name, RepoPath, TrackTarget};
@@ -17,6 +15,7 @@ use knowell_graph::{
     CodeGraph, ContractKind as GContractKind, Direction, EdgeFilter, EdgeKind, ImpactSpec, NodeId,
     NodeKind as GNodeKind, WalkSpec,
 };
+use knowell_index::GitConfigMode;
 use knowell_mcp::tools::{
     AnalyzeImpactInput, AnalyzeImpactOutput, ChangeSubject, ContractInfo, ContractKind,
     ContractParticipant, ContractRole, ContractsInput, ContractsOutput, DriftCode, DriftFinding,
@@ -29,8 +28,8 @@ use knowell_mcp::{
 };
 use knowell_parse::parse;
 use knowell_secrets::ExclusionPolicy;
-use knowell_source::WalkOptions;
-use knowell_source::git::{Change, GitRepo};
+use knowell_source::git::{Change, GitError, GitRepo};
+use knowell_source::{FileRead, SkipReason, WalkOptions};
 use knowell_store::views::GenerationPin;
 
 use super::code::dedupe;
@@ -273,7 +272,99 @@ struct Changed {
     item: Option<ImpactItem>,
 }
 
+fn graph_project_available(pinned: &Pinned, project: &Name) -> Result<bool, ToolError> {
+    if pinned.projects.contains_key(project) {
+        return Ok(true);
+    }
+    if pinned.not_indexed.contains(project)
+        || pinned.gaps.iter().any(|gap| {
+            gap.project.as_ref() == Some(project) && gap.reason == GapReason::RefNotFound
+        })
+    {
+        return Ok(false);
+    }
+    // Only authorized pins and gaps establish existence, so invisible and
+    // nonexistent projects have the same response.
+    Err(ToolError::not_found(format!(
+        "project {project} does not exist"
+    )))
+}
+
+fn change_description(change: &ChangeSubject) -> String {
+    match change {
+        ChangeSubject::Symbol { symbol } => format!(
+            "symbol {}",
+            symbol
+                .symbol
+                .clone()
+                .or_else(|| symbol.id.as_ref().map(ToString::to_string))
+                .unwrap_or_default()
+        ),
+        ChangeSubject::File { project, path } => format!("file {project}/{path}"),
+        ChangeSubject::Diff {
+            project,
+            base,
+            head,
+        } => format!(
+            "diff of {project} from {base} to {}",
+            head.as_ref()
+                .map_or_else(|| "the pinned view".to_owned(), ToString::to_string),
+        ),
+        ChangeSubject::Patch { project, .. } => format!("unapplied patch to {project}"),
+    }
+}
+
+/// Opens local Git using the indexer's configuration isolation convention.
+pub(crate) fn open_git_repo(path: &Path, mode: GitConfigMode) -> Result<GitRepo, GitError> {
+    match mode {
+        GitConfigMode::User => GitRepo::open(path),
+        GitConfigMode::Isolated => GitRepo::open_isolated(path),
+    }
+}
+
+/// Whether a source failure specifically means a requested ref is unavailable.
+pub(crate) fn is_missing_git_ref(error: &GitError) -> bool {
+    matches!(
+        error,
+        GitError::RefNotFound { .. }
+            | GitError::CommitNotFound { .. }
+            | GitError::UnbornHead { .. }
+            | GitError::NotACommit { .. }
+            | GitError::InvalidObjectId { .. }
+    )
+}
+
+fn project_relative(path: &RepoPath, root: Option<&RepoPath>) -> Option<RepoPath> {
+    match root {
+        None => Some(path.clone()),
+        Some(root) => path
+            .as_str()
+            .strip_prefix(root.as_str())
+            .and_then(|suffix| suffix.strip_prefix('/'))
+            .and_then(|suffix| RepoPath::new(suffix).ok()),
+    }
+}
+
 impl Engine {
+    /// The configured path policy, checked on project-relative paths before reads.
+    pub(crate) fn project_exclusion_policy(
+        &self,
+        pinned: &Pinned,
+        project: &Name,
+    ) -> Result<ExclusionPolicy, ToolError> {
+        let resolved = pinned
+            .workspace
+            .resolved
+            .projects
+            .iter()
+            .find(|entry| &entry.name == project)
+            .ok_or_else(|| ToolError::internal("a pinned project's configuration is missing"))?;
+        let mut patterns = self.inner.indexer.config().content.excluded_dirs.clone();
+        patterns.extend(resolved.exclude.iter().map(|pattern| pattern.value.clone()));
+        ExclusionPolicy::with_patterns(&patterns)
+            .map_err(|error| ToolError::internal(format!("project exclusion policy: {error}")))
+    }
+
     /// The code graph of the pinned manifest (cached per pin set).
     pub(crate) async fn code_graph(&self, pinned: &Pinned) -> Result<GraphCtx, ToolError> {
         let mut views = BTreeMap::new();
@@ -311,8 +402,31 @@ impl Engine {
                 "trace job {job} does not exist; traces are computed synchronously"
             )));
         }
-        let ctx = self.code_graph(&pinned).await?;
         let mut gaps = pinned.gaps.clone();
+        gaps.extend(pinned.not_indexed_gaps(&[]));
+        if let Some(project) = &input.project {
+            let available = match graph_project_available(&pinned, project) {
+                Err(ToolError::NotFound(_)) if input.target.context_id.is_some() => {
+                    // Contexts have already been re-filtered against current
+                    // grants. Preserve their structured empty-trace response
+                    // without probing a removed or invisible project's source.
+                    gaps.push(Gap::new(
+                        GapReason::NotFound,
+                        "the start symbol, id or contract does not exist in the pinned views",
+                    ));
+                    false
+                }
+                result => result?,
+            };
+            if !available {
+                dedupe(&mut gaps);
+                return Ok(TraceFlowOutput {
+                    gaps,
+                    ..TraceFlowOutput::default()
+                });
+            }
+        }
+        let ctx = self.code_graph(&pinned).await?;
         // The start: a symbol (and the file that carries its imports), a
         // file, or a contract.
         let mut starts: Vec<NodeId> = Vec::new();
@@ -439,12 +553,17 @@ impl Engine {
         let mut truncated = false;
         let add_node = |id: &NodeId,
                         local: &mut BTreeMap<NodeId, String>,
-                        nodes: &mut Vec<FlowNode>|
+                        nodes: &mut Vec<FlowNode>,
+                        truncated: &mut bool|
          -> Option<String> {
             if let Some(existing) = local.get(id) {
                 return Some(existing.clone());
             }
             let node = ctx.graph.node(id)?;
+            if local.len() >= limit {
+                *truncated = true;
+                return None;
+            }
             let name = format!("n{}", local.len());
             local.insert(id.clone(), name.clone());
             let placed = ctx.evidence(node, Vec::new());
@@ -466,7 +585,7 @@ impl Engine {
             Some(name)
         };
         for start in &starts {
-            add_node(start, &mut local, &mut nodes);
+            add_node(start, &mut local, &mut nodes, &mut truncated);
         }
         let mut seen_edges = BTreeSet::new();
         for start in &starts {
@@ -490,9 +609,23 @@ impl Engine {
                     let Some(relation) = relation_of(edge.kind, target_kind) else {
                         continue;
                     };
+                    // Reserve both endpoints together so a clipped edge cannot
+                    // consume a slot with an orphaned endpoint.
+                    let additional = BTreeSet::from([&hop.edge.from, &hop.edge.to])
+                        .into_iter()
+                        .filter(|id| !local.contains_key(*id))
+                        .count();
+                    if local
+                        .len()
+                        .checked_add(additional)
+                        .is_none_or(|total| total > limit)
+                    {
+                        truncated = true;
+                        continue;
+                    }
                     let (Some(from), Some(to)) = (
-                        add_node(&hop.edge.from, &mut local, &mut nodes),
-                        add_node(&hop.edge.to, &mut local, &mut nodes),
+                        add_node(&hop.edge.from, &mut local, &mut nodes, &mut truncated),
+                        add_node(&hop.edge.to, &mut local, &mut nodes, &mut truncated),
                     ) else {
                         continue;
                     };
@@ -514,10 +647,16 @@ impl Engine {
             let start = nodes.remove(position);
             nodes.insert(0, start);
         }
-        if edges.is_empty() {
+        if edges.is_empty() && !truncated {
             gaps.push(Gap::new(
                 GapReason::NoCandidatesInSelectedRef,
                 "no evidenced relation leaves the start in the chosen direction",
+            ));
+        }
+        if truncated {
+            gaps.push(Gap::new(
+                GapReason::LimitReached,
+                "the trace reached its node or walk budget",
             ));
         }
         dedupe(&mut gaps);
@@ -575,8 +714,25 @@ impl Engine {
         let Some(change) = &input.change else {
             return Err(ToolError::invalid_input("pass `change`"));
         };
-        let ctx = self.code_graph(&pinned).await?;
         let mut gaps = pinned.gaps.clone();
+        gaps.extend(pinned.not_indexed_gaps(&[]));
+        let project = match change {
+            ChangeSubject::Symbol { symbol } => symbol.project.as_ref(),
+            ChangeSubject::File { project, .. }
+            | ChangeSubject::Diff { project, .. }
+            | ChangeSubject::Patch { project, .. } => Some(project),
+        };
+        if let Some(project) = project
+            && !graph_project_available(&pinned, project)?
+        {
+            dedupe(&mut gaps);
+            return Ok(AnalyzeImpactOutput {
+                subject: change_description(change),
+                gaps,
+                ..AnalyzeImpactOutput::default()
+            });
+        }
+        let ctx = self.code_graph(&pinned).await?;
         let (subject, changed) = match change {
             ChangeSubject::Symbol { symbol } => {
                 let found = self
@@ -664,6 +820,21 @@ impl Engine {
                 (format!("unapplied patch to {project}"), changed)
             }
         };
+        if changed.is_empty()
+            && gaps.iter().any(|gap| {
+                matches!(
+                    gap.reason,
+                    GapReason::ProjectNotIndexed | GapReason::RefNotFound
+                ) && project.is_none_or(|project| gap.project.as_ref() == Some(project))
+            })
+        {
+            dedupe(&mut gaps);
+            return Ok(AnalyzeImpactOutput {
+                subject,
+                gaps,
+                ..AnalyzeImpactOutput::default()
+            });
+        }
         if let Some(gap) = relations_gap(self) {
             gaps.push(gap);
         }
@@ -729,9 +900,7 @@ impl Engine {
                     continue;
                 };
                 if item.kind == ImpactKind::Test {
-                    if include_tests {
-                        tests.push(item);
-                    }
+                    tests.push(item);
                 } else {
                     impacted.push(item);
                 }
@@ -748,11 +917,13 @@ impl Engine {
                 .cmp(&b.distance)
                 .then_with(|| a.name.cmp(&b.name))
         });
-        if impacted.len() > limit || tests.len() > limit {
+        // Omitting a result list must not erase its evidence from risk or
+        // report that the omitted list exceeded the requested output limit.
+        let has_test_evidence = !tests.is_empty();
+        if impacted.len() > limit || (include_tests && tests.len() > limit) {
             truncated = true;
         }
         impacted.truncate(limit);
-        tests.truncate(limit);
         let changed_items: Vec<ImpactItem> = changed.into_iter().filter_map(|c| c.item).collect();
         let changed_projects: BTreeSet<Name> = changed_items
             .iter()
@@ -792,7 +963,7 @@ impl Engine {
                 evidence: Vec::new(),
             });
         }
-        if !changed_items.is_empty() && tests.is_empty() {
+        if !changed_items.is_empty() && !has_test_evidence {
             factors.push(RiskFactor {
                 code: RiskCode::UntestedCode,
                 message: "no test file imports the changed code (file-level evidence only)"
@@ -845,6 +1016,11 @@ impl Engine {
             ));
         }
         dedupe(&mut gaps);
+        if include_tests {
+            tests.truncate(limit);
+        } else {
+            tests.clear();
+        }
         Ok(AnalyzeImpactOutput {
             subject,
             changed: changed_items,
@@ -881,36 +1057,56 @@ impl Engine {
                 "project {project} does not exist"
             )));
         };
-        let path: PathBuf = pinned_project.entry.path.clone();
+        let path = pinned_project.entry.path.clone();
         let root = pinned_project.entry.root.clone();
         let base = base.clone();
         let head = head.cloned();
         let head_commit = pinned_project.commit.clone();
-        let outcome = tokio::task::spawn_blocking(move || -> Result<DiffOutcome, String> {
-            let repo = GitRepo::open(&path)
-                .map_err(|_| "the project is not a git repository".to_owned())?;
-            let base_commit = repo
-                .resolve(&base)
-                .map_err(|_| {
-                    format!("ref {base} does not exist; no other ref was used in its place")
-                })?
-                .commit;
-            let head_commit = match head {
-                Some(h) => {
-                    repo.resolve(&h)
-                        .map_err(|_| {
-                            format!("ref {h} does not exist; no other ref was used in its place")
-                        })?
-                        .commit
-                }
-                None => head_commit.ok_or_else(|| "the pinned view has no commit".to_owned())?,
+        let policy = self.project_exclusion_policy(pinned, project)?;
+        let config = self.inner.indexer.config();
+        let mode = config.git_config;
+        let options = WalkOptions {
+            max_file_bytes: config.limits.max_file_bytes,
+            ..WalkOptions::default()
+        };
+        if head.is_none() && head_commit.is_none() {
+            return Ok((
+                Vec::new(),
+                vec![Gap::for_project(
+                    GapReason::RefNotFound,
+                    project.clone(),
+                    "the pinned view has no git commit",
+                )],
+            ));
+        }
+        let outcome = tokio::task::spawn_blocking(move || -> Result<DiffOutcome, DiffFailure> {
+            let repo = open_git_repo(&path, mode).map_err(DiffFailure::Source)?;
+            let resolve = |target: &TrackTarget| {
+                repo.resolve(target)
+                    .map(|resolved| resolved.commit)
+                    .map_err(|error| {
+                        if is_missing_git_ref(&error) {
+                            DiffFailure::MissingRef(target.clone())
+                        } else {
+                            DiffFailure::Source(error)
+                        }
+                    })
+            };
+            let base_commit = resolve(&base)?;
+            let head_commit = match head.as_ref() {
+                Some(target) => resolve(target)?,
+                None => head_commit.ok_or_else(|| {
+                    DiffFailure::Source(GitError::Git {
+                        operation: "committed diff",
+                        message: "the pinned view has no git commit".to_owned(),
+                    })
+                })?,
             };
             let changes = repo
-                .diff(&base_commit, &head_commit)
-                .map_err(|_| "the refs could not be compared".to_owned())?;
+                .diff_scoped(&base_commit, &head_commit, root.as_ref(), &policy, &options)
+                .map_err(DiffFailure::Source)?;
             let mut files = Vec::new();
-            let policy = ExclusionPolicy::builtin();
-            let options = WalkOptions::default();
+            let mut skipped = Vec::new();
             for change in changes {
                 let (old, new) = match &change {
                     Change::Added(p) => (None, Some(p.clone())),
@@ -918,47 +1114,73 @@ impl Engine {
                     Change::Deleted(p) => (Some(p.clone()), None),
                     Change::Renamed { from, to, .. } => (Some(from.clone()), Some(to.clone())),
                 };
-                let read = |commit: &str, p: &Option<RepoPath>| -> Option<String> {
-                    let p = p.as_ref()?;
-                    let report = repo
-                        .read_commit_files(commit, std::slice::from_ref(p), &policy, &options)
-                        .ok()?;
-                    report.files.into_iter().next().map(|f| f.text)
+                // The scoped diff has already filtered both endpoints before
+                // any similarity read. Recheck that boundary before reading
+                // texts; configured patterns use project-relative paths.
+                let scoped_path = |path: &Option<RepoPath>| {
+                    path.as_ref()
+                        .map(|path| {
+                            project_relative(path, root.as_ref())
+                                .filter(|relative| policy.check(relative).is_none())
+                                .ok_or_else(|| {
+                                    DiffFailure::Source(GitError::Git {
+                                        operation: "scoped diff validation",
+                                        message: "a change escaped the selected project policy"
+                                            .to_owned(),
+                                    })
+                                })
+                        })
+                        .transpose()
                 };
-                let old_text = read(&base_commit, &old);
-                let new_text = read(&head_commit, &new);
+                let old_path = scoped_path(&old)?;
+                let new_path = scoped_path(&new)?;
+                let (old_text, old_skip) =
+                    read_diff_text(&repo, &base_commit, old.as_ref(), &options)
+                        .map_err(DiffFailure::Source)?;
+                let (new_text, new_skip) =
+                    read_diff_text(&repo, &head_commit, new.as_ref(), &options)
+                        .map_err(DiffFailure::Source)?;
+                let contents_complete = old_skip.is_none() && new_skip.is_none();
+                if let Some((path, reason)) = old_path.as_ref().zip(old_skip) {
+                    skipped.push((path.clone(), reason));
+                }
+                if let Some((path, reason)) = new_path.as_ref().zip(new_skip) {
+                    skipped.push((path.clone(), reason));
+                }
                 files.push(DiffFile {
-                    old,
-                    new,
+                    old: old_path,
+                    new: new_path,
                     old_text,
                     new_text,
+                    contents_complete,
                 });
             }
-            Ok(DiffOutcome { files })
+            Ok(DiffOutcome { files, skipped })
         })
         .await
         .map_err(|e| ToolError::internal(format!("git diff task: {e}")))?;
         let outcome = match outcome {
             Ok(o) => o,
-            Err(message) => {
+            Err(DiffFailure::MissingRef(target)) => {
                 return Ok((
                     Vec::new(),
                     vec![Gap::for_project(
                         GapReason::RefNotFound,
                         project.clone(),
-                        message,
+                        format!("ref {target} does not exist; no other ref was used in its place"),
                     )],
                 ));
             }
+            Err(DiffFailure::Source(error)) => {
+                return Err(ToolError::internal(format!(
+                    "reading committed changes: {error}"
+                )));
+            }
         };
-        let to_project = |p: &RepoPath| match &root {
-            None => Some(p.clone()),
-            Some(root) => p
-                .as_str()
-                .strip_prefix(root.as_str())
-                .and_then(|r| r.strip_prefix('/'))
-                .and_then(|r| RepoPath::new(r).ok()),
-        };
+        let gaps = outcome.skipped.into_iter().map(|(path, reason)| Gap::for_project(
+            GapReason::ExcludedByPolicy, project.clone(),
+            format!("{path}: changed content is unavailable ({reason}); symbol changes were not inferred"),
+        )).collect();
         let mut changed = Vec::new();
         for file in outcome.files {
             let DiffFile {
@@ -966,16 +1188,20 @@ impl Engine {
                 new,
                 old_text,
                 new_text,
+                contents_complete,
             } = file;
-            let old = old.as_ref().and_then(to_project);
-            let new = new.as_ref().and_then(to_project);
             let Some(path) = new.clone().or(old.clone()) else {
                 continue;
             };
-            let symbols = changed_symbols(
-                old.as_ref().zip(old_text.as_deref()),
-                new.as_ref().zip(new_text.as_deref()),
-            );
+            let symbols = if contents_complete {
+                changed_symbols(
+                    old.as_ref().zip(old_text.as_deref()),
+                    new.as_ref().zip(new_text.as_deref()),
+                )
+            } else {
+                // Missing text is not evidence that its symbols were removed.
+                BTreeMap::new()
+            };
             changed.extend(self.changed_items(
                 ctx,
                 project,
@@ -986,7 +1212,7 @@ impl Engine {
                 None,
             )?);
         }
-        Ok((changed, Vec::new()))
+        Ok((changed, gaps))
     }
 
     /// Changed files and symbols of an unapplied unified diff against the
@@ -1365,10 +1591,42 @@ struct DiffFile {
     new: Option<RepoPath>,
     old_text: Option<String>,
     new_text: Option<String>,
+    contents_complete: bool,
 }
 
 struct DiffOutcome {
     files: Vec<DiffFile>,
+    skipped: Vec<(RepoPath, &'static str)>,
+}
+
+enum DiffFailure {
+    MissingRef(TrackTarget),
+    Source(GitError),
+}
+
+/// A missing endpoint describes an addition/deletion, while an unreadable
+/// endpoint is an operational failure and skipped text leaves an explicit gap.
+fn read_diff_text(
+    repo: &GitRepo,
+    commit: &str,
+    path: Option<&RepoPath>,
+    options: &WalkOptions,
+) -> Result<(Option<String>, Option<&'static str>), GitError> {
+    let Some(path) = path else {
+        return Ok((None, None));
+    };
+    match repo.read_commit_file(commit, path, &ExclusionPolicy::builtin(), options)? {
+        FileRead::File(file) => Ok((Some(file.text), None)),
+        FileRead::Missing => Err(GitError::PathNotFound {
+            commit: commit.to_owned(),
+            path: path.clone(),
+        }),
+        FileRead::Skipped(SkipReason::Unreadable { error_kind }) => Err(GitError::Git {
+            operation: "reading changed content",
+            message: error_kind,
+        }),
+        FileRead::Skipped(reason) => Ok((None, Some(reason.as_str()))),
+    }
 }
 
 /// How a symbol changed.
@@ -1462,6 +1720,43 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn project_paths_require_a_component_boundary() {
+        let root = RepoPath::new("packages/app").unwrap();
+        assert_eq!(
+            project_relative(
+                &RepoPath::new("packages/app/src/a.ts").unwrap(),
+                Some(&root)
+            ),
+            Some(RepoPath::new("src/a.ts").unwrap())
+        );
+        for path in [
+            "packages/application/src/a.ts",
+            "packages/app",
+            "outside/src/a.ts",
+        ] {
+            assert!(project_relative(&RepoPath::new(path).unwrap(), Some(&root)).is_none());
+        }
+    }
+
+    #[test]
+    fn operational_git_errors_are_not_missing_refs() {
+        assert!(is_missing_git_ref(&GitError::RefNotFound {
+            target: "branch:gone".parse().unwrap()
+        }));
+        assert!(is_missing_git_ref(&GitError::CommitNotFound {
+            id: "0".repeat(40)
+        }));
+        assert!(!is_missing_git_ref(&GitError::Git {
+            operation: "reading allowed blob",
+            message: "not found".to_owned(),
+        }));
+        assert!(!is_missing_git_ref(&GitError::NotARepository {
+            path: std::path::PathBuf::from("synthetic"),
+            message: "unreadable".to_owned(),
+        }));
+    }
 
     #[test]
     fn changed_symbols_prefers_members() {
