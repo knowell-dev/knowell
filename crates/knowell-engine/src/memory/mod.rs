@@ -17,6 +17,7 @@ use knowell_core::Name;
 use knowell_knowledge::{
     Checkpoint, KnowledgeRecord, RecordId, RecordKind, RecordState, Scope, Task, TaskId, TaskStatus,
 };
+use uuid::Uuid;
 
 pub(crate) use store_repo::Directory;
 pub use store_repo::StoreMemory;
@@ -69,6 +70,58 @@ pub struct RecordQuery {
     pub text: Option<String>,
     /// Most records, at least 1.
     pub limit: u32,
+}
+
+/// One checkpoint for [`MemoryRepo::save_checkpoint`]: everything it writes.
+#[derive(Debug, Clone, Copy)]
+pub struct CheckpointSave<'a> {
+    /// Receipt of an idempotent save, derived from the caller and their
+    /// idempotency key; `None` always stores.
+    pub receipt: Option<Uuid>,
+    /// The task as read; the save fails with a conflict when it has moved.
+    pub before: &'a TaskRow,
+    /// The task after the checkpoint (same id as `before`).
+    pub after: &'a Task,
+    /// New task decisions, whose evidence was resolved in `workspace`.
+    pub decisions: &'a [KnowledgeRecord],
+    /// The workspace the decisions' evidence was resolved in.
+    pub workspace: &'a Name,
+    /// The checkpoint to append (of the same task).
+    pub checkpoint: &'a Checkpoint,
+}
+
+/// What [`MemoryRepo::save_checkpoint`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckpointSaved {
+    /// The decisions, task update, checkpoint and receipt were stored.
+    Saved {
+        /// The updated task.
+        task: Box<TaskRow>,
+        /// The new checkpoint's number within the task.
+        seq: u64,
+        /// The stored decisions, in input order.
+        decisions: Vec<RecordRow>,
+    },
+    /// The receipt already existed (an earlier attempt, possibly by another
+    /// process, or a concurrent save that won); nothing was stored.
+    Replayed {
+        /// The task of the receipt's checkpoint.
+        task: TaskId,
+        /// That checkpoint's number.
+        seq: u64,
+    },
+}
+
+impl CheckpointSave<'_> {
+    /// Rejects a save whose parts name different tasks.
+    pub(crate) fn check(&self) -> Result<(), MemoryError> {
+        if self.after.id != self.before.task.id || self.checkpoint.task != self.after.id {
+            return Err(MemoryError::Invalid(
+                "checkpoint save mixes different tasks".to_owned(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// A stored task with its workspace, owner and revision.
@@ -169,6 +222,23 @@ pub trait MemoryRepo: Send + Sync + 'static {
 
     /// Checkpoints of a task, oldest first.
     fn checkpoints(&self, task: TaskId) -> BoxFuture<'_, Result<Vec<CheckpointRow>, MemoryError>>;
+
+    /// Stores a checkpoint atomically: the decisions, the task update, the
+    /// checkpoint and its receipt all persist, or none of them does. When
+    /// the receipt already exists, also after a restart or because a
+    /// concurrent save with it won, nothing is stored and that checkpoint is
+    /// returned as [`CheckpointSaved::Replayed`].
+    fn save_checkpoint<'a>(
+        &'a self,
+        save: CheckpointSave<'a>,
+    ) -> BoxFuture<'a, Result<CheckpointSaved, MemoryError>>;
+
+    /// The task and checkpoint number an idempotent save with `receipt`
+    /// produced, if any.
+    fn checkpoint_receipt(
+        &self,
+        receipt: Uuid,
+    ) -> BoxFuture<'_, Result<Option<(TaskId, u64)>, MemoryError>>;
 }
 
 /// Everything in process memory; lost when the process ends.
@@ -177,11 +247,12 @@ pub struct InMemoryMemory {
     state: Mutex<InMemoryState>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct InMemoryState {
     records: BTreeMap<RecordId, RecordRow>,
     tasks: BTreeMap<TaskId, TaskRow>,
     checkpoints: BTreeMap<TaskId, Vec<CheckpointRow>>,
+    receipts: BTreeMap<Uuid, (TaskId, u64)>,
 }
 
 impl InMemoryMemory {
@@ -200,7 +271,15 @@ impl InMemoryMemory {
         record: &KnowledgeRecord,
         workspace: Option<&Name>,
     ) -> Result<RecordRow, MemoryError> {
-        self.with_state(|state| {
+        self.with_state(|state| Self::insert_bound(state, record, workspace))
+    }
+
+    fn insert_bound(
+        state: &mut InMemoryState,
+        record: &KnowledgeRecord,
+        workspace: Option<&Name>,
+    ) -> Result<RecordRow, MemoryError> {
+        {
             if state.records.contains_key(&record.id) {
                 return Err(MemoryError::AlreadyExists(format!("record {}", record.id)));
             }
@@ -226,7 +305,44 @@ impl InMemoryMemory {
             };
             state.records.insert(record.id, row.clone());
             Ok(row)
-        })
+        }
+    }
+
+    fn update_task_in(
+        state: &mut InMemoryState,
+        before: &TaskRow,
+        after: &Task,
+    ) -> Result<TaskRow, MemoryError> {
+        let Some(current) = state.tasks.get_mut(&before.task.id) else {
+            return Err(MemoryError::NotFound(format!("task {}", before.task.id)));
+        };
+        if current.revision != before.revision {
+            return Err(MemoryError::Conflict(format!(
+                "task {} changed since it was read",
+                before.task.id
+            )));
+        }
+        current.task = after.clone();
+        current.revision = current.revision.saturating_add(1);
+        Ok(current.clone())
+    }
+
+    fn append_checkpoint_in(
+        state: &mut InMemoryState,
+        checkpoint: &Checkpoint,
+    ) -> Result<u64, MemoryError> {
+        if !state.tasks.contains_key(&checkpoint.task) {
+            return Err(MemoryError::NotFound(format!("task {}", checkpoint.task)));
+        }
+        let list = state.checkpoints.entry(checkpoint.task).or_default();
+        let seq = u64::try_from(list.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        list.push(CheckpointRow {
+            seq,
+            checkpoint: checkpoint.clone(),
+        });
+        Ok(seq)
     }
 
     fn updated_evidence_workspaces(
@@ -480,20 +596,7 @@ impl MemoryRepo for InMemoryMemory {
         before: &'a TaskRow,
         after: &'a Task,
     ) -> BoxFuture<'a, Result<TaskRow, MemoryError>> {
-        let result = self.with_state(|state| {
-            let Some(current) = state.tasks.get_mut(&before.task.id) else {
-                return Err(MemoryError::NotFound(format!("task {}", before.task.id)));
-            };
-            if current.revision != before.revision {
-                return Err(MemoryError::Conflict(format!(
-                    "task {} changed since it was read",
-                    before.task.id
-                )));
-            }
-            current.task = after.clone();
-            current.revision = current.revision.saturating_add(1);
-            Ok(current.clone())
-        });
+        let result = self.with_state(|state| Self::update_task_in(state, before, after));
         Box::pin(std::future::ready(result))
     }
 
@@ -501,20 +604,7 @@ impl MemoryRepo for InMemoryMemory {
         &'a self,
         checkpoint: &'a Checkpoint,
     ) -> BoxFuture<'a, Result<u64, MemoryError>> {
-        let result = self.with_state(|state| {
-            if !state.tasks.contains_key(&checkpoint.task) {
-                return Err(MemoryError::NotFound(format!("task {}", checkpoint.task)));
-            }
-            let list = state.checkpoints.entry(checkpoint.task).or_default();
-            let seq = u64::try_from(list.len())
-                .unwrap_or(u64::MAX)
-                .saturating_add(1);
-            list.push(CheckpointRow {
-                seq,
-                checkpoint: checkpoint.clone(),
-            });
-            Ok(seq)
-        });
+        let result = self.with_state(|state| Self::append_checkpoint_in(state, checkpoint));
         Box::pin(std::future::ready(result))
     }
 
@@ -522,6 +612,46 @@ impl MemoryRepo for InMemoryMemory {
         let rows =
             self.with_state(|state| state.checkpoints.get(&task).cloned().unwrap_or_default());
         Box::pin(std::future::ready(Ok(rows)))
+    }
+
+    fn save_checkpoint<'a>(
+        &'a self,
+        save: CheckpointSave<'a>,
+    ) -> BoxFuture<'a, Result<CheckpointSaved, MemoryError>> {
+        let result = save.check().and_then(|()| {
+            self.with_state(|state| {
+                if let Some(&(task, seq)) = save.receipt.and_then(|id| state.receipts.get(&id)) {
+                    return Ok(CheckpointSaved::Replayed { task, seq });
+                }
+                // Work on a copy so that a failure leaves nothing behind.
+                let mut next = state.clone();
+                let decisions = save
+                    .decisions
+                    .iter()
+                    .map(|record| Self::insert_bound(&mut next, record, Some(save.workspace)))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let task = Self::update_task_in(&mut next, save.before, save.after)?;
+                let seq = Self::append_checkpoint_in(&mut next, save.checkpoint)?;
+                if let Some(id) = save.receipt {
+                    next.receipts.insert(id, (task.task.id, seq));
+                }
+                *state = next;
+                Ok(CheckpointSaved::Saved {
+                    task: Box::new(task),
+                    seq,
+                    decisions,
+                })
+            })
+        });
+        Box::pin(std::future::ready(result))
+    }
+
+    fn checkpoint_receipt(
+        &self,
+        receipt: Uuid,
+    ) -> BoxFuture<'_, Result<Option<(TaskId, u64)>, MemoryError>> {
+        let found = self.with_state(|state| state.receipts.get(&receipt).copied());
+        Box::pin(std::future::ready(Ok(found)))
     }
 }
 

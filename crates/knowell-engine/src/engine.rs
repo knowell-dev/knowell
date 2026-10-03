@@ -110,8 +110,6 @@ pub(crate) struct Inner {
     pub(crate) profile_providers: RwLock<BTreeMap<ProfileId, Name>>,
     /// Profile switches started by this process.
     pub(crate) switches: Mutex<Vec<crate::rest::SwitchRecord>>,
-    /// Idempotency keys of checkpoints saved by this process.
-    pub(crate) checkpoint_keys: Mutex<BTreeMap<String, (knowell_knowledge::TaskId, u64)>>,
 }
 
 /// Builds an [`Engine`]: the indexer, the embedders, the workspaces and the
@@ -260,7 +258,6 @@ impl EngineBuilder {
             overlay_generation: AtomicU64::new(0),
             profile_providers: RwLock::new(BTreeMap::new()),
             switches: Mutex::new(Vec::new()),
-            checkpoint_keys: Mutex::new(BTreeMap::new()),
             settings,
         });
         let engine = Engine { inner };

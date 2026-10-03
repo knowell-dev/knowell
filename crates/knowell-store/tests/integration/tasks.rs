@@ -3,8 +3,8 @@ use std::collections::BTreeSet;
 use knowell_store::knowledge::{self, NewRecord, RecordScope};
 use knowell_store::tasks::*;
 use knowell_store::{
-    KnowledgeKind, KnowledgeRecordId, KnowledgeState, StoreError, TaskId, TaskStatus, WorkspaceId,
-    hierarchy,
+    CheckpointReceiptId, KnowledgeKind, KnowledgeRecordId, KnowledgeState, StoreError, TaskId,
+    TaskStatus, WorkspaceId, hierarchy,
 };
 use serde_json::json;
 use time::OffsetDateTime;
@@ -321,4 +321,316 @@ async fn checkpoints_are_numbered_append_only_and_cascade() {
         knowledge::get_record(&mut c, record.id).await.unwrap(),
         None
     );
+}
+
+/// A task decision as the engine stores it with a checkpoint.
+fn decision(fx: &Fixture, task: TaskId, title: &str) -> NewRecord {
+    NewRecord {
+        id: knowledge::new_record_id(),
+        organization: fx.org.id,
+        scope: RecordScope::Task(task),
+        kind: KnowledgeKind::ModelSuggestion,
+        subject: "migration.decision".into(),
+        title: title.into(),
+        body: "Synthetic decision body.".into(),
+        state: KnowledgeState::Proposed,
+        version: 1,
+        author: json!({"agent": {"session": "s-1", "client": "test-agent"}}),
+        pinned: false,
+        tags: vec!["decision".into()],
+        related_symbols: Vec::new(),
+        superseded_by: None,
+        evidence: Vec::new(),
+        history: Vec::new(),
+        created_at: T0,
+        updated_at: T0,
+    }
+}
+
+/// The task update and checkpoint of one save recording `decision`.
+fn checkpoint_parts(
+    created: &StoredTask,
+    decision: KnowledgeRecordId,
+) -> (TaskUpdate, NewCheckpoint) {
+    let update = TaskUpdate {
+        id: created.id,
+        expected_revision: created.revision,
+        title: created.title.clone(),
+        goal: created.goal.clone(),
+        status: TaskStatus::InProgress,
+        details: TaskDetails {
+            decisions: vec![decision],
+            view_manifest: manifest(),
+            ..TaskDetails::default()
+        },
+        updated_at: t(1),
+    };
+    let checkpoint = NewCheckpoint {
+        task: created.id,
+        at: t(1),
+        summary: "Mapped the callers".into(),
+        decisions: vec![decision],
+        next_steps: vec!["Update the client".into()],
+        manifest: manifest(),
+    };
+    (update, checkpoint)
+}
+
+#[tokio::test]
+async fn checkpoint_receipts_replay_saves_and_stay_in_their_organization() {
+    let db = require_db!();
+    let mut c = db.conn().await;
+    let fx = fixture(&mut c, "shop").await;
+    let new = task(&fx, "Migrate", Some("u-1"));
+    let created = create_task(&mut c, &new).await.unwrap();
+    let record = decision(&fx, new.id, "Keep v1 for one release");
+    let (update, checkpoint) = checkpoint_parts(&created, record.id);
+    let receipt = CheckpointReceiptId(Uuid::now_v7());
+
+    let CheckpointWrite::Saved(saved) = save_checkpoint(
+        &mut c,
+        fx.org.id,
+        Some(receipt),
+        std::slice::from_ref(&record),
+        &update,
+        &checkpoint,
+    )
+    .await
+    .unwrap() else {
+        panic!("the first save stores its checkpoint");
+    };
+    assert_eq!(saved.seq, 1);
+    assert_eq!(saved.task.revision, 2);
+    assert_eq!(saved.task.details.decisions, vec![record.id]);
+    assert_eq!(
+        saved.decisions.iter().map(|r| r.id).collect::<Vec<_>>(),
+        vec![record.id]
+    );
+    let expected = CheckpointReceipt {
+        task: new.id,
+        seq: 1,
+    };
+    assert_eq!(
+        find_checkpoint_receipt(&mut c, fx.org.id, receipt)
+            .await
+            .unwrap(),
+        Some(expected)
+    );
+
+    // A retry (same receipt, now stale revision, freshly generated decision)
+    // stores nothing and names the original checkpoint.
+    let retried = decision(&fx, new.id, "Keep v1 for one release");
+    let replay = save_checkpoint(
+        &mut c,
+        fx.org.id,
+        Some(receipt),
+        std::slice::from_ref(&retried),
+        &update,
+        &checkpoint,
+    )
+    .await
+    .unwrap();
+    assert_eq!(replay, CheckpointWrite::Replayed(expected));
+    assert_eq!(list_checkpoints(&mut c, new.id).await.unwrap().len(), 1);
+    assert_eq!(get_task(&mut c, new.id).await.unwrap().unwrap().revision, 2);
+    assert_eq!(
+        knowledge::get_record(&mut c, retried.id).await.unwrap(),
+        None
+    );
+
+    // Another organization neither sees the receipt nor can point one at
+    // this checkpoint; a receipt cannot name a checkpoint that does not exist.
+    let other = fixture(&mut c, "other").await;
+    assert_eq!(
+        find_checkpoint_receipt(&mut c, other.org.id, receipt)
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(matches!(
+        insert_checkpoint_receipt(
+            &mut c,
+            other.org.id,
+            CheckpointReceiptId(Uuid::now_v7()),
+            expected
+        )
+        .await,
+        Err(StoreError::NotFound { .. })
+    ));
+    assert!(matches!(
+        insert_checkpoint_receipt(
+            &mut c,
+            fx.org.id,
+            CheckpointReceiptId(Uuid::now_v7()),
+            CheckpointReceipt {
+                task: new.id,
+                seq: 2
+            }
+        )
+        .await,
+        Err(StoreError::NotFound { .. })
+    ));
+
+    // Receipts are never rewritten and go away with their task.
+    assert!(
+        sqlx::query("UPDATE checkpoint_receipt SET created_at = now()")
+            .execute(&mut *c)
+            .await
+            .is_err()
+    );
+    assert!(delete_task(&mut c, new.id).await.unwrap());
+    assert_eq!(
+        find_checkpoint_receipt(&mut c, fx.org.id, receipt)
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+/// Asserts that nothing of a save of `record` into `task` was stored.
+async fn assert_nothing_saved(c: &mut sqlx::PgConnection, task: TaskId, record: KnowledgeRecordId) {
+    assert_eq!(knowledge::get_record(&mut *c, record).await.unwrap(), None);
+    assert_eq!(get_task(&mut *c, task).await.unwrap().unwrap().revision, 1);
+    assert!(list_checkpoints(&mut *c, task).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_failed_checkpoint_save_stores_nothing() {
+    let db = require_db!();
+    let mut c = db.conn().await;
+    let fx = fixture(&mut c, "shop").await;
+    let new = task(&fx, "Migrate", None);
+    let created = create_task(&mut c, &new).await.unwrap();
+    let record = decision(&fx, new.id, "Batch the backfill");
+    let (update, checkpoint) = checkpoint_parts(&created, record.id);
+    let receipt = CheckpointReceiptId(Uuid::now_v7());
+
+    // The checkpoint is rejected after the decision and the task update were
+    // written in the transaction: both are rolled back and no receipt is kept.
+    let invalid = NewCheckpoint {
+        summary: String::new(),
+        ..checkpoint.clone()
+    };
+    assert!(matches!(
+        save_checkpoint(
+            &mut c,
+            fx.org.id,
+            Some(receipt),
+            std::slice::from_ref(&record),
+            &update,
+            &invalid
+        )
+        .await,
+        Err(StoreError::InvalidInput(_))
+    ));
+    assert_nothing_saved(&mut c, new.id, record.id).await;
+    assert_eq!(
+        find_checkpoint_receipt(&mut c, fx.org.id, receipt)
+            .await
+            .unwrap(),
+        None
+    );
+
+    // A stale task revision is a conflict, again without partial writes.
+    let stale = TaskUpdate {
+        expected_revision: 7,
+        ..update.clone()
+    };
+    assert!(matches!(
+        save_checkpoint(
+            &mut c,
+            fx.org.id,
+            Some(receipt),
+            std::slice::from_ref(&record),
+            &stale,
+            &checkpoint
+        )
+        .await,
+        Err(StoreError::Conflict { .. })
+    ));
+    assert_nothing_saved(&mut c, new.id, record.id).await;
+
+    // The corrected save then succeeds under the same receipt.
+    assert!(matches!(
+        save_checkpoint(
+            &mut c,
+            fx.org.id,
+            Some(receipt),
+            std::slice::from_ref(&record),
+            &update,
+            &checkpoint
+        )
+        .await
+        .unwrap(),
+        CheckpointWrite::Saved(_)
+    ));
+    assert!(
+        knowledge::get_record(&mut c, record.id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn concurrent_saves_with_one_receipt_store_one_checkpoint() {
+    const ATTEMPTS: usize = 4;
+    let db = require_db!();
+    let mut c = db.conn().await;
+    let fx = fixture(&mut c, "shop").await;
+    let new = task(&fx, "Migrate", Some("u-1"));
+    let created = create_task(&mut c, &new).await.unwrap();
+    let receipt = CheckpointReceiptId(Uuid::now_v7());
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(ATTEMPTS));
+    let mut handles = Vec::new();
+    for _ in 0..ATTEMPTS {
+        let store = db.store.clone();
+        let barrier = std::sync::Arc::clone(&barrier);
+        // Every attempt generates its own decision id, as a retry would.
+        let record = decision(&fx, new.id, "Batch the backfill");
+        let (update, checkpoint) = checkpoint_parts(&created, record.id);
+        let organization = fx.org.id;
+        handles.push(tokio::spawn(async move {
+            let mut c = store.acquire().await.unwrap();
+            barrier.wait().await;
+            let written = save_checkpoint(
+                &mut c,
+                organization,
+                Some(receipt),
+                std::slice::from_ref(&record),
+                &update,
+                &checkpoint,
+            )
+            .await
+            .unwrap();
+            (written, record.id)
+        }));
+    }
+    let mut winners = Vec::new();
+    let mut losers = Vec::new();
+    for handle in handles {
+        match handle.await.unwrap() {
+            (CheckpointWrite::Saved(saved), id) => winners.push((saved.seq, id)),
+            (CheckpointWrite::Replayed(found), id) => losers.push((found, id)),
+        }
+    }
+    assert_eq!(winners.len(), 1, "exactly one attempt stores");
+    let (seq, kept) = winners[0];
+    assert_eq!(seq, 1);
+    for (found, discarded) in &losers {
+        assert_eq!(
+            *found,
+            CheckpointReceipt {
+                task: new.id,
+                seq: 1
+            }
+        );
+        assert_eq!(
+            knowledge::get_record(&mut c, *discarded).await.unwrap(),
+            None
+        );
+    }
+    assert!(knowledge::get_record(&mut c, kept).await.unwrap().is_some());
+    assert_eq!(list_checkpoints(&mut c, new.id).await.unwrap().len(), 1);
+    assert_eq!(get_task(&mut c, new.id).await.unwrap().unwrap().revision, 2);
 }

@@ -47,9 +47,9 @@ pub mod views;
 
 pub use error::StoreError;
 pub use ids::{
-    ApiTokenId, AuditEntryId, ContractId, EdgeId, GrantId, IndexGenerationId, JobId,
-    KnowledgeRecordId, ManifestId, OccurrenceId, OrganizationId, PrincipalId, ProfileId, ProjectId,
-    SourceId, SymbolId, TaskId, ViewId, WorkspaceId,
+    ApiTokenId, AuditEntryId, CheckpointReceiptId, ContractId, EdgeId, GrantId, IndexGenerationId,
+    JobId, KnowledgeRecordId, ManifestId, OccurrenceId, OrganizationId, PrincipalId, ProfileId,
+    ProjectId, SourceId, SymbolId, TaskId, ViewId, WorkspaceId,
 };
 pub use store::{ServerInfo, ServerIssue, Store, StoreOptions, VectorExtension};
 pub use types::{

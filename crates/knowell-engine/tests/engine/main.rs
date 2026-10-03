@@ -16,6 +16,7 @@
 
 mod common;
 
+mod checkpoint_receipts;
 mod end_to_end;
 mod hub_identity;
 mod memory_freshness;

@@ -96,7 +96,7 @@ contract participations as contract edges (`Exposes`, `Produces`, `Writes`, `Con
 | `read_memory` | records in readable scopes (organization and workspace with workspace `read_memory`, visible projects, the caller's own user scope and tasks), filters, conflicts |
 | `write_memory` | scope authorised with `ProposeMemory`; evidence ids resolved to exact versions; `KnowledgeRecord::write` (secret guard, policy: agents → `proposed`, always); idempotency key → deterministic record id |
 | `resume_task` | lists the caller's open tasks or resumes one with `knowell_knowledge::resume`; `changed_since` comes from `git diff` between the checkpoint's and the context's commits of every moved project; stale decisions and stale records of moved projects |
-| `save_checkpoint` | creates the task (deterministic id with an idempotency key) or adds to it: progress note, decisions (task-scope, proposed for agents), open questions (replaced), related symbols, status, the current manifest, then a checkpoint |
+| `save_checkpoint` | creates the task (deterministic id with an idempotency key) or adds to it: progress note, decisions (task-scope, proposed for agents), open questions (replaced), related symbols, status, the current manifest, then a checkpoint. Decisions, task update, checkpoint and the idempotency receipt are stored in one transaction; a retry with the same caller and key returns the original checkpoint, also after a restart or when retries race |
 | `index_status` | `ViewStatus` per visible project: T0–T3 states (`ready`, `building`, `queued`, `disabled` for no provider, `unavailable` for skipped/failed), latest-seen vs indexed commit, languages with analysis level, embedding profile, last activation, running jobs of visible projects |
 
 ### Gap reasons used
@@ -243,8 +243,7 @@ CLI opens this catalogue without a workspace or provider credentials.
 - Lexical search serves only the active generation of a view; a context pinned before an
   activation reports `lexical: … call open_workspace again` instead of using another
   generation.
-- Usage counters, checkpoint idempotency keys (beyond deterministic task ids) and profile
-  switch records are in process memory.
+- Usage counters and profile switch records are in process memory.
 - `history` has no git log or blame (knowell-source has no reader for them).
 - MCP tool results never contain jobs: every tool computes synchronously.
 

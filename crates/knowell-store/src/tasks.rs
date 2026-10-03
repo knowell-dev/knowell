@@ -13,14 +13,20 @@
 //! - [`append_checkpoint`] numbers checkpoints 1, 2, ... per task;
 //!   [`list_checkpoints`] and [`latest_checkpoint`] read them back.
 //!   Checkpoints are never changed.
+//! - [`save_checkpoint`] stores new decisions, a task update, a checkpoint
+//!   and its receipt in one transaction; [`find_checkpoint_receipt`] returns
+//!   the checkpoint an idempotent save produced, so a retry (also after a
+//!   restart) gets it instead of appending another.
 
 use sqlx::{Connection, PgConnection};
 use time::OffsetDateTime;
 
 use crate::error::{StoreError, Violation, violation};
-use crate::ids::{KnowledgeRecordId, OrganizationId, TaskId, WorkspaceId};
+use crate::ids::{CheckpointReceiptId, KnowledgeRecordId, OrganizationId, TaskId, WorkspaceId};
+use crate::knowledge::{self, NewRecord, StoredRecord};
 use crate::types::{
-    TaskStatus, check_json_array, check_label, check_text, from_i64, from_revision, to_revision,
+    TaskStatus, check_json_array, check_label, check_text, from_i64, from_revision, to_i64,
+    to_revision,
 };
 
 /// Longest task title, in bytes.
@@ -572,6 +578,213 @@ pub async fn latest_checkpoint(
     .fetch_optional(conn)
     .await?;
     row.map(TryInto::try_into).transpose()
+}
+
+/// The checkpoint an idempotent save produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckpointReceipt {
+    /// The task the checkpoint belongs to.
+    pub task: TaskId,
+    /// The checkpoint's number within the task.
+    pub seq: u64,
+}
+
+/// What [`save_checkpoint`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckpointWrite {
+    /// Everything was stored.
+    Saved(Box<SavedCheckpoint>),
+    /// The receipt already existed; nothing was stored.
+    Replayed(CheckpointReceipt),
+}
+
+/// What one [`save_checkpoint`] stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedCheckpoint {
+    /// The stored decisions, in input order.
+    pub decisions: Vec<StoredRecord>,
+    /// The updated task.
+    pub task: StoredTask,
+    /// The new checkpoint's number within the task.
+    pub seq: u64,
+}
+
+/// Stores `decisions`, applies `update` and appends `checkpoint` in one
+/// transaction, together with the receipt `receipt` when given: all of them
+/// persist or none does. When `receipt` already exists in `organization`
+/// (an earlier attempt, or a concurrent save that wins while this one runs),
+/// nothing is stored and its checkpoint is returned instead. A task outside
+/// `organization` is [`StoreError::NotFound`], a checkpoint of another task
+/// [`StoreError::InvalidInput`]; other failures are those of [`update_task`],
+/// [`append_checkpoint`] and [`knowledge::insert_record`]. A receipt that
+/// cannot be found again after losing a race is a [`StoreError::Conflict`].
+pub async fn save_checkpoint(
+    conn: &mut PgConnection,
+    organization: OrganizationId,
+    receipt: Option<CheckpointReceiptId>,
+    decisions: &[NewRecord],
+    update: &TaskUpdate,
+    checkpoint: &NewCheckpoint,
+) -> Result<CheckpointWrite, StoreError> {
+    if checkpoint.task != update.id {
+        return Err(StoreError::invalid(
+            "a checkpoint save must update the checkpoint's own task",
+        ));
+    }
+    if let Some(id) = receipt
+        && let Some(found) = find_checkpoint_receipt(&mut *conn, organization, id).await?
+    {
+        return Ok(CheckpointWrite::Replayed(found));
+    }
+    let mut tx = conn.begin().await?;
+    let written = write_checkpoint(
+        &mut tx,
+        organization,
+        receipt,
+        decisions,
+        update,
+        checkpoint,
+    )
+    .await;
+    let failure = match written {
+        Ok(Some(saved)) => {
+            tx.commit().await?;
+            return Ok(CheckpointWrite::Saved(Box::new(saved)));
+        }
+        Ok(None) => None,
+        Err(error) => Some(error),
+    };
+    tx.rollback().await?;
+    // A concurrent save with the same receipt may have won (its task update
+    // or its receipt came first): its checkpoint is the answer.
+    if let Some(id) = receipt {
+        if let Some(found) = find_checkpoint_receipt(&mut *conn, organization, id).await? {
+            return Ok(CheckpointWrite::Replayed(found));
+        }
+        if failure.is_none() {
+            return Err(StoreError::Conflict {
+                entity: "checkpoint receipt",
+                key: id.to_string(),
+                detail: "the receipt was taken by a save that did not persist".to_owned(),
+            });
+        }
+    }
+    Err(failure.unwrap_or_else(|| {
+        StoreError::Corrupt("a checkpoint save without a receipt reported one".to_owned())
+    }))
+}
+
+/// One attempt of [`save_checkpoint`] on `conn`, inside its transaction;
+/// `None` when the receipt already existed.
+async fn write_checkpoint(
+    conn: &mut PgConnection,
+    organization: OrganizationId,
+    receipt: Option<CheckpointReceiptId>,
+    decisions: &[NewRecord],
+    update: &TaskUpdate,
+    checkpoint: &NewCheckpoint,
+) -> Result<Option<SavedCheckpoint>, StoreError> {
+    // Lock the task first: inserting task-scoped decisions takes a key-share
+    // lock on its row, and taking the row lock only later would deadlock
+    // concurrent saves of one task. Under the lock, a receipt committed by a
+    // concurrent save is visible.
+    let task: Option<i32> =
+        sqlx::query_scalar("SELECT 1 FROM task WHERE id = $1 AND organization_id = $2 FOR UPDATE")
+            .bind(update.id)
+            .bind(organization)
+            .fetch_optional(&mut *conn)
+            .await?;
+    if task.is_none() {
+        return Err(StoreError::not_found("task", update.id));
+    }
+    if let Some(id) = receipt
+        && find_checkpoint_receipt(&mut *conn, organization, id)
+            .await?
+            .is_some()
+    {
+        return Ok(None);
+    }
+    let mut stored = Vec::with_capacity(decisions.len());
+    for decision in decisions {
+        stored.push(knowledge::insert_record(&mut *conn, decision).await?);
+    }
+    let task = update_task(&mut *conn, update).await?;
+    let saved = append_checkpoint(&mut *conn, checkpoint).await?;
+    if let Some(id) = receipt {
+        let receipt = CheckpointReceipt {
+            task: task.id,
+            seq: saved.seq,
+        };
+        if !insert_checkpoint_receipt(&mut *conn, organization, id, receipt).await? {
+            return Ok(None);
+        }
+    }
+    Ok(Some(SavedCheckpoint {
+        decisions: stored,
+        task,
+        seq: saved.seq,
+    }))
+}
+
+/// Records that `id` produced checkpoint `seq` of `task`. Returns `false`,
+/// changing nothing, when `id` already has a receipt in `organization` (an
+/// earlier or concurrent save with the same key won). Call it in the
+/// transaction that appended the checkpoint, so both persist or neither does
+/// ([`save_checkpoint`] does). Fails with [`StoreError::NotFound`] when the
+/// task or checkpoint does not exist in `organization`.
+pub async fn insert_checkpoint_receipt(
+    conn: &mut PgConnection,
+    organization: OrganizationId,
+    id: CheckpointReceiptId,
+    receipt: CheckpointReceipt,
+) -> Result<bool, StoreError> {
+    let seq = to_i64(receipt.seq, "checkpoint receipt seq")?;
+    let known: Option<i32> = sqlx::query_scalar(
+        "SELECT 1 FROM task_checkpoint c JOIN task t ON t.id = c.task_id
+         WHERE c.task_id = $1 AND c.seq = $2 AND t.organization_id = $3",
+    )
+    .bind(receipt.task)
+    .bind(seq)
+    .bind(organization)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if known.is_none() {
+        return Err(StoreError::not_found("checkpoint", receipt.task));
+    }
+    let inserted = sqlx::query(
+        "INSERT INTO checkpoint_receipt (organization_id, id, task_id, seq)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (organization_id, id) DO NOTHING",
+    )
+    .bind(organization)
+    .bind(id)
+    .bind(receipt.task)
+    .bind(seq)
+    .execute(conn)
+    .await?;
+    Ok(inserted.rows_affected() == 1)
+}
+
+/// The checkpoint `id` produced in `organization`, if any.
+pub async fn find_checkpoint_receipt(
+    conn: &mut PgConnection,
+    organization: OrganizationId,
+    id: CheckpointReceiptId,
+) -> Result<Option<CheckpointReceipt>, StoreError> {
+    let row: Option<(TaskId, i64)> = sqlx::query_as(
+        "SELECT task_id, seq FROM checkpoint_receipt WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization)
+    .bind(id)
+    .fetch_optional(conn)
+    .await?;
+    row.map(|(task, seq)| {
+        Ok(CheckpointReceipt {
+            task,
+            seq: from_i64(seq, "checkpoint receipt seq")?,
+        })
+    })
+    .transpose()
 }
 
 #[cfg(test)]

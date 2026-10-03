@@ -22,15 +22,20 @@ use knowell_store::knowledge::{
     StoredRecord,
 };
 use knowell_store::tasks::{
-    self, NewCheckpoint, NewTask, StoredTask, TaskDetails, TaskFilter, TaskUpdate,
+    self, CheckpointReceipt, CheckpointWrite, NewCheckpoint, NewTask, StoredTask, TaskDetails,
+    TaskFilter, TaskUpdate,
 };
 use knowell_store::{
-    KnowledgeAction, KnowledgeKind, KnowledgeRecordId, KnowledgeState, OrganizationId, ProjectId,
-    Store, StoreError, WorkspaceId,
+    CheckpointReceiptId, KnowledgeAction, KnowledgeKind, KnowledgeRecordId, KnowledgeState,
+    OrganizationId, ProjectId, Store, StoreError, WorkspaceId,
 };
 use time::OffsetDateTime;
+use uuid::Uuid;
 
-use super::{BoxFuture, CheckpointRow, MemoryError, MemoryRepo, RecordQuery, RecordRow, TaskRow};
+use super::{
+    BoxFuture, CheckpointRow, CheckpointSave, CheckpointSaved, MemoryError, MemoryRepo,
+    RecordQuery, RecordRow, TaskRow,
+};
 
 /// Name ↔ id maps of the registered workspaces and projects.
 #[derive(Debug, Default)]
@@ -646,6 +651,43 @@ impl StoreMemory {
     }
 }
 
+impl StoreMemory {
+    fn task_update(&self, before: &TaskRow, after: &Task) -> Result<TaskUpdate, MemoryError> {
+        Ok(TaskUpdate {
+            id: store_task_id(after.id),
+            expected_revision: before.revision,
+            title: after.title.clone(),
+            goal: after.goal.clone(),
+            status: status_to_store(after.status),
+            details: self.task_to_details(after)?,
+            updated_at: to_datetime(after.updated_at)?,
+        })
+    }
+}
+
+fn new_checkpoint(checkpoint: &Checkpoint) -> Result<NewCheckpoint, MemoryError> {
+    Ok(NewCheckpoint {
+        task: store_task_id(checkpoint.task),
+        at: to_datetime(checkpoint.at)?,
+        summary: checkpoint.summary.clone(),
+        decisions: checkpoint
+            .decisions
+            .iter()
+            .copied()
+            .map(record_id)
+            .collect(),
+        next_steps: checkpoint.next_steps.clone(),
+        manifest: json(&checkpoint.manifest)?,
+    })
+}
+
+fn replayed(receipt: CheckpointReceipt) -> CheckpointSaved {
+    CheckpointSaved::Replayed {
+        task: TaskId::from_uuid(receipt.task.as_uuid()),
+        seq: receipt.seq,
+    }
+}
+
 impl MemoryRepo for StoreMemory {
     fn insert_record<'a>(
         &'a self,
@@ -961,15 +1003,7 @@ impl MemoryRepo for StoreMemory {
         after: &'a Task,
     ) -> BoxFuture<'a, Result<TaskRow, MemoryError>> {
         Box::pin(async move {
-            let update = TaskUpdate {
-                id: store_task_id(after.id),
-                expected_revision: before.revision,
-                title: after.title.clone(),
-                goal: after.goal.clone(),
-                status: status_to_store(after.status),
-                details: self.task_to_details(after)?,
-                updated_at: to_datetime(after.updated_at)?,
-            };
+            let update = self.task_update(before, after)?;
             let mut conn = self.store.acquire().await.map_err(store_error)?;
             let stored = tasks::update_task(&mut conn, &update)
                 .await
@@ -983,19 +1017,7 @@ impl MemoryRepo for StoreMemory {
         checkpoint: &'a Checkpoint,
     ) -> BoxFuture<'a, Result<u64, MemoryError>> {
         Box::pin(async move {
-            let new = NewCheckpoint {
-                task: store_task_id(checkpoint.task),
-                at: to_datetime(checkpoint.at)?,
-                summary: checkpoint.summary.clone(),
-                decisions: checkpoint
-                    .decisions
-                    .iter()
-                    .copied()
-                    .map(record_id)
-                    .collect(),
-                next_steps: checkpoint.next_steps.clone(),
-                manifest: json(&checkpoint.manifest)?,
-            };
+            let new = new_checkpoint(checkpoint)?;
             let mut conn = self.store.acquire().await.map_err(store_error)?;
             let stored = tasks::append_checkpoint(&mut conn, &new)
                 .await
@@ -1030,6 +1052,63 @@ impl MemoryRepo for StoreMemory {
                     })
                 })
                 .collect()
+        })
+    }
+
+    fn save_checkpoint<'a>(
+        &'a self,
+        save: CheckpointSave<'a>,
+    ) -> BoxFuture<'a, Result<CheckpointSaved, MemoryError>> {
+        Box::pin(async move {
+            save.check()?;
+            let receipt = save.receipt.map(CheckpointReceiptId);
+            let decisions = save
+                .decisions
+                .iter()
+                .map(|record| self.record_to_store(record, Some(save.workspace)))
+                .collect::<Result<Vec<_>, _>>()?;
+            let update = self.task_update(save.before, save.after)?;
+            let checkpoint = new_checkpoint(save.checkpoint)?;
+            let mut conn = self.store.acquire().await.map_err(store_error)?;
+            let written = tasks::save_checkpoint(
+                &mut conn,
+                self.organization,
+                receipt,
+                &decisions,
+                &update,
+                &checkpoint,
+            )
+            .await
+            .map_err(store_error)?;
+            drop(conn);
+            match written {
+                CheckpointWrite::Replayed(found) => Ok(replayed(found)),
+                CheckpointWrite::Saved(saved) => {
+                    let saved = *saved;
+                    Ok(CheckpointSaved::Saved {
+                        task: Box::new(self.task_from_store(saved.task)?),
+                        seq: saved.seq,
+                        decisions: self.rows_from_store(saved.decisions).await?,
+                    })
+                }
+            }
+        })
+    }
+
+    fn checkpoint_receipt(
+        &self,
+        receipt: Uuid,
+    ) -> BoxFuture<'_, Result<Option<(TaskId, u64)>, MemoryError>> {
+        Box::pin(async move {
+            let mut conn = self.store.acquire().await.map_err(store_error)?;
+            let found = tasks::find_checkpoint_receipt(
+                &mut conn,
+                self.organization,
+                CheckpointReceiptId(receipt),
+            )
+            .await
+            .map_err(store_error)?;
+            Ok(found.map(|r| (TaskId::from_uuid(r.task.as_uuid()), r.seq)))
         })
     }
 }
