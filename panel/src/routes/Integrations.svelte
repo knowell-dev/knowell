@@ -6,6 +6,7 @@
   import DataState from '$lib/components/DataState.svelte';
   import Card from '$lib/components/Card.svelte';
   import Badge from '$lib/components/Badge.svelte';
+  import InlineText from '$lib/components/InlineText.svelte';
 
   const api = getApi();
   const res = useResource(() => api.getIntegrations());
@@ -62,7 +63,7 @@
                 <li>
                   <Badge tone={d.ok ? 'ok' : 'danger'}>{d.ok ? 'pass' : 'fail'}</Badge>
                   {d.check}
-                  <div class="faint small">{d.detail}</div>
+                  <div class="faint small"><InlineText text={d.detail} /></div>
                 </li>
               {/each}
             </ul>

@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { formatBytes, formatDuration, relativeTime, shortSha } from '$lib/format';
+import {
+  formatBytes,
+  formatDuration,
+  relativeTime,
+  shortSha,
+  shortUserId,
+  splitInlineCode
+} from '$lib/format';
 import { parseHash } from '$lib/router.svelte';
 
 describe('format', () => {
@@ -13,6 +20,29 @@ describe('format', () => {
     expect(relativeTime(undefined)).toBe('never');
     expect(relativeTime('not a date')).toBe('-');
     expect(shortSha(undefined)).toBe('-');
+  });
+  it('splits backtick commands out of prose', () => {
+    expect(splitInlineCode('run `know init` now')).toEqual([
+      { text: 'run ', code: false },
+      { text: 'know init', code: true },
+      { text: ' now', code: false }
+    ]);
+    expect(splitInlineCode('`a``b`')).toEqual([
+      { text: 'a', code: true },
+      { text: 'b', code: true }
+    ]);
+    expect(splitInlineCode('empty `` pair')).toEqual([
+      { text: 'empty ', code: false },
+      { text: ' pair', code: false }
+    ]);
+    expect(splitInlineCode('one ` stray')).toEqual([{ text: 'one ` stray', code: false }]);
+    expect(splitInlineCode('')).toEqual([]);
+  });
+  it('shortens user ids for the top bar', () => {
+    expect(shortUserId('user:018f2b7e-6c1a-7000-8000-000000000001')).toBe('user:018f2b7e…');
+    expect(shortUserId('user:local')).toBe('user:local');
+    expect(shortUserId('018f2b7e-6c1a-7000-8000-000000000001')).toBe('018f2b7e…');
+    expect(shortUserId('')).toBe('');
   });
 });
 

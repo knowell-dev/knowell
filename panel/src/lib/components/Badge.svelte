@@ -20,9 +20,10 @@
 <style>
   .badge {
     display: inline-block;
-    padding: 0.05rem 0.45rem;
+    padding: 0.1rem 0.55rem;
     border-radius: 999px;
-    border: 1px solid var(--border-strong);
+    border: 1px solid transparent;
+    font-weight: 500;
     font-size: var(--fs-xs);
     line-height: 1.5;
     white-space: nowrap;
@@ -31,27 +32,22 @@
   }
   .ok {
     color: var(--ok);
-    border-color: var(--ok);
     background: var(--ok-bg);
   }
   .warn {
     color: var(--warn);
-    border-color: var(--warn);
     background: var(--warn-bg);
   }
   .danger {
     color: var(--danger);
-    border-color: var(--danger);
     background: var(--danger-bg);
   }
   .info {
     color: var(--info);
-    border-color: var(--info);
     background: var(--info-bg);
   }
   .accent {
     color: var(--accent);
-    border-color: var(--accent);
     background: var(--accent-bg);
   }
 </style>

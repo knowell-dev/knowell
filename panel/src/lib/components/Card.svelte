@@ -34,7 +34,7 @@
   .card {
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: var(--radius);
+    border-radius: var(--radius-lg);
     box-shadow: var(--shadow);
     min-width: 0;
   }
@@ -43,16 +43,21 @@
     justify-content: space-between;
     align-items: flex-start;
     gap: var(--sp-3);
-    padding: var(--sp-3) var(--sp-4);
-    border-bottom: 1px solid var(--border);
+    padding: var(--sp-4) var(--sp-5) var(--sp-3);
   }
   h2 {
     font-size: var(--fs-md);
   }
   .body {
-    padding: var(--sp-4);
+    padding: var(--sp-5);
   }
+  header + .body {
+    padding-top: var(--sp-2);
+  }
+  /* Flush content (tables) is clipped to the rounded corners instead of poking past them. */
   .body.flush {
     padding: 0;
+    overflow: hidden;
+    border-radius: calc(var(--radius-lg) - 1px);
   }
 </style>

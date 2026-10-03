@@ -13,8 +13,37 @@ export interface LayoutResult {
   height: number;
 }
 
-export const NODE_W = 150;
+export const NODE_W = 176;
 export const NODE_H = 34;
+
+/** Point on the border of a node box toward another box, so arrows touch the box edge. */
+function borderPoint(ax: number, ay: number, bx: number, by: number): [number, number] {
+  const cx = ax + NODE_W / 2;
+  const cy = ay + NODE_H / 2;
+  const dx = bx + NODE_W / 2 - cx;
+  const dy = by + NODE_H / 2 - cy;
+  if (dx === 0 && dy === 0) return [cx, cy];
+  const t = Math.min(NODE_W / 2 / Math.abs(dx || 1e-9), NODE_H / 2 / Math.abs(dy || 1e-9));
+  return [cx + dx * t, cy + dy * t];
+}
+
+/**
+ * SVG path for an edge between two placed boxes (top-left corners, in layout units). Edges that
+ * run forward to a later column leave the right side and enter the left side on a smooth curve,
+ * which keeps fan-in to one column readable; any other edge is a straight border-to-border line.
+ */
+export function edgePath(ax: number, ay: number, bx: number, by: number): string {
+  if (bx >= ax + NODE_W) {
+    const x1 = ax + NODE_W;
+    const y1 = ay + NODE_H / 2;
+    const y2 = by + NODE_H / 2;
+    const mid = (x1 + bx) / 2;
+    return `M${x1} ${y1}C${mid} ${y1} ${mid} ${y2} ${bx} ${y2}`;
+  }
+  const [x1, y1] = borderPoint(ax, ay, bx, by);
+  const [x2, y2] = borderPoint(bx, by, ax, ay);
+  return `M${x1} ${y1}L${x2} ${y2}`;
+}
 
 /**
  * Deterministic layered layout for small graphs (the lightweight stand-in until the WebGL

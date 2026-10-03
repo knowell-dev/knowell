@@ -2,6 +2,7 @@
   import type { Snippet } from 'svelte';
   import type { Resource } from '$lib/resource.svelte';
   import EmptyState from './EmptyState.svelte';
+  import InlineText from './InlineText.svelte';
   import { isUnavailable } from '$lib/api';
 
   let {
@@ -36,7 +37,7 @@
 {:else if resource.error && resource.data === undefined}
   <div class="error" role="alert">
     <strong>Could not load this data.</strong>
-    <p>{resource.error.message}</p>
+    <p><InlineText text={resource.error.message} /></p>
     <p class="faint small mono">
       {resource.error.code}{resource.error.requestId
         ? ` - request ${resource.error.requestId}`
@@ -51,7 +52,7 @@
 {:else if resource.data !== undefined}
   {#if resource.error}
     <div class="error inline" role="alert">
-      Refresh failed: {resource.error.message}
+      Refresh failed: <InlineText text={resource.error.message} />
       <button class="btn sm" type="button" onclick={() => resource.reload()}>Retry</button>
     </div>
   {/if}

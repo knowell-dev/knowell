@@ -1,12 +1,13 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import InlineText from './InlineText.svelte';
 
   let { title, why, children }: { title: string; why: string; children?: Snippet } = $props();
 </script>
 
 <div class="empty" role="status">
   <h3>{title}</h3>
-  <p class="muted">{why}</p>
+  <p class="muted"><InlineText text={why} /></p>
   {#if children}<div class="action">{@render children()}</div>{/if}
 </div>
 
