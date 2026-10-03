@@ -1836,22 +1836,23 @@ mod tests {
 
     #[test]
     fn explicit_recovery_resumes_only_the_pending_generation() {
-        let root = tempfile::tempdir().unwrap();
-        let (generation, sequence) = begin_generation(root.path()).unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let (generation, sequence) = begin_generation(&root).unwrap();
         publish_small(
             &generation.join("latest_known_time.json"),
             br#""2020-01-01T00:00:00Z""#,
         )
         .unwrap();
         assert!(matches!(
-            begin_generation(root.path()),
+            begin_generation(&root),
             Err(Error::RecoveryRequired)
         ));
-        let resumed = resume_generation(root.path()).unwrap();
+        let resumed = resume_generation(&root).unwrap();
         assert_eq!(resumed, (generation.clone(), sequence));
         std::fs::write(generation.join("latest_known_time.json"), b"truncated").unwrap();
         assert!(matches!(
-            resume_generation(root.path()),
+            resume_generation(&root),
             Err(Error::RecoveryRequired)
         ));
     }
@@ -1888,44 +1889,42 @@ mod tests {
 
     #[test]
     fn generation_commit_preserves_active_state_and_detects_pending_recovery() {
-        let root = tempfile::tempdir().unwrap();
-        let (generation, sequence) = begin_generation(root.path()).unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let (generation, sequence) = begin_generation(&root).unwrap();
         publish_small(
             &generation.join("latest_known_time.json"),
             br#""2020-01-01T00:00:00Z""#,
         )
         .unwrap();
-        commit_generation(root.path(), &generation, sequence).unwrap();
-        let (next, next_sequence) = begin_generation(root.path()).unwrap();
+        commit_generation(&root, &generation, sequence).unwrap();
+        let (next, next_sequence) = begin_generation(&root).unwrap();
         assert_eq!(next_sequence, 2);
         assert_eq!(
             read_small(&next.join("latest_known_time.json")).unwrap(),
             br#""2020-01-01T00:00:00Z""#
         );
         assert!(matches!(
-            begin_generation(root.path()),
+            begin_generation(&root),
             Err(Error::RecoveryRequired)
         ));
-        assert!(
-            root.path()
-                .join("commit-00000000000000000001.json")
-                .is_file()
-        );
+        assert!(root.join("commit-00000000000000000001.json").is_file());
     }
 
     #[test]
     fn corrupt_high_water_clock_is_never_reset() {
-        let root = tempfile::tempdir().unwrap();
-        let (generation, sequence) = begin_generation(root.path()).unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let (generation, sequence) = begin_generation(&root).unwrap();
         publish_small(
             &generation.join("latest_known_time.json"),
             br#""not a timestamp""#,
         )
         .unwrap();
-        assert!(commit_generation(root.path(), &generation, sequence).is_err());
-        assert!(root.path().join("pending.json").is_file());
+        assert!(commit_generation(&root, &generation, sequence).is_err());
+        assert!(root.join("pending.json").is_file());
         assert!(matches!(
-            begin_generation(root.path()),
+            begin_generation(&root),
             Err(Error::RecoveryRequired)
         ));
     }
