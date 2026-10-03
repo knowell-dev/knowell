@@ -107,3 +107,8 @@ is released. Nothing has been released yet.
   windows.
 - Draw code-graph edges as curves between columns, keep them from showing through node
   boxes, fit the canvas to its card and show full node labels on hover.
+- Ease panel pages in on navigation, soften hover changes, and replace the loading spinner
+  with shimmering placeholder lines that appear only when loading takes longer than 200 ms;
+  all motion stops when the operating system asks for reduced motion.
+- Fold long graph insight lists into collapsible groups by kind, so the code-graph page no
+  longer grows without bound on real repositories, and show their commands as code.
