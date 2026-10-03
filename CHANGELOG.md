@@ -10,6 +10,8 @@ is released. Nothing has been released yet.
 
 ### Fixed
 
+- Match the complete embedding input format before starting a profile switch and
+  require re-embedding when that format changes, including dimension reductions.
 - Build managed PostgreSQL pgvector bundles for every supported platform on both
   PostgreSQL majors, rather than overwriting platforms in the release matrix.
 - Extract verified Windows source archives locally and use the installed macOS SDK

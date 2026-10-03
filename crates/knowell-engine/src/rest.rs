@@ -1408,9 +1408,16 @@ impl Engine {
     fn provider_for(&self, profile: &EmbeddingProfile) -> Option<Name> {
         self.inner.embedders.iter().find_map(|(name, embedder)| {
             let p = embedder.profile();
+            let input_format_version = format!(
+                "embed{}-prepared{}-parser{}",
+                p.input_format_version,
+                knowell_parse::PREPARED_FORMAT_VERSION,
+                knowell_parse::PARSER_VERSION
+            );
             (p.provider_kind.as_str() == profile.provider
                 && p.model == profile.model
-                && p.dimensions == profile.dimensions)
+                && p.dimensions == profile.dimensions
+                && input_format_version == profile.input_format_version)
                 .then(|| name.clone())
         })
     }
@@ -1465,6 +1472,7 @@ impl Engine {
             Some(from) => {
                 !(from.provider == target.provider
                     && from.model == target.model
+                    && from.input_format_version == target.input_format_version
                     && target.dimensions <= from.dimensions)
             }
             None => true,
@@ -1569,9 +1577,9 @@ impl Engine {
             if !changed {
                 continue;
             }
-            // Re-registering points new builds at the target profile; the
-            // active generation keeps serving with the old profile's vectors
-            // until a rebuild with complete new vectors activates.
+            // Re-registering selects the target profile for new builds. Source
+            // activation may precede T2; serving follows each rebuilt view's
+            // actual source generation and vector coverage.
             let registration = self
                 .add_workspace(&resolved)
                 .await
