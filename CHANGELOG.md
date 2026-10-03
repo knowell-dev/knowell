@@ -10,6 +10,8 @@ is released. Nothing has been released yet.
 
 ### Fixed
 
+- Require Wasmtime and WASI 49.0.2, addressing upstream security advisories
+  RUSTSEC-2026-0321 through RUSTSEC-2026-0327 in the plugin runtime.
 - Resolve SARIF findings to explicit project roots, including monorepo subdirectories,
   and encode reserved characters in source paths.
 - Keep worktree identities stable across Windows short and long path spellings.

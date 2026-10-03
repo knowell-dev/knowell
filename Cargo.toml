@@ -67,8 +67,8 @@ tree-sitter = "0.27"
 tree-sitter-language = "0.1"
 url = { version = "2.5", features = ["serde"] }
 uuid = { version = "1.26", features = ["v7", "serde"] }
-wasmtime = { version = "49", default-features = false }
-wasmtime-wasi = { version = "49", default-features = false }
+wasmtime = { version = "49.0.2", default-features = false }
+wasmtime-wasi = { version = "49.0.2", default-features = false }
 # tree-sitter grammars (knowell-parse)
 tree-sitter-bash = "0.25"
 tree-sitter-c = "0.24"

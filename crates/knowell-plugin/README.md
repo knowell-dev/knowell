@@ -222,6 +222,9 @@ fails the call.
 
 ## Security notes
 
+- **Runtime updates.** Wasmtime and WASI require at least 49.0.2; the lockfile
+  includes the fixes for RUSTSEC-2026-0321 through RUSTSEC-2026-0327.
+  Dependency advisories are checked by `cargo deny` in CI.
 - **Trust boundary.** The component is untrusted; the manifest pins its exact
   bytes, so a swapped binary is refused. The manifest itself is trusted as
   much as the user who installs it.
