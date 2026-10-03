@@ -171,6 +171,13 @@ Engine-defined bodies:
   source activation can precede embedding completion and therefore report a coverage
   gap. `Profiles` shows process-local `switch.progress`; seamless restart-safe switching
   and rollback remain open.
+  The target must match a configured embedder's provider, model, dimensions and complete
+  embedding/prepared/parser input format before any workspace or job changes. Unsupported
+  formats are rejected; estimates warn that the switch cannot start. A format change
+  requires re-embedding even when the model is unchanged and dimensions decrease.
+  The existing same-format reduction estimate does not guarantee a provider-free switch:
+  missing inputs are embedded under the target profile; vector truncation and
+  normalization are not implemented by this switch path.
 
 ## Evaluation hook
 
