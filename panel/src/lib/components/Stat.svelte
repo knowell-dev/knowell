@@ -27,24 +27,33 @@
   .stat {
     background: var(--surface);
     border: 1px solid var(--border);
-    border-left: 3px solid var(--border-strong);
-    border-radius: var(--radius);
-    padding: var(--sp-3) var(--sp-4);
-  }
-  .ok {
-    border-left-color: var(--ok);
-  }
-  .warn {
-    border-left-color: var(--warn);
-  }
-  .danger {
-    border-left-color: var(--danger);
+    border-radius: var(--radius-lg);
+    padding: var(--sp-4) var(--sp-5);
+    box-shadow: var(--shadow);
   }
   .label {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
     color: var(--text-muted);
-    font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    font-size: var(--fs-sm);
+  }
+  .ok .label::before,
+  .warn .label::before,
+  .danger .label::before {
+    content: '';
+    width: 0.45rem;
+    height: 0.45rem;
+    border-radius: 999px;
+  }
+  .ok .label::before {
+    background: var(--ok);
+  }
+  .warn .label::before {
+    background: var(--warn);
+  }
+  .danger .label::before {
+    background: var(--danger);
   }
   .value {
     font-size: 1.5rem;

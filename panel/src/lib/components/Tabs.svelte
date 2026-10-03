@@ -64,14 +64,13 @@
   }
   button.active {
     color: var(--text);
-    border-bottom-color: var(--accent);
-    font-weight: 600;
+    border-bottom-color: var(--text);
+    font-weight: 500;
   }
   .count {
     margin-left: var(--sp-2);
     font-size: var(--fs-xs);
     background: var(--surface-2);
-    border: 1px solid var(--border);
     border-radius: 999px;
     padding: 0 0.4rem;
   }

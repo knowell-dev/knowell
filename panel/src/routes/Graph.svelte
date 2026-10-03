@@ -6,7 +6,7 @@
     type GraphNode,
     type ResolutionStatus
   } from '$lib/api';
-  import { layoutGraph, NODE_H, NODE_W } from '$lib/graphLayout';
+  import { edgePath, layoutGraph, NODE_H, NODE_W } from '$lib/graphLayout';
   import { useResource } from '$lib/resource.svelte';
   import PageHeader from '$lib/components/PageHeader.svelte';
   import DataState from '$lib/components/DataState.svelte';
@@ -69,29 +69,13 @@
     }
   }
 
-  /** Point on the border of a node box toward a target, so arrows touch the box edge. */
-  function anchor(ax: number, ay: number, bx: number, by: number): [number, number] {
-    const cx = ax + NODE_W / 2;
-    const cy = ay + NODE_H / 2;
-    const dx = bx + NODE_W / 2 - cx;
-    const dy = by + NODE_H / 2 - cy;
-    if (dx === 0 && dy === 0) return [cx, cy];
-    const t = Math.min(NODE_W / 2 / Math.abs(dx || 1e-9), NODE_H / 2 / Math.abs(dy || 1e-9));
-    return [cx + dx * t, cy + dy * t];
-  }
-
-  const trim = (s: string) => (s.length > 21 ? s.slice(0, 20) + '…' : s);
+  const trim = (s: string) => (s.length > 24 ? s.slice(0, 23) + '…' : s);
 </script>
 
 <PageHeader
   title="Code graph"
   lead="Drill from services into modules and symbols, or view the contract map. Edge colour is the evidence type; line style is the resolution status. They are never merged into one score."
 />
-
-<p class="faint small note">
-  This view uses a lightweight SVG layout for small graphs. A sigma.js (WebGL) renderer will replace
-  it for large graphs.
-</p>
 
 <Tabs
   label="Graph mode"
@@ -133,10 +117,11 @@
         {@const lay = layoutGraph(g.nodes, g.edges)}
         <Card flush>
           <div class="canvas">
+            <!-- Shrinks to the card instead of scrolling, but never below a legible size. -->
             <svg
               viewBox="0 0 {lay.width} {lay.height}"
-              width={lay.width}
-              height={lay.height}
+              style:max-width="{lay.width}px"
+              style:min-width="{Math.min(lay.width, 640)}px"
               role="group"
               aria-label="Graph canvas. Use the table below for an accessible list of edges."
             >
@@ -159,21 +144,17 @@
                 {@const a = lay.placed.get(e.from)}
                 {@const b = lay.placed.get(e.to)}
                 {#if a && b}
-                  {@const p1 = anchor(a.x, a.y, b.x, b.y)}
-                  {@const p2 = anchor(b.x, b.y, a.x, a.y)}
-                  <g>
-                    <line
-                      x1={p1[0]}
-                      y1={p1[1]}
-                      x2={p2[0]}
-                      y2={p2[1]}
-                      stroke={EVIDENCE[e.evidence].color}
-                      stroke-width={selectedEdge === e.id ? 3 : 1.6}
-                      stroke-dasharray={DASH[e.status]}
-                      marker-end="url(#arrow-{e.evidence})"
-                      pointer-events="none"
-                    />
-                  </g>
+                  <path
+                    class="edge"
+                    class:sel={selectedEdge === e.id}
+                    d={edgePath(a.x, a.y, b.x, b.y)}
+                    fill="none"
+                    stroke={EVIDENCE[e.evidence].color}
+                    stroke-width={selectedEdge === e.id ? 3 : 1.6}
+                    stroke-dasharray={DASH[e.status]}
+                    marker-end="url(#arrow-{e.evidence})"
+                    pointer-events="none"
+                  />
                 {/if}
               {/each}
               {#each [...lay.placed.values()] as p (p.node.id)}
@@ -192,10 +173,13 @@
                   ondblclick={() => drill(p.node)}
                   onkeydown={(e) => nodeKey(e, p.node)}
                 >
+                  <title>{p.node.kind}: {p.node.label}</title>
+                  <!-- Opaque base: the kind tints are translucent and edges must not show through. -->
+                  <rect class="base" width={NODE_W} height={NODE_H} rx="8" />
                   <rect
                     width={NODE_W}
                     height={NODE_H}
-                    rx="6"
+                    rx="8"
                     fill={KIND_FILL[p.node.kind] ?? 'var(--surface-2)'}
                   />
                   <text x="8" y="14" class="k">{p.node.kind}</text>
@@ -330,6 +314,10 @@
         </li>
       </ul>
       <p class="faint small">Double-click a service or module to drill down.</p>
+      <p class="faint small">
+        This view uses a lightweight SVG layout for small graphs. A sigma.js (WebGL) renderer will
+        replace it for large graphs.
+      </p>
     </Card>
     <Card title="Graph insights" flush>
       <DataState
@@ -357,9 +345,6 @@
 </div>
 
 <style>
-  .note {
-    margin-bottom: var(--sp-3);
-  }
   .layout {
     display: grid;
     grid-template-columns: minmax(0, 1fr) 19rem;
@@ -378,7 +363,21 @@
   .canvas {
     overflow: auto;
     background: var(--bg-sunken);
-    border-radius: var(--radius);
+    border-radius: var(--radius-lg);
+  }
+  .canvas svg {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+  .edge {
+    opacity: 0.8;
+  }
+  .edge.sel {
+    opacity: 1;
+  }
+  .node rect.base {
+    fill: var(--surface);
   }
   .node {
     cursor: pointer;

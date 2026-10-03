@@ -8,7 +8,9 @@ export function loadTheme(): Theme {
   } catch {
     /* storage may be blocked; fall through to the default */
   }
-  return 'dark';
+  return typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: light)').matches
+    ? 'light'
+    : 'dark';
 }
 
 export function applyTheme(t: Theme): void {

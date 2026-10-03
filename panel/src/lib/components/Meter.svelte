@@ -37,9 +37,8 @@
   }
   .track {
     flex: 1;
-    height: 0.5rem;
-    background: var(--bg-sunken);
-    border: 1px solid var(--border);
+    height: 0.375rem;
+    background: var(--surface-2);
     border-radius: 999px;
     overflow: hidden;
   }

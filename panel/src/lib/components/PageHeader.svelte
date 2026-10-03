@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import InlineText from './InlineText.svelte';
 
   let { title, lead, actions }: { title: string; lead?: string; actions?: Snippet } = $props();
 </script>
@@ -7,7 +8,7 @@
 <header class="ph">
   <div>
     <h1>{title}</h1>
-    {#if lead}<p class="muted">{lead}</p>{/if}
+    {#if lead}<p class="muted"><InlineText text={lead} /></p>{/if}
   </div>
   {#if actions}<div class="row">{@render actions()}</div>{/if}
 </header>

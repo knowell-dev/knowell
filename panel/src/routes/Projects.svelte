@@ -45,10 +45,7 @@
         <div class="table-wrap">
           <table class="table">
             <thead
-              ><tr
-                ><th>Name</th><th>Workspace</th><th>Kind</th><th>Languages</th><th class="num"
-                  >Files</th
-                ><th>Index</th></tr
+              ><tr><th>Project</th><th>Languages</th><th class="num">Files</th><th>Index</th></tr
               ></thead
             >
             <tbody>
@@ -62,11 +59,13 @@
                         e.preventDefault();
                         select(p);
                       }}>{p.name}</a
-                    ></td
-                  >
-                  <td class="muted">{p.workspaceName}</td>
-                  <td
-                    >{#if p.kind !== null}{p.kind}{:else}<NotReported />{/if}</td
+                    >
+                    <!-- Workspace and kind share the name cell so the list fits beside the detail. -->
+                    <div class="muted small">
+                      <span>{p.workspaceName}</span>{#if p.kind !== null}<span
+                          >{` · ${p.kind}`}</span
+                        >{/if}
+                    </div></td
                   >
                   <td class="muted">
                     {#if p.languages === null}<NotReported
@@ -76,7 +75,7 @@
                     >{#if p.fileCount !== null}{formatNumber(p.fileCount)}{:else}<NotReported
                       />{/if}</td
                   >
-                  <td>
+                  <td class="nowrap">
                     {#if p.indexed}<Badge tone="ok">{relativeTime(p.lastIndexedAt)}</Badge
                       >{:else}<Badge tone="warn">not indexed</Badge>{/if}
                   </td>
@@ -341,7 +340,7 @@
                     </p>
                   {:else}
                     <div class="table-wrap">
-                      <table class="table">
+                      <table class="table worktrees">
                         <thead
                           ><tr
                             ><th>Path</th><th>Branch</th><th>HEAD</th><th class="num"
@@ -352,7 +351,7 @@
                         <tbody>
                           {#each p.worktrees as w (w.path)}
                             <tr>
-                              <td class="mono">{w.path}</td>
+                              <td class="mono path">{w.path}</td>
                               <td><code>{w.branch}</code></td>
                               <td class="mono">{w.head}</td>
                               <td class="num">{w.dirtyFiles}</td>
@@ -379,7 +378,7 @@
 <style>
   .split {
     display: grid;
-    grid-template-columns: minmax(20rem, 2fr) minmax(0, 3fr);
+    grid-template-columns: minmax(22rem, 1fr) minmax(0, 1fr);
     gap: var(--sp-4);
     align-items: start;
   }
@@ -418,5 +417,13 @@
   }
   .pad {
     padding: var(--sp-4);
+  }
+  /* Long worktree paths and headers wrap so every column fits beside the project list. */
+  .path {
+    overflow-wrap: anywhere;
+    min-width: 7rem;
+  }
+  .worktrees th {
+    white-space: normal;
   }
 </style>

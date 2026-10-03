@@ -137,8 +137,10 @@
               <dl class="kv">
                 <dt>This month</dt>
                 <dd>
-                  {formatUsd(p.spentThisMonthUsdMicros)}{#if p.budgets.monthlyUsdMicros}
-                    of {formatUsd(p.budgets.monthlyUsdMicros)}{/if}
+                  <!-- One expression: Svelte trims the whitespace that used to separate "of". -->
+                  {formatUsd(p.spentThisMonthUsdMicros)}{p.budgets.monthlyUsdMicros
+                    ? ` of ${formatUsd(p.budgets.monthlyUsdMicros)}`
+                    : ''}
                 </dd>
                 {#if p.budgets.tokensPerMinute}<dt>Rate limit</dt>
                   <dd>{formatNumber(p.budgets.tokensPerMinute)} tokens/min</dd>{/if}
