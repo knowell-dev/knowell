@@ -1,7 +1,7 @@
 # knowell-store
 
 PostgreSQL storage for Knowell: the single source of truth. PostgreSQL 17/18 with
-pgvector 0.8, accessed through sqlx 0.9 on tokio. All queries are checked at run time
+optional pgvector 0.8 or newer, accessed through sqlx 0.9 on tokio. All queries are checked at run time
 (`sqlx::query`, `query_as` + `FromRow`), so building the crate never needs a database;
 the integration tests run every query against a real server instead.
 
@@ -24,6 +24,22 @@ python scripts/buildlock.py cargo test -p knowell-store
 
 `pgvector/pgvector:pg18` works the same way.
 
+The optional-extension tests also need an unmodified PostgreSQL server (no pgvector
+files) via `KNOWELL_TEST_PLAIN_DATABASE_URL`. CI supplies both servers. For example:
+
+```sh
+docker run -d --name knowell-test-plain-pg -e POSTGRES_PASSWORD=knowell-test \
+  -p 55433:5432 postgres:17
+export KNOWELL_TEST_PLAIN_DATABASE_URL=postgres://postgres:knowell-test@localhost:55433/postgres
+python scripts/buildlock.py cargo test -p knowell-store --test integration migrations::
+```
+
+These tests cover concurrent and cancelled migrations, preserved legacy checksums
+and vectors, enabling vectors on an existing core schema, and rejecting corrupt
+migration history without retaining an advisory lock.
+The engine's plain-server test covers lexical search, symbols, graph and memory with
+configured providers and no embedding calls.
+
 ## Using it
 
 ```rust,ignore
@@ -41,6 +57,20 @@ views::activate_generation(&mut conn, view.id, generation).await?;
 Repository functions are plain `async fn`s taking `&mut PgConnection`: pass a pooled
 connection, or a transaction (`&mut tx`) to compose several calls atomically. Functions
 that need several statements open their own transaction (a savepoint when nested).
+
+`migrate()` creates core tables without requiring pgvector. If pgvector 0.8 or newer
+is available, it also installs the extension and vector table; rerun it after adding
+the extension files to enable semantic storage. Existing migration checksums and
+data are preserved. Unknown checksums, dirty migrations and missing migration
+versions remain errors. Migration selection and vector DDL share an advisory lock.
+The historical SQL in `migrations/` is immutable; `core_migrations/` holds only the
+two vector-free variants and the optional vector DDL.
+
+`check_server().supports_core()` reports PostgreSQL compatibility;
+`semantic_enabled()` reports a supported installed extension. Use
+`embeddings::available()` to check both the extension and vector table. Vector
+operations return `StoreError::SemanticUnavailable` when that storage is absent.
+Profiles and index-generation metadata remain core tables.
 
 | Module | Functions |
 |---|---|

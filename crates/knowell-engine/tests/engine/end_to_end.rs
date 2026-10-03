@@ -28,6 +28,144 @@ fn context_target(id: &knowell_mcp::ContextId) -> Target {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plain_postgres_serves_lexical_symbols_graph_and_memory() {
+    if !git_available() {
+        eprintln!("skipping: git is not installed");
+        return;
+    }
+    let Some(db) =
+        crate::common::TestDb::create_from(module_path!(), crate::common::PLAIN_ENV).await
+    else {
+        return;
+    };
+    assert!(db.store.check_server().await.unwrap().vector.is_none());
+    let ws = fixture_workspace();
+    let data = tempfile::tempdir().unwrap();
+    // Providers remain configured: storage availability must prevent T2
+    // without blocking the rest of indexing or sending any inputs.
+    let engine = indexed_engine(&db, &ws, data.path()).await;
+    let caller = alice_caller();
+    let opened = engine
+        .open_workspace(&caller, OpenWorkspaceInput::default())
+        .await
+        .unwrap();
+    assert_eq!(opened.manifest.len(), 10);
+    assert!(opened.manifest.iter().all(|view| view.commit.is_some()));
+    let target = context_target(&opened.context_id);
+    let found = engine
+        .search(
+            &caller,
+            SearchInput {
+                target: target.clone(),
+                query: "cancel subscription".into(),
+                limit: Some(40),
+                ..SearchInput::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!found.hits.is_empty());
+    assert!(found.hits.iter().any(|hit| {
+        hit.evidence
+            .why
+            .iter()
+            .any(|why| matches!(why, MatchReason::Lexical { .. }))
+    }));
+    assert!(
+        found
+            .gaps
+            .iter()
+            .any(|gap| gap.reason == GapReason::EmbeddingsNotReady
+                && gap.message.contains("pgvector")),
+        "{:?}",
+        found.gaps
+    );
+
+    let inspected = engine
+        .inspect_symbol(
+            &caller,
+            InspectSymbolInput {
+                target: target.clone(),
+                symbol: SymbolRef {
+                    id: None,
+                    symbol: Some("SubscriptionService.cancelSubscription".into()),
+                    project: Some(name("billing-api")),
+                },
+                include: Vec::new(),
+                limit: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(inspected.symbols.len(), 1);
+    let symbol = &inspected.symbols[0];
+    assert!(!symbol.references.is_empty());
+    let trace = engine
+        .trace_flow(
+            &caller,
+            TraceFlowInput {
+                target: target.clone(),
+                symbol: Some("SubscriptionService".into()),
+                project: Some(name("billing-api")),
+                direction: Some(knowell_mcp::tools::FlowDirection::Upstream),
+                ..TraceFlowInput::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!trace.nodes.is_empty());
+    assert!(
+        !trace
+            .gaps
+            .iter()
+            .any(|gap| gap.reason == GapReason::RelationsNotReady)
+    );
+
+    let written = engine
+        .write_memory(
+            &caller,
+            WriteMemoryInput {
+                target: target.clone(),
+                scope: MemoryScope {
+                    level: ScopeLevel::Project,
+                    project: Some(name("billing-api")),
+                    task_id: None,
+                },
+                kind: MemoryKind::Decision,
+                title: "Cancellation keeps benefits until the period ends".into(),
+                body: "The subscription service preserves benefits until period end.".into(),
+                related_symbols: vec!["SubscriptionService.cancelSubscription".into()],
+                evidence: vec![symbol.id.clone()],
+                supersedes: None,
+                idempotency_key: Some("plain-postgres-decision".into()),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(written.created);
+    let memory = engine
+        .read_memory(
+            &caller,
+            ReadMemoryInput {
+                target,
+                ..ReadMemoryInput::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(memory.records.len(), 1);
+    assert_eq!(memory.records[0].id, written.record.id);
+    assert_eq!(memory.records[0].evidence.len(), 1);
+    assert_eq!(engine.indexer().stats().embedding_calls, 0);
+    let mut conn = db.store.acquire().await.unwrap();
+    assert!(
+        !knowell_store::embeddings::available(&mut conn)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn engine_serves_every_tool_over_the_indexed_fixture() {
     if !git_available() {
         eprintln!("skipping: git is not installed");

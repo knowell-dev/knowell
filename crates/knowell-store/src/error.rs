@@ -88,6 +88,9 @@ pub enum StoreError {
         /// Profile name.
         name: String,
     },
+    /// Vector storage is unavailable; core storage remains usable.
+    #[error("semantic search is disabled; install pgvector 0.8 or newer and run `know init`")]
+    SemanticUnavailable,
     /// The profile's vector index is missing or invalid, so a similarity
     /// search would silently degrade to a full scan.
     #[error(

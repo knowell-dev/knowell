@@ -307,10 +307,13 @@ async fn concurrent_registration_builds_one_index() {
         .unwrap()
         .id;
     let mut tasks = Vec::new();
+    let ready = std::sync::Arc::new(tokio::sync::Barrier::new(4));
     for _ in 0..4 {
         let store = db.store.clone();
+        let ready = ready.clone();
         tasks.push(tokio::spawn(async move {
             let mut c = store.acquire().await.unwrap();
+            ready.wait().await;
             register_profile(&mut c, org, &spec("compact", "m1", 16))
                 .await
                 .unwrap()
@@ -329,6 +332,13 @@ async fn concurrent_registration_builds_one_index() {
     .await
     .unwrap();
     assert_eq!(indexes, 1);
+    // A different name must still report a settings conflict, never silently
+    // return the profile registered under the original name.
+    assert!(matches!(
+        register_profile(&mut c, org, &spec("other-name", "m1", 16)).await,
+        Err(StoreError::AlreadyExists { .. })
+    ));
+    assert_eq!(list_profiles(&mut c, org).await.unwrap().len(), 1);
 }
 
 async fn index_files(

@@ -4,20 +4,21 @@
 //!
 //! Knowell's release CI builds pgvector once per platform and PostgreSQL major
 //! version against the headers of the distribution that [`install`] downloads,
-//! and publishes a *flat* directory:
+//! and publishes this directory layout:
 //!
 //! ```text
 //! <bundle>/
-//!   vector.control            required; `default_version = 'X.Y.Z'`
-//!   vector--X.Y.Z.sql         required; the script for default_version
-//!   vector--A--B.sql          optional upgrade scripts (any number)
-//!   vector.so | vector.dylib | vector.dll
+//!   share/extension/vector.control     required; `default_version = 'X.Y.Z'`
+//!   share/extension/vector--X.Y.Z.sql  required; the script for default_version
+//!   share/extension/vector--A--B.sql   optional upgrade scripts (any number)
+//!   lib/vector.so | vector.dylib | vector.dll
 //!                             required; the file for the target platform
 //!                             (Linux .so, macOS .dylib or .so, Windows .dll)
 //! ```
 //!
 //! Other files (licence, build manifest, `bitcode/`) are ignored and not
-//! copied. Symlinks anywhere among the files above are rejected.
+//! copied. The legacy flat layout is also accepted. Mixed layouts and links in
+//! selected files or their bundle directories are rejected before reading them.
 //!
 //! [`install`]: crate::ManagedPostgres::install
 
@@ -100,7 +101,7 @@ fn is_script_name(name: &str) -> bool {
 
 fn regular_file_size(path: &Path) -> Result<Option<u64>> {
     match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_file() => Ok(Some(meta.len())),
+        Ok(meta) if meta.is_file() && !is_link(&meta) => Ok(Some(meta.len())),
         Ok(_) => Err(Error::Bundle(format!(
             "{} must be a regular file (not a link or directory)",
             path.display()
@@ -110,19 +111,66 @@ fn regular_file_size(path: &Path) -> Result<Option<u64>> {
     }
 }
 
+fn is_link(meta: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // Reject junctions and other reparse points as well as symbolic links.
+        meta.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        meta.file_type().is_symlink()
+    }
+}
+
+fn require_directory(path: &Path) -> Result<()> {
+    let meta = std::fs::symlink_metadata(path)
+        .map_err(|err| Error::io(format!("inspecting {}", path.display()), err))?;
+    if !meta.is_dir() || is_link(&meta) {
+        return Err(Error::Bundle(format!(
+            "{} must be a directory (not a link or file)",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn member_exists(path: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(Error::io(format!("inspecting {}", path.display()), err)),
+    }
+}
+
+/// Select one complete layout; never combine files from different layouts.
+fn bundle_directories(dir: &Path) -> Result<(PathBuf, PathBuf)> {
+    require_directory(dir)?;
+    let lib = dir.join("lib");
+    let share = dir.join("share");
+    if !member_exists(&lib)? && !member_exists(&share)? {
+        return Ok((dir.to_path_buf(), dir.to_path_buf()));
+    }
+    if member_exists(&dir.join("vector.control"))? {
+        return Err(Error::Bundle(
+            "mixed flat and release bundle layouts; provide exactly one layout".to_string(),
+        ));
+    }
+    require_directory(&lib)?;
+    require_directory(&share)?;
+    let ext = share.join("extension");
+    require_directory(&ext)?;
+    Ok((lib, ext))
+}
+
 /// Check that `dir` holds a complete bundle for this platform.
 ///
 /// # Errors
 /// [`Error::Bundle`] describing the first problem found.
 pub(crate) fn validate_bundle(dir: &Path) -> Result<Bundle> {
-    if !dir.is_dir() {
-        return Err(Error::Bundle(format!(
-            "{} is not a directory",
-            dir.display()
-        )));
-    }
-
-    let control = dir.join("vector.control");
+    let (lib, ext) = bundle_directories(dir)?;
+    let control = ext.join("vector.control");
     match regular_file_size(&control)? {
         None => return Err(Error::Bundle("vector.control is missing".to_string())),
         Some(size) if size > MAX_TEXT_BYTES => {
@@ -139,7 +187,7 @@ pub(crate) fn validate_bundle(dir: &Path) -> Result<Bundle> {
 
     let mut library = None;
     for name in library_names() {
-        let candidate = dir.join(name);
+        let candidate = lib.join(name);
         if regular_file_size(&candidate)?.is_some() {
             library = Some(candidate);
             break;
@@ -153,10 +201,10 @@ pub(crate) fn validate_bundle(dir: &Path) -> Result<Bundle> {
     })?;
 
     let mut scripts = Vec::new();
-    let entries = std::fs::read_dir(dir)
-        .map_err(|err| Error::io(format!("listing {}", dir.display()), err))?;
+    let entries = std::fs::read_dir(&ext)
+        .map_err(|err| Error::io(format!("listing {}", ext.display()), err))?;
     for entry in entries {
-        let entry = entry.map_err(|err| Error::io(format!("listing {}", dir.display()), err))?;
+        let entry = entry.map_err(|err| Error::io(format!("listing {}", ext.display()), err))?;
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
         if !is_script_name(name) {
@@ -273,6 +321,128 @@ mod tests {
         std::fs::write(dir.join(format!("vector--{version}.sql")), "-- sql").unwrap();
         std::fs::write(dir.join("vector--0.7.0--0.8.0.sql"), "-- upgrade").unwrap();
         std::fs::write(dir.join("LICENSE"), "ignored").unwrap();
+    }
+
+    fn make_release_bundle(dir: &Path) {
+        let ext = dir.join("share").join("extension");
+        let lib = dir.join("lib");
+        std::fs::create_dir_all(&ext).unwrap();
+        std::fs::create_dir(&lib).unwrap();
+        std::fs::write(ext.join("vector.control"), "default_version = '0.8.7'").unwrap();
+        std::fs::write(ext.join("vector--0.8.7.sql"), "-- sql").unwrap();
+        std::fs::write(ext.join("other.control"), "ignored").unwrap();
+        std::fs::write(lib.join(lib_name()), "fake library").unwrap();
+        std::fs::write(dir.join("manifest.json"), "{}").unwrap();
+    }
+
+    // These three cases previously exercised the CLI's flattening adapter.
+    // Keeping them here verifies the shared installer used by init and upgrade.
+    #[test]
+    fn flat_bundles_are_used_as_they_are() {
+        let dir = tempfile::tempdir().unwrap();
+        make_bundle(dir.path(), "0.8.7");
+        let bundle = validate_bundle(dir.path()).unwrap();
+        assert_eq!(bundle.control, dir.path().join("vector.control"));
+        assert_eq!(bundle.library, dir.path().join(lib_name()));
+    }
+
+    #[test]
+    fn release_bundles_are_installed_directly() {
+        let dir = tempfile::tempdir().unwrap();
+        make_release_bundle(dir.path());
+        let bundle = validate_bundle(dir.path()).unwrap();
+        assert_eq!(bundle.version, "0.8.7");
+        assert_eq!(
+            bundle.control,
+            dir.path().join("share/extension/vector.control")
+        );
+        assert_eq!(bundle.library, dir.path().join("lib").join(lib_name()));
+        let dest = tempfile::tempdir().unwrap();
+        let lib = dest.path().join("lib");
+        let ext = dest.path().join("share/extension");
+        for _ in 0..2 {
+            install_bundle(&bundle, &lib, &ext).unwrap();
+        }
+        let mut names: Vec<_> = [&lib, &ext]
+            .into_iter()
+            .flat_map(|path| std::fs::read_dir(path).unwrap())
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        let mut expected = vec!["vector--0.8.7.sql", "vector.control", lib_name()];
+        expected.sort();
+        assert_eq!(names, expected);
+        assert_eq!(
+            std::fs::read(ext.join("vector--0.8.7.sql")).unwrap(),
+            b"-- sql"
+        );
+        assert_eq!(
+            std::fs::read(lib.join(lib_name())).unwrap(),
+            b"fake library"
+        );
+    }
+
+    #[test]
+    fn non_bundles_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(validate_bundle(dir.path()).is_err());
+    }
+
+    #[test]
+    fn release_layout_must_be_complete_and_unambiguous() {
+        for missing in [
+            PathBuf::from("lib").join(lib_name()),
+            PathBuf::from("share/extension/vector.control"),
+            PathBuf::from("share/extension/vector--0.8.7.sql"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            make_release_bundle(dir.path());
+            std::fs::remove_file(dir.path().join(missing)).unwrap();
+            assert!(validate_bundle(dir.path()).is_err());
+        }
+        let mixed = tempfile::tempdir().unwrap();
+        make_release_bundle(mixed.path());
+        make_bundle(mixed.path(), "0.8.0");
+        let error = validate_bundle(mixed.path()).unwrap_err();
+        assert!(error.to_string().contains("mixed flat and release"));
+    }
+
+    #[test]
+    fn release_directories_cannot_be_files() {
+        for member in ["lib", "share", "share/extension"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(member);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "not a directory").unwrap();
+            assert!(validate_bundle(dir.path()).is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_release_directories_and_members_are_rejected() {
+        for member in ["lib", "share", "share/extension"] {
+            let dir = tempfile::tempdir().unwrap();
+            make_release_bundle(dir.path());
+            let source = dir.path().join(member);
+            let moved = dir.path().join("moved");
+            std::fs::rename(&source, &moved).unwrap();
+            std::os::unix::fs::symlink(&moved, &source).unwrap();
+            assert!(matches!(validate_bundle(dir.path()), Err(Error::Bundle(_))));
+        }
+        for member in [
+            PathBuf::from("lib").join(lib_name()),
+            PathBuf::from("share/extension/vector.control"),
+            PathBuf::from("share/extension/vector--0.8.7.sql"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            make_release_bundle(dir.path());
+            let source = dir.path().join(member);
+            let moved = dir.path().join("moved");
+            std::fs::rename(&source, &moved).unwrap();
+            std::os::unix::fs::symlink(&moved, &source).unwrap();
+            assert!(matches!(validate_bundle(dir.path()), Err(Error::Bundle(_))));
+        }
     }
 
     #[test]

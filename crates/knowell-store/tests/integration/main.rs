@@ -1,4 +1,4 @@
-//! Integration tests for knowell-store against a real PostgreSQL with
+//! Integration tests for knowell-store against PostgreSQL with and without
 //! pgvector. See `common.rs` and the crate README for how to run them.
 
 // Test helpers outside `#[test]` functions may panic and print.
@@ -21,5 +21,6 @@ mod hierarchy;
 mod identity;
 mod jobs;
 mod knowledge;
+mod migrations;
 mod tasks;
 mod views;

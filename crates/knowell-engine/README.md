@@ -199,3 +199,8 @@ Unit tests run anywhere. `tests/engine/` indexes the acme-goods fixture (seed 42
 written with git) with `FakeEmbedder` against `KNOWELL_TEST_DATABASE_URL` (see the
 knowell-store README) and drives every tool, the REST engine and the `hybrid` retriever;
 without the variable it prints one skip line and passes.
+
+`KNOWELL_TEST_PLAIN_DATABASE_URL` enables the separate unmodified-PostgreSQL test:
+the same fixture serves lexical search, symbol references, graph and sourced memory
+with configured providers, explicit semantic-unavailable gaps and zero embedding
+calls. See the store README for the second test server's setup.

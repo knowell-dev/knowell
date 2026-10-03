@@ -414,11 +414,13 @@ fn pgvector_check(info: &ServerInfo, mode: DatabaseMode) -> Check {
             DatabaseMode::Managed => {
                 "unpack the pgvector bundle of the Knowell release to $KNOWELL_HOME/pgvector/pg<major> and run `know init`"
             }
-            DatabaseMode::External => "install pgvector 0.8 or newer on the server",
+            DatabaseMode::External => {
+                "install pgvector 0.8 or newer on the server and run `know init`"
+            }
         };
-        return Check::fail(
+        return Check::warn(
             NAME,
-            "the pgvector extension is not available: the schema and semantic search need it",
+            "pgvector is unavailable; semantic search is disabled, core storage remains available",
             fix,
         );
     };
@@ -431,10 +433,10 @@ fn pgvector_check(info: &ServerInfo, mode: DatabaseMode) -> Check {
         .as_deref()
         .unwrap_or(&vector.default_version);
     if too_old {
-        return Check::fail(
+        return Check::warn(
             NAME,
-            format!("pgvector {version} is too old"),
-            "upgrade pgvector to 0.8 or newer",
+            format!("pgvector {version} is too old; semantic search is disabled"),
+            "upgrade pgvector to 0.8 or newer and run `know init`",
         );
     }
     match &vector.installed_version {
@@ -442,7 +444,7 @@ fn pgvector_check(info: &ServerInfo, mode: DatabaseMode) -> Check {
         None => Check::warn(
             NAME,
             format!(
-                "pgvector {} available but not installed in database `{DATABASE_NAME}`: the schema was not created",
+                "pgvector {} available but not installed in database `{DATABASE_NAME}`: semantic search is disabled",
                 vector.default_version
             ),
             "run `know init`",

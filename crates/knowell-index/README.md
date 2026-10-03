@@ -63,6 +63,11 @@ with the reason, and the job ends quietly (it is not retried). Every store write
 by the store as well. T2 checks instead that `g` is still the active generation, at its
 start and before every provider batch.
 
+If pgvector storage is unavailable, registration reports T2 as unavailable with
+installation guidance. T0, T1 and T3 still run; no embedding inputs are sent.
+After installing pgvector, run `know init` and restart the engine to register the
+configured profile and backfill vectors.
+
 ### Searchable in seconds
 
 A generation is activated right after T3, so lexical, symbol and graph search serve a new
