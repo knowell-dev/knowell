@@ -1,7 +1,8 @@
 # Releasing Knowell
 
-There are **no releases before 1.0**. The pipeline (`.github/workflows/release.yml`) exists and
-is tested with dry runs so that 1.0 is a button press, not a project.
+There are **no releases before 1.0**. Use publication-free dry runs of
+`.github/workflows/release.yml` to verify the release pipeline before the owner's
+release decision.
 
 ## What a release publishes
 
@@ -37,11 +38,21 @@ pull-request workflows see none.
 ## Dry run (do this before every release, and whenever the pipeline changes)
 
 1. Actions, Release, Run workflow, keep `dry_run` checked (the default).
-2. It builds all eight targets, `.deb`/`.rpm`, SBOM, pgvector bundles (10), the image, runs
-   the tooling tests, `cargo publish --workspace --dry-run`, `npm pack`, writes
-   `SHA256SUMS`, installs the Linux archive with `scripts/install.sh`, and renders the
-   Homebrew, Scoop and winget manifests. Nothing is published, nothing asks for approval.
+2. It attempts eight binary targets; six are required, while the two experimental
+   musl targets may fail or be absent. It builds `.deb`/`.rpm`, SBOM and ten pgvector bundles:
+   PostgreSQL 17 and 18 each use Linux x64/arm64, macOS x64/arm64 and Windows x64.
+   It runs the tooling tests, checks an amd64 container, writes `SHA256SUMS`, installs
+   the Linux archive with `scripts/install.sh`, and renders Homebrew, Scoop and winget
+   manifests. The crate check runs `cargo publish --workspace --dry-run --locked` only
+   when publishable crates exist; the current `publish = false` workspace instead emits
+   a warning and skips packaging. The npm check uses `npm pack --dry-run` to inspect its
+   file list. Nothing is published, and no release-environment approval is requested.
 3. Download the `release-assets` and `rendered-manifests` artifacts and inspect them.
+
+A green dry run currently does not establish `.crate` or npm tarball contents, an arm64
+container artifact, or provenance verification. Build attestations are disabled in dry
+runs, and the Linux installer check explicitly skips attestation verification. Those
+checks, plus Windows installer verification, remain release-readiness work.
 
 Locally: `python -m unittest discover -s dist`, `cd wrappers/npm && npm test`,
 `PYTHONPATH=wrappers/pypi/src python -m unittest discover -s wrappers/pypi/tests`.
