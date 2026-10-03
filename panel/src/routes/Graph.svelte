@@ -6,7 +6,10 @@
     type GraphNode,
     type ResolutionStatus
   } from '$lib/api';
+  import { SvelteSet } from 'svelte/reactivity';
   import { edgePath, layoutGraph, NODE_H, NODE_W } from '$lib/graphLayout';
+  import { groupByKind } from '$lib/groupByKind';
+  import InlineText from '$lib/components/InlineText.svelte';
   import { useResource } from '$lib/resource.svelte';
   import PageHeader from '$lib/components/PageHeader.svelte';
   import DataState from '$lib/components/DataState.svelte';
@@ -24,6 +27,14 @@
 
   const slice = useResource(() => api.getGraph({ mode, parentId }));
   const insights = useResource(() => api.getGraphInsights());
+
+  /** Up to this many insights are listed flat; more are grouped by kind and folded. */
+  const INSIGHTS_FLAT = 8;
+  const openKinds = new SvelteSet<string>();
+  function toggleKind(kind: string) {
+    if (openKinds.has(kind)) openKinds.delete(kind);
+    else openKinds.add(kind);
+  }
   $effect(() => {
     void mode;
     void parentId;
@@ -327,17 +338,53 @@
         emptyWhy="The rules found no gaps, or no contracts have been extracted yet."
       >
         {#snippet children(list)}
-          <ul class="insights">
-            {#each list as i (i.id)}
-              <li>
-                <div>{i.title}</div>
-                <div class="row">
-                  <Badge tone="info">{i.kind}</Badge><Badge>{EVIDENCE[i.evidence].label}</Badge
-                  ><Badge tone={i.status === 'resolved' ? 'ok' : 'warn'}>{i.status}</Badge>
-                </div>
-              </li>
-            {/each}
-          </ul>
+          {#if list.length <= INSIGHTS_FLAT}
+            <ul class="insights">
+              {#each list as i (i.id)}
+                <li>
+                  <div><InlineText text={i.title} /></div>
+                  <div class="row">
+                    <Badge tone="info">{i.kind}</Badge><Badge>{EVIDENCE[i.evidence].label}</Badge
+                    ><Badge tone={i.status === 'resolved' ? 'ok' : 'warn'}>{i.status}</Badge>
+                  </div>
+                </li>
+              {/each}
+            </ul>
+          {:else}
+            <!-- A long list (a real repository yields dozens) is grouped by kind and folded,
+                 so the sidebar stays short; an opened group scrolls inside itself. -->
+            <ul class="groups">
+              {#each groupByKind(list) as g (g.kind)}
+                {@const open = openKinds.has(g.kind)}
+                <li>
+                  <button
+                    class="group-head"
+                    type="button"
+                    aria-expanded={open}
+                    onclick={() => toggleKind(g.kind)}
+                  >
+                    <span class="chev" class:open aria-hidden="true">›</span>
+                    <span class="kind">{g.kind}</span>
+                    <Badge>{g.items.length}</Badge>
+                  </button>
+                  {#if open}
+                    <ul class="insights scroll enter">
+                      {#each g.items as i (i.id)}
+                        <li>
+                          <div><InlineText text={i.title} /></div>
+                          <div class="row">
+                            <Badge>{EVIDENCE[i.evidence].label}</Badge><Badge
+                              tone={i.status === 'resolved' ? 'ok' : 'warn'}>{i.status}</Badge
+                            >
+                          </div>
+                        </li>
+                      {/each}
+                    </ul>
+                  {/if}
+                </li>
+              {/each}
+            </ul>
+          {/if}
         {/snippet}
       </DataState>
     </Card>
@@ -441,6 +488,53 @@
     flex-direction: column;
     gap: var(--sp-2);
     font-size: var(--fs-sm);
+  }
+  .insights.scroll {
+    max-height: 24rem;
+    overflow-y: auto;
+    background: var(--bg-sunken);
+  }
+  .groups {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .groups > li {
+    border-bottom: 1px solid var(--border);
+  }
+  .groups > li:last-child {
+    border-bottom: 0;
+  }
+  .group-head {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    width: 100%;
+    padding: var(--sp-3) var(--sp-4);
+    background: none;
+    border: 0;
+    color: var(--text);
+    font-size: var(--fs-sm);
+    text-align: left;
+    cursor: pointer;
+    transition: background-color 120ms ease;
+  }
+  .group-head:hover {
+    background: var(--surface-2);
+  }
+  .group-head .kind {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .chev {
+    display: inline-block;
+    width: 0.75rem;
+    color: var(--text-faint);
+    transition: transform 150ms ease;
+  }
+  .chev.open {
+    transform: rotate(90deg);
   }
   .pad {
     padding: var(--sp-4);

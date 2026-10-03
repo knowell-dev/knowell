@@ -46,8 +46,13 @@
     <button class="btn" type="button" onclick={() => resource.reload()}>Retry</button>
   </div>
 {:else if resource.loading && resource.data === undefined}
+  <!-- Placeholder lines appear only if loading takes longer than 200 ms, so fast local
+       responses never flash a skeleton. Screen readers still hear the status at once. -->
   <div class="loading" role="status" aria-live="polite">
-    <span class="spinner" aria-hidden="true"></span> Loading...
+    <span class="sr-only">Loading...</span>
+    {#each [38, 92, 76, 84, 58] as w, i (i)}
+      <span class="bone" class:title={i === 0} style:width="{w}%" aria-hidden="true"></span>
+    {/each}
   </div>
 {:else if resource.data !== undefined}
   {#if resource.error}
@@ -82,23 +87,27 @@
     margin-bottom: var(--sp-3);
   }
   .loading {
-    color: var(--text-muted);
     padding: var(--sp-4);
     display: flex;
-    gap: var(--sp-2);
-    align-items: center;
+    flex-direction: column;
+    gap: var(--sp-3);
+    animation: kn-appear 160ms ease-out 200ms both;
   }
-  .spinner {
-    width: 0.9rem;
-    height: 0.9rem;
-    border: 2px solid var(--border-strong);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
+  .bone {
+    display: block;
+    height: 0.75rem;
+    border-radius: 6px;
+    background: linear-gradient(
+      90deg,
+      var(--surface-2) 30%,
+      var(--shimmer) 50%,
+      var(--surface-2) 70%
+    );
+    background-size: 300% 100%;
+    animation: kn-shimmer 1.6s ease-in-out infinite;
   }
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
+  .bone.title {
+    height: 1rem;
+    margin-bottom: var(--sp-1);
   }
 </style>
