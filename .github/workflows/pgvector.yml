@@ -85,8 +85,19 @@ jobs:
         run: |
           set -euo pipefail
           python dist/pgvector_bundle.py fetch-src --url "$PGVECTOR_URL" --sha256 "$PGVECTOR_SHA256" --dest "$RUNNER_TEMP/pgvector.tar.gz"
-          mkdir -p "$RUNNER_TEMP/pgvector-src"
-          tar -xzf "$RUNNER_TEMP/pgvector.tar.gz" -C "$RUNNER_TEMP/pgvector-src" --strip-components=1
+          source_archive="$RUNNER_TEMP/pgvector.tar.gz"
+          source_dir="$RUNNER_TEMP/pgvector-src"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            source_archive=$(cygpath -u "$source_archive")
+            source_dir=$(cygpath -u "$source_dir")
+          fi
+          mkdir -p "$source_dir"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            # GNU tar otherwise treats a native drive letter as a remote host.
+            tar --force-local -xzf "$source_archive" -C "$source_dir" --strip-components=1
+          else
+            tar -xzf "$source_archive" -C "$source_dir" --strip-components=1
+          fi
 
       - name: Build and install (Unix)
         if: runner.os != 'Windows'
@@ -96,8 +107,15 @@ jobs:
           set -euo pipefail
           cd "$RUNNER_TEMP/pgvector-src"
           # OPTFLAGS="" drops -march=native so the bundle runs on any CPU of the target.
-          make -j4 PG_CONFIG="$PGROOT/bin/pg_config" OPTFLAGS=""
-          make PG_CONFIG="$PGROOT/bin/pg_config" install
+          make_options=("PG_CONFIG=$PGROOT/bin/pg_config" "OPTFLAGS=")
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # PGXS retains the SDK path used to build the downloaded PostgreSQL.
+            pg_sysroot=$(xcrun --sdk macosx --show-sdk-path)
+            test -d "$pg_sysroot"
+            make_options+=("PG_SYSROOT=$pg_sysroot")
+          fi
+          make -j4 "${make_options[@]}"
+          make "${make_options[@]}" install
 
       - name: Set up MSVC (Windows)
         if: runner.os == 'Windows'
