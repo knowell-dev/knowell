@@ -22,3 +22,4 @@ mod memory_freshness;
 mod memory_visibility;
 mod profiles;
 mod relations_privacy;
+mod rest_permissions;

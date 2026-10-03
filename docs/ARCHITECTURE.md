@@ -688,6 +688,14 @@ inventing a commit.
 A versioned REST API with an SSE progress stream serves the panel and integrations, under
 the same permission model.
 
+Organization profile metadata, switch estimates, quality reports, usage and integration
+metadata require organization `ReadCode` with the read token scope. Project/workspace
+visibility alone does not authorize these endpoints. Both HTTP handlers and native
+Engine dispatch check before profile selectors, stored metadata or report files are
+processed. Native provider switches require organization `ManageProviders`, and Hub
+administration requires organization `ManageUsers`; the agent action ceiling applies.
+Native usage periods are bounded to 1–365 days after authorization.
+
 ## 13. Panel
 
 | Screen | Content |

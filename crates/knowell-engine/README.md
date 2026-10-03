@@ -149,6 +149,13 @@ Shapes follow `panel/src/lib/api/types.ts`:
 | `Admin` | hub only: principals, tokens (prefix only), last 100 audit entries |
 | `Domains`, `Glossary` | from `EngineSettings::domains` / `glossary`; empty arrays when none are configured |
 
+Native REST dispatch requires organization `ReadCode` for profiles, switch estimates,
+evaluation reports, usage and integrations before selector validation or I/O.
+`StartSwitch` requires organization `ManageProviders`; Hub administration requires
+organization `ManageUsers`. Grants, token scopes and the agent action ceiling apply.
+Non-Hub administration still returns its constant unavailable response. Usage periods
+are validated as 1–365 days after authorization, before date arithmetic.
+
 Engine-defined bodies:
 
 - `Trace` (`POST /graph/trace`) → the `trace_flow` output (`{nodes, edges, truncated, gaps}`);
@@ -159,10 +166,11 @@ Engine-defined bodies:
 - `Context` (`POST /context`) → the `build_context` output.
 - `StartSwitch` (`POST /profiles/switch`, 202) → `{switchId, fromProfileId, toProfileId,
   views, jobs, startedAt, state: "building"}`. The workspaces are re-registered with the
-  target profile and the affected views are rebuilt in the background; the active
-  generation keeps serving with the old profile's vectors (the semantic source picks, per
-  view, the profile whose active index generation covers the pinned generation) until a
-  rebuild with complete new vectors activates. `Profiles` shows `switch.progress`.
+  target profile and the affected views are rebuilt in the background. Semantic search
+  selects a profile whose active index generation covers the pinned source generation;
+  source activation can precede embedding completion and therefore report a coverage
+  gap. `Profiles` shows process-local `switch.progress`; seamless restart-safe switching
+  and rollback remain open.
 
 ## Evaluation hook
 
