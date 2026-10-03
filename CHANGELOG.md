@@ -10,6 +10,10 @@ is released. Nothing has been released yet.
 
 ### Fixed
 
+- Build managed PostgreSQL pgvector bundles for every supported platform on both
+  PostgreSQL majors, rather than overwriting platforms in the release matrix.
+- Extract verified Windows source archives locally and use the installed macOS SDK
+  when building pgvector against relocated PostgreSQL binaries.
 - Enforce organization grants and token scopes before HTTP/native profile metadata,
   switch estimates and quality reports, and before native usage, integrations, provider
   changes and Hub administration. Validate native usage periods before date arithmetic.
