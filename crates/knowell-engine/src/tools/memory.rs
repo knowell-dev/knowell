@@ -39,7 +39,9 @@ use crate::access::Access;
 use crate::engine::Engine;
 use crate::error::store_tool;
 use crate::ids::parse_source_id;
-use crate::memory::{MemoryError, RecordQuery, RecordRow, TaskRow};
+use crate::memory::{
+    CheckpointSave, CheckpointSaved, MemoryError, RecordQuery, RecordRow, TaskRow,
+};
 use crate::scope::Pinned;
 
 /// The current time as a knowledge timestamp.
@@ -1479,27 +1481,27 @@ impl Engine {
                 "you may not write tasks in this workspace",
             ));
         }
-        let key = input
+        // The receipt is stored with the checkpoint, so a retry returns the
+        // original also after a restart; it never names another caller's.
+        let receipt = input
             .idempotency_key
             .as_ref()
-            .map(|k| format!("{}\u{0}{k}", access.label()));
-        if let Some(key) = &key {
-            let known = self
+            .map(|k| idempotent_uuid("knowell.engine.checkpoint.v1", access.label(), k));
+        if let Some(receipt) = receipt
+            && let Some((task, seq)) = self
                 .inner
-                .checkpoint_keys
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(key)
-                .copied();
-            if let Some((task, seq)) = known {
-                return self
-                    .checkpoint_output(&access, &pinned, task, seq, false, false)
-                    .await;
-            }
+                .memory
+                .checkpoint_receipt(receipt)
+                .await
+                .map_err(memory_error)?
+        {
+            return self
+                .checkpoint_output(&access, &pinned, task, seq, false, false)
+                .await;
         }
         let actor = access.actor()?;
         let now = now_timestamp();
-        let (mut row, created_task) = match &input.task_id {
+        let (row, created_task) = match &input.task_id {
             Some(id) => (
                 self.own_task(&access, &pinned, parse_task_id(id)?).await?,
                 false,
@@ -1536,14 +1538,20 @@ impl Engine {
                         owner: access.acting_user().map(|u| u.to_string()),
                         revision: 0,
                     };
-                    (
-                        self.inner
-                            .memory
-                            .create_task(&row)
-                            .await
-                            .map_err(memory_error)?,
-                        true,
-                    )
+                    match self.inner.memory.create_task(&row).await {
+                        Ok(created) => (created, true),
+                        // A concurrent retry with the same key created it.
+                        Err(MemoryError::AlreadyExists(_)) => (
+                            self.inner
+                                .memory
+                                .get_task(id)
+                                .await
+                                .map_err(memory_error)?
+                                .ok_or_else(|| ToolError::internal("task vanished"))?,
+                            false,
+                        ),
+                        Err(error) => return Err(memory_error(error)),
+                    }
                 }
             }
         };
@@ -1553,9 +1561,8 @@ impl Engine {
                 row.task.id, row.task.status
             )));
         }
-        let before = row.clone();
         let mut task = row.task.clone();
-        let mut decision_records = Vec::new();
+        let mut decisions = Vec::with_capacity(input.decisions.len());
         for decision in &input.decisions {
             let evidence = self.evidence_from_ids(&pinned, &decision.evidence).await?;
             let outcome = KnowledgeRecord::write(
@@ -1581,15 +1588,9 @@ impl Engine {
                 now,
             )
             .map_err(knowledge_error)?;
-            let stored = self
-                .inner
-                .memory
-                .insert_record_in_workspace(&outcome.record, &pinned.workspace.name)
-                .await
-                .map_err(memory_error)?;
-            task.add_decision(stored.record.id, now)
+            task.add_decision(outcome.record.id, now)
                 .map_err(knowledge_error)?;
-            decision_records.push(stored.record);
+            decisions.push(outcome.record);
         }
         task.add_note(actor.clone(), &input.progress, now)
             .map_err(knowledge_error)?;
@@ -1639,31 +1640,41 @@ impl Engine {
         let checkpoint = task
             .checkpoint(&input.progress, input.next_steps.clone(), now)
             .map_err(knowledge_error)?;
-        row = self
+        // Decisions, task update, checkpoint and receipt persist together.
+        let saved = self
             .inner
             .memory
-            .update_task(&before, &task)
+            .save_checkpoint(CheckpointSave {
+                receipt,
+                before: &row,
+                after: &task,
+                decisions: &decisions,
+                workspace: &pinned.workspace.name,
+                checkpoint: &checkpoint,
+            })
             .await
             .map_err(memory_error)?;
-        let seq = self
-            .inner
-            .memory
-            .append_checkpoint(&checkpoint)
-            .await
-            .map_err(memory_error)?;
-        if let Some(key) = key {
-            self.inner
-                .checkpoint_keys
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(key, (row.task.id, seq));
-        }
+        let (task_id, seq, stored) = match saved {
+            CheckpointSaved::Saved {
+                task,
+                seq,
+                decisions,
+            } => (task.task.id, seq, decisions),
+            // A concurrent retry with the same key saved first.
+            CheckpointSaved::Replayed { task, seq } => {
+                return self
+                    .checkpoint_output(&access, &pinned, task, seq, false, false)
+                    .await;
+            }
+        };
         let mut out = self
-            .checkpoint_output(&access, &pinned, row.task.id, seq, created_task, true)
+            .checkpoint_output(&access, &pinned, task_id, seq, created_task, true)
             .await?;
-        for record in &decision_records {
-            out.decisions
-                .push(self.memory_record_receipt(record, &access, &pinned).await?);
+        for record in &stored {
+            out.decisions.push(
+                self.memory_record_receipt(&record.record, &access, &pinned)
+                    .await?,
+            );
         }
         Ok(out)
     }

@@ -18,6 +18,8 @@
 //! - [`tasks`] — tasks and append-only checkpoints.
 //! - [`identity`] — principals, grants and API tokens (hashes only).
 //! - [`audit`] — the append-only audit log.
+//! - [`usage`] — durable MCP tool usage per organization, UTC hour, tool and
+//!   agent, with a latency histogram.
 //!
 //! Repository functions are plain `async fn`s taking `&mut PgConnection`, so
 //! they work on a pooled connection ([`Store::acquire`]) and inside a
@@ -43,13 +45,14 @@ mod store;
 pub mod symbols;
 pub mod tasks;
 mod types;
+pub mod usage;
 pub mod views;
 
 pub use error::StoreError;
 pub use ids::{
-    ApiTokenId, AuditEntryId, ContractId, EdgeId, GrantId, IndexGenerationId, JobId,
-    KnowledgeRecordId, ManifestId, OccurrenceId, OrganizationId, PrincipalId, ProfileId, ProjectId,
-    SourceId, SymbolId, TaskId, ViewId, WorkspaceId,
+    ApiTokenId, AuditEntryId, CheckpointReceiptId, ContractId, EdgeId, GrantId, IndexGenerationId,
+    JobId, KnowledgeRecordId, ManifestId, OccurrenceId, OrganizationId, PrincipalId, ProfileId,
+    ProjectId, SourceId, SymbolId, TaskId, ViewId, WorkspaceId,
 };
 pub use store::{ServerInfo, ServerIssue, Store, StoreOptions, VectorExtension};
 pub use types::{

@@ -223,8 +223,14 @@ async fn serve(
         .await
         .map_err(|e| anyhow::anyhow!("{e}"));
     indexing.cancel();
-    // Queued audit events reach the database before the pool closes.
+    // Queued audit events and buffered tool usage reach the database before
+    // the pool closes.
     state.flush_audit().await;
+    if let Some((engine, _)) = &built
+        && let Err(error) = engine.flush_usage().await
+    {
+        tracing::warn!(%error, "tool usage could not be stored at shutdown");
+    }
     if let Some(store) = store {
         store.close().await;
     }

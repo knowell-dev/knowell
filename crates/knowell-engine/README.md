@@ -96,7 +96,7 @@ contract participations as contract edges (`Exposes`, `Produces`, `Writes`, `Con
 | `read_memory` | records in readable scopes (organization and workspace with workspace `read_memory`, visible projects, the caller's own user scope and tasks), filters, conflicts |
 | `write_memory` | scope authorised with `ProposeMemory`; evidence ids resolved to exact versions; `KnowledgeRecord::write` (secret guard, policy: agents → `proposed`, always); idempotency key → deterministic record id |
 | `resume_task` | lists the caller's open tasks or resumes one with `knowell_knowledge::resume`; `changed_since` comes from `git diff` between the checkpoint's and the context's commits of every moved project; stale decisions and stale records of moved projects |
-| `save_checkpoint` | creates the task (deterministic id with an idempotency key) or adds to it: progress note, decisions (task-scope, proposed for agents), open questions (replaced), related symbols, status, the current manifest, then a checkpoint |
+| `save_checkpoint` | creates the task (deterministic id with an idempotency key) or adds to it: progress note, decisions (task-scope, proposed for agents), open questions (replaced), related symbols, status, the current manifest, then a checkpoint. Decisions, task update, checkpoint and the idempotency receipt are stored in one transaction; a retry with the same caller and key returns the original checkpoint, also after a restart or when retries race |
 | `index_status` | `ViewStatus` per visible project: T0–T3 states (`ready`, `building`, `queued`, `disabled` for no provider, `unavailable` for skipped/failed), latest-seen vs indexed commit, languages with analysis level, embedding profile, last activation, running jobs of visible projects |
 
 ### Gap reasons used
@@ -144,8 +144,8 @@ Shapes follow `panel/src/lib/api/types.ts`:
 | `Profiles` | `EmbeddingProfile[]` from the store (`provider` is the stored kind, e.g. `fake`) |
 | `SwitchEstimate` | `SwitchEstimate`: chunks × bytes of the affected projects, tokens ≈ bytes/4, cost = tokens × `prices_usd_per_million_tokens[provider]` (µUSD), disk = chunks × dims × 2 B; duration not measured (0, with a warning) |
 | `EvalReports` | `EvalReport[]` from `*.json` reports in `eval_reports_dir` |
-| `Usage` | `UsageReport` from in-process MCP counters (reset at start) |
-| `Integrations` | `IntegrationsStatus` (MCP status from usage; agent and webhook checks belong to the CLI/server: empty) |
+| `Usage` | `UsageReport` from the stored hourly MCP usage plus calls not yet flushed (every `usage_flush_interval`, default 5 s, and by `Engine::flush_usage` at shutdown); latency percentiles are histogram bucket bounds (at most 25 % high); each agent label counts as one session |
+| `Integrations` | `IntegrationsStatus` (MCP status and `lastCallAt` from stored and buffered usage; agent and webhook checks belong to the CLI/server: empty) |
 | `Admin` | hub only: principals, tokens (prefix only), last 100 audit entries |
 | `Domains`, `Glossary` | from `EngineSettings::domains` / `glossary`; empty arrays when none are configured |
 
@@ -243,8 +243,9 @@ CLI opens this catalogue without a workspace or provider credentials.
 - Lexical search serves only the active generation of a view; a context pinned before an
   activation reports `lexical: … call open_workspace again` instead of using another
   generation.
-- Usage counters, checkpoint idempotency keys (beyond deterministic task ids) and profile
-  switch records are in process memory.
+- Profile switch records are in process memory. Tool usage not yet flushed (at most
+  `usage_flush_interval`) is lost if the process crashes; provider token spend is not
+  recorded yet (`spendUsdMicros` is 0).
 - `history` has no git log or blame (knowell-source has no reader for them).
 - MCP tool results never contain jobs: every tool computes synchronously.
 

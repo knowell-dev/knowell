@@ -23,4 +23,5 @@ mod jobs;
 mod knowledge;
 mod migrations;
 mod tasks;
+mod usage;
 mod views;

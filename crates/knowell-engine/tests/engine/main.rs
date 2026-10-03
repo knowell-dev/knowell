@@ -16,6 +16,7 @@
 
 mod common;
 
+mod checkpoint_receipts;
 mod end_to_end;
 mod hub_identity;
 mod memory_freshness;
@@ -24,3 +25,4 @@ mod profile_switch;
 mod profiles;
 mod relations_privacy;
 mod rest_permissions;
+mod usage_durability;

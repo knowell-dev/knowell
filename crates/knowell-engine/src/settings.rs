@@ -73,6 +73,12 @@ pub struct EngineSettings {
     /// Lines of a file returned by `fetch` or packed as one body at most.
     /// Default 2000.
     pub max_fetch_lines: u32,
+    /// How often buffered tool usage is added to the store; a crash loses at
+    /// most this much usage. Default 5 s.
+    pub usage_flush_interval: Duration,
+    /// Days of hourly tool usage kept in the store. Default 400 (the longest
+    /// report, 365 days, plus a month).
+    pub usage_retention_days: u32,
 }
 
 impl Default for EngineSettings {
@@ -96,6 +102,8 @@ impl Default for EngineSettings {
                 version: env!("CARGO_PKG_VERSION").to_owned(),
             }),
             max_fetch_lines: 2000,
+            usage_flush_interval: Duration::from_secs(5),
+            usage_retention_days: 400,
         }
     }
 }

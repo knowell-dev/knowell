@@ -85,6 +85,14 @@ is released. Nothing has been released yet.
 
 ### Added
 
+- Durable MCP tool usage (migration 0012): engines buffer calls per UTC hour, tool and
+  agent, add them to the store every few seconds and at shutdown, and report usage and
+  integration status from the store, so counters survive restarts. Reports now apply
+  the requested period to tools too; latency percentiles come from a histogram.
+- Durable checkpoint idempotency: decisions, the task update, the checkpoint and its
+  receipt are stored in one transaction (migration 0011), so a `save_checkpoint` retry
+  with the same caller and key returns the original checkpoint after an engine restart,
+  and concurrent retries store a single checkpoint instead of failing or duplicating it.
 - Docker test runner (`scripts/docker_test.py`, `deploy/test/`) for the Linux workspace
   and panel suites against throwaway PostgreSQL 17 servers with and without pgvector
   (PostgreSQL 18 on demand), without mounting the host directory.

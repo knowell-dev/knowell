@@ -99,6 +99,11 @@ id_type!(
     TaskId
 );
 id_type!(
+    /// Identifies a checkpoint receipt. Derived by the caller from who saved
+    /// the checkpoint and their idempotency key, so a retry names the same id.
+    CheckpointReceiptId
+);
+id_type!(
     /// Identifies a principal (user or service account); the same UUID as
     /// the knowell-auth `UserId` / `ServiceAccountId`.
     PrincipalId

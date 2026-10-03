@@ -110,8 +110,6 @@ pub(crate) struct Inner {
     pub(crate) profile_providers: RwLock<BTreeMap<ProfileId, Name>>,
     /// Profile switches started by this process.
     pub(crate) switches: Mutex<Vec<crate::rest::SwitchRecord>>,
-    /// Idempotency keys of checkpoints saved by this process.
-    pub(crate) checkpoint_keys: Mutex<BTreeMap<String, (knowell_knowledge::TaskId, u64)>>,
 }
 
 /// Builds an [`Engine`]: the indexer, the embedders, the workspaces and the
@@ -260,7 +258,6 @@ impl EngineBuilder {
             overlay_generation: AtomicU64::new(0),
             profile_providers: RwLock::new(BTreeMap::new()),
             switches: Mutex::new(Vec::new()),
-            checkpoint_keys: Mutex::new(BTreeMap::new()),
             settings,
         });
         let engine = Engine { inner };
@@ -268,6 +265,7 @@ impl EngineBuilder {
             engine.add_workspace(workspace).await?;
         }
         spawn_activation_listener(&engine);
+        spawn_usage_flusher(&engine);
         Ok(engine)
     }
 }
@@ -285,6 +283,54 @@ async fn ensure_organization(store: &Store, name: &Name) -> Result<OrganizationI
             .ok_or_else(|| EngineError::internal("organization vanished while registering")),
         Err(other) => Err(other.into()),
     }
+}
+
+/// Adds buffered tool usage to the store every
+/// [`EngineSettings::usage_flush_interval`] until the engine is dropped.
+fn spawn_usage_flusher(engine: &Engine) {
+    let weak: Weak<Inner> = Arc::downgrade(&engine.inner);
+    let interval = engine.inner.settings.usage_flush_interval;
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+            let Some(inner) = weak.upgrade() else {
+                break;
+            };
+            if let Err(error) = flush_usage(&inner).await {
+                tracing::warn!(%error, "tool usage could not be stored; retrying with the next flush");
+            }
+        }
+    });
+}
+
+/// Adds the buffered tool usage to the store (rows go back into the buffer
+/// when that fails) and prunes hours past the retention once a day.
+async fn flush_usage(inner: &Inner) -> Result<(), EngineError> {
+    let rows = inner.usage.take();
+    let now = time::OffsetDateTime::now_utc();
+    let prune = inner.usage.prune_due(now);
+    if rows.is_empty() && !prune {
+        return Ok(());
+    }
+    let mut conn = match inner.store.acquire().await {
+        Ok(conn) => conn,
+        Err(error) => {
+            inner.usage.restore(rows);
+            return Err(error.into());
+        }
+    };
+    if !rows.is_empty()
+        && let Err(error) =
+            knowell_store::usage::record_tool_usage(&mut conn, inner.organization, &rows).await
+    {
+        inner.usage.restore(rows);
+        return Err(error.into());
+    }
+    if prune {
+        let keep = time::Duration::days(i64::from(inner.settings.usage_retention_days));
+        knowell_store::usage::prune_tool_usage(&mut conn, inner.organization, now - keep).await?;
+    }
+    Ok(())
 }
 
 /// Retires cached snapshots and code graphs of views that activated a newer
@@ -343,6 +389,14 @@ impl Engine {
     /// The store.
     pub fn store(&self) -> &Store {
         &self.inner.store
+    }
+
+    /// Adds the tool usage buffered since the last flush to the store now
+    /// (a background task also does so every
+    /// [`EngineSettings::usage_flush_interval`]). Call it before the engine
+    /// is dropped at shutdown. On failure the usage stays buffered.
+    pub async fn flush_usage(&self) -> Result<(), EngineError> {
+        flush_usage(&self.inner).await
     }
 
     /// The settings the engine was built with.

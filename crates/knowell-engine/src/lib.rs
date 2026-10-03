@@ -25,8 +25,8 @@ pub use engine::{Engine, EngineBuilder};
 pub use error::EngineError;
 pub use eval::{HYBRID_RETRIEVER, HybridRetriever};
 pub use memory::{
-    BoxFuture, CheckpointRow, InMemoryMemory, MemoryError, MemoryRepo, RecordQuery, RecordRow,
-    StoreMemory, TaskRow,
+    BoxFuture, CheckpointRow, CheckpointSave, CheckpointSaved, InMemoryMemory, MemoryError,
+    MemoryRepo, RecordQuery, RecordRow, StoreMemory, TaskRow,
 };
 pub use profiles::{ProfileMetadata, ProfileSelector};
 pub use settings::{DomainConfig, EngineSettings, RelationStageInfo};
