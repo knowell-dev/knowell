@@ -43,6 +43,8 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+axum.workspace = true
+tower = { workspace = true, features = ["util"] }
 # Creates and drops one throwaway database per integration test.
 sqlx.workspace = true
 tempfile.workspace = true

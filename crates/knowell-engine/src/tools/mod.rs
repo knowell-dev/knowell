@@ -43,7 +43,7 @@ impl Engine {
         Fut: Future<Output = Result<T, ToolError>>,
     {
         let started = Instant::now();
-        let result = match self.inner.access.resolve(caller) {
+        let result = match self.inner.access.resolve(caller).await {
             Ok(access) => run(access).await,
             Err(error) => Err(error),
         };

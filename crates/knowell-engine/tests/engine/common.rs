@@ -311,6 +311,15 @@ pub(crate) fn bob_caller() -> Caller {
 
 /// Builds the engine over `db` and indexes the whole workspace.
 pub(crate) async fn indexed_engine(db: &TestDb, ws: &Workspace, data_dir: &Path) -> Engine {
+    indexed_engine_with_access(db, ws, data_dir, Arc::new(access())).await
+}
+
+pub(crate) async fn indexed_engine_with_access(
+    db: &TestDb,
+    ws: &Workspace,
+    data_dir: &Path,
+    access: Arc<dyn knowell_engine::AccessResolver>,
+) -> Engine {
     let embedder = Arc::new(AnyEmbedder::Fake(FakeEmbedder::new(DIMS).unwrap()));
     let engine = Engine::builder(db.store.clone(), indexer_config(data_dir))
         .engine_config(&engine_config())
@@ -318,7 +327,7 @@ pub(crate) async fn indexed_engine(db: &TestDb, ws: &Workspace, data_dir: &Path)
         .embedder(name("cloud"), embedder)
         .workspace(ws.resolved.clone())
         .settings(EngineSettings::default())
-        .access(Arc::new(access()))
+        .access(access)
         .build()
         .await
         .unwrap();

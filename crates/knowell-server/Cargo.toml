@@ -23,6 +23,7 @@ include_dir.workspace = true
 knowell-auth.workspace = true
 knowell-config.workspace = true
 knowell-core.workspace = true
+knowell-mcp.workspace = true
 knowell-store.workspace = true
 mime_guess.workspace = true
 # Webhook secrets are held as `SecretString` (redacted `Debug`, zeroized on drop).

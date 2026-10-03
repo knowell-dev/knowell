@@ -565,12 +565,25 @@ written through tools, and sourced summaries.
   operations return a job ID.
 - MCP resources (a file in a view) and prompts (`/onboard`, `/impact-review`) are provided.
 
+HTTP middleware supplies a typed authenticated principal and credential scopes to MCP.
+The engine's asynchronous `StoreAccess` resolves current grants for its organization on
+every call. Context reuse rechecks those grants. User callers become agents; delegated
+agents and service accounts keep their verified identity. Read-only tokens cannot write
+memory, and a token from another organization cannot authenticate to the hub.
+
 ### 12.2 CLI (`know`), main commands
 
 `init`, `serve [--role standalone|hub|worker|edge]`, `workspace import|add|list`,
 `project add|config`, `search`, `trace`, `impact`, `check`, `context`, `task`, `memory`,
 `status`, `profile`, `connect codex|claude|cursor`, `ci init github|gitlab|gitea`, `login`
-(hub), `export|import`, `backup|restore`, `doctor`, `eval`.
+(hub), `token create|list|revoke`, `export|import`, `backup|restore`, `doctor`, `eval`.
+
+Token administration uses the installation's database administrator connection. The
+configured `server.token_pepper` is a secret reference resolved by both issuance and the
+server. Creation writes a new owner-only credential file and stores only a keyed hash;
+list and revoke expose identifiers and metadata. Creation and revocation are audited in
+the same transaction. Login verifies authenticated hub health before saving references;
+remote connections require HTTPS, and redirects are refused.
 
 ### 12.3 REST
 

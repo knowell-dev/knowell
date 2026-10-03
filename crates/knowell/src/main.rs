@@ -27,6 +27,7 @@ mod project_cmd;
 mod registry;
 mod secrets_cmd;
 mod serve_cmd;
+mod token_cmd;
 mod tools;
 mod workspace_cmd;
 
@@ -100,6 +101,9 @@ enum Command {
     Restore(backup_cmd::RestoreArgs),
     /// Connect this machine to a hub (role `edge`).
     Login(login_cmd::LoginArgs),
+    /// Administer this installation's database-backed API tokens.
+    #[command(subcommand)]
+    Token(token_cmd::TokenCommand),
     /// Print workspace context for an agent session.
     Context(context_cmd::ContextArgs),
     /// Validate configuration files and print JSON Schemas.
@@ -142,6 +146,7 @@ fn main() -> ExitCode {
         Command::Backup(args) => backup_cmd::backup(args, &env, &mut out),
         Command::Restore(args) => backup_cmd::restore(args, &env, &mut out),
         Command::Login(args) => login_cmd::run(args, &env, &mut out),
+        Command::Token(args) => token_cmd::run(args, &env, &mut out),
         Command::Context(_) => Ok(ExitCode::SUCCESS),
         Command::Config(cmd) => config_cmd::run(cmd, &mut out),
         Command::Secrets(cmd) => secrets_cmd::run(cmd, &mut out),

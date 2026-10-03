@@ -43,6 +43,7 @@ secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+time.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 # Writing the engine configuration and quoting values in generated TOML.

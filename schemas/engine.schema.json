@@ -150,6 +150,17 @@
           "$ref": "#/$defs/ServerRole",
           "default": "standalone",
           "description": "Role of this process. Defaults to `standalone`."
+        },
+        "token_pepper": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SecretRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Reference to the stable API-token pepper (at least 16 bytes), e.g. `env:KNOWELL_TOKEN_PEPPER`. Required to issue or verify bearer tokens. Changing it invalidates all existing tokens. Never put the value here."
         }
       },
       "type": "object"

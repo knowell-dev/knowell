@@ -11,10 +11,7 @@ use clap::{Args, ValueEnum};
 use knowell_auth::{Grant, Principal as AuthPrincipal, ResourceScope, Role, UserId};
 use knowell_config::{EngineConfig, ServerRole};
 use knowell_core::Name;
-use knowell_mcp::{
-    Caller, CallerResolver, HttpServerOptions, KnowellServer, LocalOnly, Principal, RequestHead,
-    ToolError, TransportKind,
-};
+use knowell_mcp::{HttpServerOptions, KnowellServer};
 use knowell_server::{AppState, EventBus, MemoryTokenStore, PanelMode, ServerConfig, TokenStore};
 use knowell_store::identity::{self, GrantScope, NewGrant, NewPrincipal};
 use knowell_store::{GrantRole, PrincipalId, PrincipalKind, Store, hierarchy};
@@ -161,7 +158,6 @@ async fn serve(
         organization: config.organization.clone(),
         local_user: config.local_user,
     };
-    let hub = config.role == ServerRole::Hub;
     let indexing = CancellationToken::new();
     let built = tools::build_engine(&deps).await?;
     let engine_ref = built.as_ref().map(|(engine, _)| engine);
@@ -169,12 +165,17 @@ async fn serve(
         tools::start_indexing(engine, workspaces.clone(), &indexing);
     }
     let mcp_server = KnowellServer::new(Arc::new(tools::Tools::new(engine_ref)))
-        .with_caller_resolver(Arc::new(ServerCallers { hub }));
+        .with_caller_resolver(Arc::new(knowell_server::AuthenticatedCallers));
     let mcp = knowell_mcp::streamable_http_router(mcp_server, &mcp_options(&config));
 
     let mut builder = AppState::builder(config.clone())
         .with_events(EventBus::default())
         .with_mcp(mcp);
+    if engine.server.token_pepper.is_some() {
+        builder = builder.with_pepper(crate::token_cmd::pepper(&engine)?);
+    } else if config.role == ServerRole::Hub {
+        tracing::warn!("server.token_pepper is not configured; bearer tokens are disabled");
+    }
     builder = match &store {
         // Tokens, grants and the audit log live in the database.
         Some(store) => {
@@ -402,46 +403,6 @@ fn local_base_url(bound: SocketAddr) -> String {
     format!("http://{addr}")
 }
 
-/// Resolves MCP callers: over HTTP the server has already authenticated the
-/// request (bearer token or panel session); a hub identifies the caller by
-/// its principal, other roles serve the machine's own user.
-struct ServerCallers {
-    hub: bool,
-}
-
-impl CallerResolver for ServerCallers {
-    fn resolve(&self, head: &RequestHead<'_>) -> Result<Caller, ToolError> {
-        let authenticated = head
-            .http
-            .and_then(|parts| parts.extensions.get::<knowell_server::Authenticated>());
-        match (head.transport, authenticated) {
-            (TransportKind::StreamableHttp, None) => Err(ToolError::permission_denied(
-                "authentication is required for MCP over HTTP",
-            )),
-            (_, Some(auth)) if self.hub => Ok(Caller {
-                principal: Principal::Subject {
-                    id: subject_id(&auth.principal),
-                },
-                transport: head.transport,
-                client: head.client.cloned(),
-            }),
-            _ => LocalOnly.resolve(head),
-        }
-    }
-}
-
-fn subject_id(principal: &AuthPrincipal) -> String {
-    match principal {
-        AuthPrincipal::User(id) => format!("user:{id}"),
-        AuthPrincipal::ServiceAccount(id) => format!("service-account:{id}"),
-        AuthPrincipal::Agent {
-            on_behalf_of,
-            client,
-            session,
-        } => format!("agent:{on_behalf_of}:{client}:{session}"),
-    }
-}
-
 /// Resolves on Ctrl+C, on SIGTERM (Unix: `docker stop`), or when stdin is
 /// closed if `stdin_close` is set.
 async fn shutdown_signal(stdin_close: bool) {
@@ -532,11 +493,5 @@ mod tests {
         ] {
             assert!(hosts.iter().any(|h| h == expected), "{expected}: {hosts:?}");
         }
-    }
-
-    #[test]
-    fn subjects_are_stable_text() {
-        let id = UserId::new(uuid::Uuid::from_u128(LOCAL_USER));
-        assert!(subject_id(&AuthPrincipal::User(id)).starts_with("user:"));
     }
 }

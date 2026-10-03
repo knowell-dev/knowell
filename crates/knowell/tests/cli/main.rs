@@ -29,4 +29,5 @@ mod login;
 mod mcp;
 mod project;
 mod serve;
+mod token;
 mod workspace;

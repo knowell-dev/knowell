@@ -76,7 +76,7 @@ pub use engine::{
 };
 pub use error::{ApiError, PROBLEM_JSON, ServerError};
 pub use events::{DEFAULT_EVENT_CAPACITY, EventBus, EventScope, ProgressEvent, ScopedEvent};
-pub use mcp::MCP_PATH;
+pub use mcp::{AuthenticatedCallers, MCP_PATH};
 pub use middleware::{CSRF_HEADER, REQUEST_ID_HEADER};
 pub use serve::{DEFAULT_SHUTDOWN_GRACE, bind, serve, serve_with_grace};
 pub use state::{AppState, AppStateBuilder};

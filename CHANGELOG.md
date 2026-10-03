@@ -10,6 +10,11 @@ is released. Nothing has been released yet.
 
 ### Fixed
 
+- Resolve hub MCP identities against current tenant grants and preserve token scopes
+  across the HTTP-to-engine boundary, including reuse of cached contexts.
+- Verify login against authenticated hub health, rejecting malformed responses,
+  redirects and remote plaintext HTTP.
+
 - Keep concurrent registrations of the same embedding profile idempotent across
   both its name and settings uniqueness constraints.
 - Allow core storage and indexing without pgvector, report semantic search as disabled,
@@ -32,6 +37,8 @@ is released. Nothing has been released yet.
 
 ### Added
 
+- Local `know token create|list|revoke` administration with a configured pepper reference,
+  explicit user bootstrap, private credential files and transactional audit records.
 - Initial Rust workspace, contribution rules, and project documentation.
 - Continuous integration: formatting, linting, dependency policy, secret scanning,
   workflow security checks, tests, and a small synthetic evaluation.

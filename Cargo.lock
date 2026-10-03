@@ -2885,6 +2885,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tempfile",
+ "time",
  "tokio",
  "tokio-util",
  "toml",
@@ -2955,6 +2956,7 @@ dependencies = [
 name = "knowell-engine"
 version = "0.0.0"
 dependencies = [
+ "axum",
  "knowell-auth",
  "knowell-config",
  "knowell-core",
@@ -2979,6 +2981,7 @@ dependencies = [
  "thiserror 2.0.21",
  "time",
  "tokio",
+ "tower",
  "tracing",
  "uuid",
 ]
@@ -3104,6 +3107,7 @@ name = "knowell-mcp"
 version = "0.0.0"
 dependencies = [
  "axum",
+ "knowell-auth",
  "knowell-core",
  "rmcp",
  "schemars",
@@ -3231,6 +3235,7 @@ dependencies = [
  "knowell-auth",
  "knowell-config",
  "knowell-core",
+ "knowell-mcp",
  "knowell-store",
  "mime_guess",
  "secrecy",

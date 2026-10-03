@@ -18,7 +18,7 @@ use knowell_embed::{
     AnyEmbedder, GeminiConfig, GeminiEmbedder, OllamaConfig, OllamaEmbedder,
     OpenAiCompatibleConfig, OpenAiCompatibleEmbedder,
 };
-use knowell_engine::{AccessResolver, Engine, EngineSettings, StaticAccess};
+use knowell_engine::{AccessResolver, Engine, EngineSettings, StoreAccess};
 use knowell_index::{IndexerConfig, Priority, Worker, WorkerConfig};
 use knowell_mcp::tools::{
     AnalyzeImpactInput, AnalyzeImpactOutput, BuildContextInput, BuildContextOutput, ContractsInput,
@@ -72,16 +72,11 @@ pub(crate) async fn build_engine(
     let workspaces = resolve_workspaces(&deps.workspace_files);
     let mut indexer_config = IndexerConfig::new(deps.home.join("data"), deps.organization.clone());
     indexer_config.concurrency = indexer_config.concurrency.max(1);
-    let access: Arc<dyn AccessResolver> = match deps.local_user {
-        Some(user) => Arc::new(StaticAccess::local_admin(user)),
-        None => {
-            tracing::warn!(
-                "hub role: MCP callers are not mapped to stored grants yet, so MCP tools deny \
-                 everyone; the REST API uses the stored grants"
-            );
-            Arc::new(StaticAccess::deny_all())
-        }
-    };
+    let access = StoreAccess::new(store.clone(), deps.organization.clone());
+    let access: Arc<dyn AccessResolver> = Arc::new(match deps.local_user {
+        Some(user) => access.with_local_user(user),
+        None => access,
+    });
     let mut builder = Engine::builder(store, indexer_config)
         .engine_config(&deps.engine)
         .settings(EngineSettings::default())

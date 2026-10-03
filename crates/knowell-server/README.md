@@ -29,6 +29,12 @@ options need `with_store`, and `with_store_audit` needs `build` to run inside a 
 runtime; otherwise `build` fails with `ServerError::Config`. The last of
 `with_token_store` / `with_store_tokens` (and of `with_audit` / `with_store_audit`) wins.
 
+Use `AuthenticatedCallers` as the MCP server's caller resolver. It accepts only
+authenticated HTTP request extensions and preserves the typed principal and token
+scopes. The CLI configures the same `server.token_pepper` secret reference for token
+issuance and verification; a configured reference that cannot be resolved prevents
+startup. Without a configured pepper, bearer authentication stays disabled.
+
 Without a store, store-backed routes answer `503 store_unavailable`; without an engine,
 delegated routes answer `503 engine_unavailable` with the configured reason
 (`AppStateBuilder::engine_unavailable_reason`). Nothing is ever faked: fields the server

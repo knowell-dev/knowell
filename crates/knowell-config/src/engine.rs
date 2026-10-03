@@ -81,6 +81,11 @@ pub struct ServerConfig {
     /// Every role except `hub` must use a loopback address so the local
     /// panel is never exposed to the network.
     pub listen: SocketAddr,
+    /// Reference to the stable API-token pepper (at least 16 bytes), e.g.
+    /// `env:KNOWELL_TOKEN_PEPPER`. Required to issue or verify bearer tokens.
+    /// Changing it invalidates all existing tokens. Never put the value here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_pepper: Option<SecretRef>,
 }
 
 impl Default for ServerConfig {
@@ -88,6 +93,7 @@ impl Default for ServerConfig {
         Self {
             role: ServerRole::Standalone,
             listen: SocketAddr::from(([127, 0, 0, 1], 7420)),
+            token_pepper: None,
         }
     }
 }
@@ -386,6 +392,19 @@ mod tests {
         assert!(!cfg.telemetry.enabled);
         assert!(cfg.providers.is_empty());
         assert!(cfg.hub.is_none());
+        assert!(cfg.server.token_pepper.is_none());
+    }
+
+    #[test]
+    fn token_pepper_is_only_a_secret_reference() {
+        let config =
+            parse_engine("version = 1\n[server]\ntoken_pepper = 'env:KNOWELL_TOKEN_PEPPER'")
+                .unwrap();
+        assert!(config.server.token_pepper.is_some());
+        let canary = "KNOWELL_CANARY_pasted_pepper";
+        let error =
+            parse_engine(&format!("version = 1\n[server]\ntoken_pepper = '{canary}'")).unwrap_err();
+        assert!(!format!("{error:?} {error}").contains(canary));
     }
 
     #[test]

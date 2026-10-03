@@ -133,6 +133,7 @@ is always returned as untrusted data.
 | `know status`, `know profile` | Index freshness; embedding profiles and blue-green switches |
 | `know connect codex\|claude\|cursor`, `know ci init` | Integrations |
 | `know login`, `know backup`, `know restore`, `know doctor`, `know eval` | Operations |
+| `know token create\|list\|revoke` | Local database administration of scoped hub credentials; values go only to new private files |
 
 ## Embeddings and models
 

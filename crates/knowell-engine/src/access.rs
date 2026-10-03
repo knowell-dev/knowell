@@ -7,9 +7,9 @@
 //! (they only see pinned projects), for personal overlays (owner only) and
 //! for memory (scope checks) — never by filtering answers afterwards.
 //!
-//! MCP is the agent interface: every MCP caller is mapped to an
-//! [`Principal::Agent`] acting for its user, so it inherits only that user's
-//! grants and can propose memory but never accept it.
+//! MCP user callers become [`Principal::Agent`] identities acting for their
+//! user, so they inherit only that user's grants and never accept memory.
+//! Verified agent and service-account identities retain their own identity.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -21,6 +21,8 @@ use knowell_auth::{
 use knowell_core::{ContentHash, Name};
 use knowell_knowledge::{Actor, ClientId, SessionId};
 use knowell_mcp::{Caller, ToolError};
+use knowell_server::{BoxFuture, StoreTokenStore, TokenStore};
+use knowell_store::Store;
 use uuid::Uuid;
 
 /// The acting identity of one request and the grants that bound it.
@@ -123,12 +125,65 @@ impl Access {
 
 /// Resolves MCP callers to identities.
 ///
-/// The default [`StaticAccess`] serves a standalone install (the local user)
-/// and fixed subject tables (tests, simple hubs). A hub with a token store
-/// plugs its own resolver in.
+/// [`StoreAccess`] reads current hub grants per call. [`StaticAccess`] serves
+/// fixed local and subject tables for embedders and tests.
 pub trait AccessResolver: Send + Sync + 'static {
     /// The identity of an MCP caller, or `PermissionDenied`.
-    fn resolve(&self, caller: &Caller) -> Result<Access, ToolError>;
+    fn resolve<'a>(&'a self, caller: &'a Caller) -> BoxFuture<'a, Result<Access, ToolError>>;
+}
+
+/// Resolves trusted HTTP identities against current database grants.
+///
+/// No grant snapshot is cached: revocations, disabled principals and tenant
+/// boundaries apply to every tool call, including previously opened contexts.
+#[derive(Debug)]
+pub struct StoreAccess {
+    tokens: StoreTokenStore,
+    local: StaticAccess,
+}
+
+impl StoreAccess {
+    /// Serves one organization; local and untyped subject callers are denied.
+    pub fn new(store: Store, organization: Name) -> Self {
+        Self {
+            tokens: StoreTokenStore::new(store, organization),
+            local: StaticAccess::deny_all(),
+        }
+    }
+
+    /// Allows the machine owner's stdio agent on a standalone installation.
+    #[must_use]
+    pub fn with_local_user(mut self, user: UserId) -> Self {
+        self.local = StaticAccess::local_admin(user);
+        self
+    }
+}
+
+impl AccessResolver for StoreAccess {
+    fn resolve<'a>(&'a self, caller: &'a Caller) -> BoxFuture<'a, Result<Access, ToolError>> {
+        Box::pin(async move {
+            let knowell_mcp::Principal::Authenticated { principal, scopes } = &caller.principal
+            else {
+                return if caller.transport == knowell_mcp::TransportKind::Stdio {
+                    self.local.resolve(caller).await
+                } else {
+                    Err(ToolError::permission_denied(
+                        "an authenticated identity is required",
+                    ))
+                };
+            };
+            let principal = match principal {
+                Principal::User(user) => agent_principal(*user, caller)?,
+                // Preserve delegated agent identities and service accounts;
+                // neither may impersonate the machine's local administrator.
+                other => other.clone(),
+            };
+            let grants = self.tokens.grants_for(&principal).await.map_err(|_| {
+                ToolError::internal("the identity store is unavailable; retry later")
+            })?;
+            Ok(Access::new(principal, Arc::new(grants)).with_scopes(scopes.clone()))
+        })
+    }
 }
 
 /// A fixed table of identities: the local user plus named subjects.
@@ -192,10 +247,17 @@ impl StaticAccess {
 }
 
 impl AccessResolver for StaticAccess {
-    fn resolve(&self, caller: &Caller) -> Result<Access, ToolError> {
+    fn resolve<'a>(&'a self, caller: &'a Caller) -> BoxFuture<'a, Result<Access, ToolError>> {
+        Box::pin(async move { self.resolve_static(caller) })
+    }
+}
+
+impl StaticAccess {
+    fn resolve_static(&self, caller: &Caller) -> Result<Access, ToolError> {
         let found = match &caller.principal {
             knowell_mcp::Principal::LocalUser => self.local.as_ref(),
             knowell_mcp::Principal::Subject { id } => self.subjects.get(id),
+            knowell_mcp::Principal::Authenticated { .. } => None,
         };
         let Some((user, grants)) = found else {
             return Err(ToolError::permission_denied(
@@ -277,10 +339,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn mcp_callers_are_agents_for_their_user() {
+    #[tokio::test]
+    async fn mcp_callers_are_agents_for_their_user() {
         let access = StaticAccess::local_admin(user(1))
             .resolve(&caller(Some("Claude Code")))
+            .await
             .unwrap();
         assert!(access.is_agent());
         assert_eq!(access.acting_user(), Some(user(1)));
@@ -295,20 +358,20 @@ mod tests {
         assert!(!access.allows(Action::AcceptMemory, &Resource::workspace(ws)));
     }
 
-    #[test]
-    fn sessions_are_stable_per_client() {
+    #[tokio::test]
+    async fn sessions_are_stable_per_client() {
         let resolver = StaticAccess::local_admin(user(1));
-        let a = resolver.resolve(&caller(Some("codex"))).unwrap();
-        let b = resolver.resolve(&caller(Some("codex"))).unwrap();
-        let c = resolver.resolve(&caller(Some("cursor"))).unwrap();
+        let a = resolver.resolve(&caller(Some("codex"))).await.unwrap();
+        let b = resolver.resolve(&caller(Some("codex"))).await.unwrap();
+        let c = resolver.resolve(&caller(Some("cursor"))).await.unwrap();
         assert_eq!(a.principal(), b.principal());
         assert_ne!(a.principal(), c.principal());
     }
 
-    #[test]
-    fn unknown_subjects_are_denied() {
+    #[tokio::test]
+    async fn unknown_subjects_are_denied() {
         let resolver = StaticAccess::deny_all();
-        let error = resolver.resolve(&caller(None)).unwrap_err();
+        let error = resolver.resolve(&caller(None)).await.unwrap_err();
         assert_eq!(error.kind(), "permission_denied");
         let subject = Caller {
             principal: knowell_mcp::Principal::Subject { id: "x".into() },
@@ -318,6 +381,7 @@ mod tests {
         assert!(
             StaticAccess::local_admin(user(1))
                 .resolve(&subject)
+                .await
                 .is_err()
         );
     }
@@ -330,8 +394,8 @@ mod tests {
         assert_eq!(client_name("ünï").unwrap().as_str(), "n");
     }
 
-    #[test]
-    fn project_visibility_follows_grants() {
+    #[tokio::test]
+    async fn project_visibility_follows_grants() {
         let mut grants = GrantSet::new();
         grants.add(
             Grant::new(
@@ -348,6 +412,7 @@ mod tests {
                 transport: TransportKind::StreamableHttp,
                 client: None,
             })
+            .await
             .unwrap();
         let shop = Name::new("shop").unwrap();
         assert!(access.reads_project(&shop, &Name::new("api").unwrap()));

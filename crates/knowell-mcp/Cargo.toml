@@ -16,6 +16,7 @@ publish.workspace = true
 # Router type returned by the Streamable HTTP builder, and the `http` types
 # the request-context seam reads (rmcp inserts `http::request::Parts`).
 axum.workspace = true
+knowell-auth.workspace = true
 knowell-core.workspace = true
 # `server` (handler + async read/write transport), `transport-io` (stdio),
 # `transport-streamable-http-server` (tower service for axum).
