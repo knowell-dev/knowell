@@ -19,4 +19,5 @@ mod common;
 mod end_to_end;
 mod hub_identity;
 mod memory_freshness;
+mod memory_visibility;
 mod relations_privacy;

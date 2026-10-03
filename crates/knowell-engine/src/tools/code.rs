@@ -201,8 +201,15 @@ impl Engine {
             }
         }
         let memory_hits = if wants(SearchKind::Memory) {
-            self.memory_hits(&access, &pinned, &input.projects, &input.query, limit)
-                .await?
+            self.memory_hits(
+                &access,
+                &pinned,
+                &input.projects,
+                &input.query,
+                limit,
+                &mut gaps,
+            )
+            .await?
         } else {
             Vec::new()
         };

@@ -59,6 +59,10 @@ dependencies; completion of the whole is defined by the acceptance scenarios at 
 
 ### M5: Memory and knowledge (planned)
 
+- **Current surface:** standalone memory/task list and show read real persisted
+  records, checkpoints and sourced history with current permissions and honest gaps.
+  Terminal review, pinning, repository write-back and two-machine acceptance remain open.
+
 - **Deliverables:** scopes and states; tasks; domains and glossary; rules; write-back to the
   repository as pull requests; documentation drift detection.
 - **Done when:** memory state-transition tests pass.

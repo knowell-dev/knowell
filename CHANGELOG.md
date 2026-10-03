@@ -10,6 +10,14 @@ is released. Nothing has been released yet.
 
 ### Fixed
 
+- Recheck current grants on stored memory evidence, replacement links and task
+  decisions/manifests, preserve persisted workspace identity across equal project names,
+  and filter task ownership before limits with precise database pagination.
+- Retain source gaps and truthful saved-task freshness; report malformed saved pointers
+  and refuse incomplete checkpoint retry receipts without changing stored evidence or
+  history. History rationale checks evidence namespaces before associating files.
+- Bind new memory evidence to its originating workspace in persistent and in-memory
+  repositories, omit unknown origins and preserve canonical project ids during reviews.
 - Apply project scope and exclusions before Git rename similarity reads source blobs
   in indexing, overlays, impact analysis, task resumption and CLI diff checks.
 - Filter saved Git status before hashing; capture bounded repository control rules
@@ -66,6 +74,8 @@ is released. Nothing has been released yet.
 
 ### Added
 
+- Standalone `know memory list/show` and `know task list/show` over persisted Engine
+  records, with native JSON, sourced text/Markdown and no provider preparation or calls.
 - Standalone `know trace` and `know impact` over the real engine graph, with versioned
   evidence, explicit gaps and safe text/JSON/Markdown output.
 - Standalone `know index`, `know search` and `know status` commands backed by the real

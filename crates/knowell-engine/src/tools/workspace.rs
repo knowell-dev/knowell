@@ -20,7 +20,6 @@ use super::memory::{conflict_map, memory_error, task_summary};
 use crate::access::Access;
 use crate::engine::Engine;
 use crate::error::store_tool;
-use crate::tools::memory_record;
 
 /// Analysis depth of a language name as stored (`typescript`, `go`, …).
 pub(crate) fn analysis_level(language: &str) -> AnalysisLevel {
@@ -144,8 +143,15 @@ impl Engine {
                 && let Some(record) = by_id.get(&id)
             {
                 let empty = Vec::new();
-                let mcp =
-                    memory_record(record, conflicts.get(&id).unwrap_or(&empty), Some(&pinned))?;
+                let mcp = self
+                    .visible_memory_record(
+                        record,
+                        conflicts.get(&id).unwrap_or(&empty),
+                        &access,
+                        &pinned,
+                        &mut gaps,
+                    )
+                    .await?;
                 match item.tier {
                     Tier::Pinned | Tier::Rule => rules.push(mcp),
                     _ => recent_decisions.push(mcp),

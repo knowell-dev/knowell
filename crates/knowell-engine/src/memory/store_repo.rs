@@ -2,10 +2,10 @@
 //!
 //! The store references workspaces, projects and tasks by id; the domain
 //! model by name. A [`Directory`] shared with the engine's registry maps one
-//! to the other. Evidence names a project without its workspace: it is
-//! resolved inside the record's workspace when the scope has one, otherwise
-//! to the only registered project of that name (ambiguous names are
-//! rejected, never guessed).
+//! to the other. Contextual writes retain the workspace in which evidence
+//! was resolved. Legacy writes use the record's workspace when its scope has
+//! one, otherwise the only registered namesake (ambiguous names are rejected).
+//! Updates preserve canonical project ids instead of resolving saved names anew.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, PoisonError, RwLock};
@@ -16,6 +16,7 @@ use knowell_knowledge::{
     ManifestPin, OpenQuestion, ProgressNote, RecordId, RecordKind, RecordState, Scope, Subject,
     SymbolId, Task, TaskId, TaskStatus, Timestamp, UserId, ViewId,
 };
+use knowell_store::hierarchy;
 use knowell_store::knowledge::{
     self, NewRecord, RecordContent, RecordEvidence, RecordFilter, RecordScope, RecordUpdate,
     StoredRecord,
@@ -250,6 +251,66 @@ fn from_json<T: serde::de::DeserializeOwned>(
     serde_json::from_value(value).map_err(|e| MemoryError::Invalid(format!("stored {what}: {e}")))
 }
 
+fn stored_evidence(project: ProjectId, evidence: &Evidence) -> RecordEvidence {
+    RecordEvidence {
+        project,
+        view: evidence.view.as_str().to_owned(),
+        commit: evidence.commit.as_str().to_owned(),
+        path: evidence.path.clone(),
+        lines: evidence.range,
+        content_hash: evidence.content_hash,
+    }
+}
+
+// The caller verifies `before` against the current stored row before any ids
+// are reused. Equal names and pointer bytes cannot distinguish two namespaces.
+fn updated_evidence(
+    directory: &Directory,
+    before: &[Evidence],
+    after: &[Evidence],
+    stored: &[RecordEvidence],
+    workspace: Option<&Name>,
+) -> Result<Vec<RecordEvidence>, MemoryError> {
+    if before.len() != stored.len() {
+        return Err(MemoryError::Invalid(
+            "saved memory evidence identity is incomplete".to_owned(),
+        ));
+    }
+    if before == after {
+        return Ok(stored.to_vec());
+    }
+    after
+        .iter()
+        .map(|evidence| {
+            let mut retained: Option<&RecordEvidence> = None;
+            for (previous, canonical) in before.iter().zip(stored) {
+                if previous == evidence {
+                    if retained.is_some_and(|known| known.project != canonical.project) {
+                        return Err(MemoryError::Invalid(
+                            "updated memory evidence has ambiguous saved identity".to_owned(),
+                        ));
+                    }
+                    retained = Some(canonical);
+                }
+            }
+            match retained {
+                Some(canonical) => Ok(canonical.clone()),
+                None => {
+                    let workspace = workspace.ok_or_else(|| {
+                        MemoryError::Invalid(
+                            "updated memory evidence requires a verified workspace".to_owned(),
+                        )
+                    })?;
+                    Ok(stored_evidence(
+                        directory.project(workspace, &evidence.project)?,
+                        evidence,
+                    ))
+                }
+            }
+        })
+        .collect()
+}
+
 impl StoreMemory {
     fn scope_to_store(&self, scope: &Scope) -> Result<RecordScope, MemoryError> {
         self.with_directory(|d| {
@@ -299,55 +360,100 @@ impl StoreMemory {
 
     fn evidence_to_store(
         &self,
-        scope: &Scope,
         evidence: &[Evidence],
+        workspace: Option<&Name>,
     ) -> Result<Vec<RecordEvidence>, MemoryError> {
-        let workspace = Self::scope_workspace(scope);
         self.with_directory(|d| {
             evidence
                 .iter()
                 .map(|e| {
-                    Ok(RecordEvidence {
-                        project: d.evidence_project(workspace, &e.project)?,
-                        view: e.view.as_str().to_owned(),
-                        commit: e.commit.as_str().to_owned(),
-                        path: e.path.clone(),
-                        lines: e.range,
-                        content_hash: e.content_hash,
-                    })
+                    Ok(stored_evidence(
+                        d.evidence_project(workspace, &e.project)?,
+                        e,
+                    ))
                 })
                 .collect()
         })
     }
 
-    fn evidence_from_store(
+    async fn stored_workspace_name(&self, id: WorkspaceId) -> Result<Name, MemoryError> {
+        if let Some(name) =
+            self.with_directory(|directory| directory.workspace_names.get(&id).cloned())
+        {
+            return Ok(name);
+        }
+        let mut conn = self.store.acquire().await.map_err(store_error)?;
+        hierarchy::get_workspace(&mut conn, id)
+            .await
+            .map_err(store_error)?
+            .filter(|workspace| workspace.organization == self.organization)
+            .map(|workspace| workspace.name)
+            .ok_or_else(|| {
+                MemoryError::NotFound("saved workspace metadata is unavailable".to_owned())
+            })
+    }
+
+    async fn stored_project_names(&self, id: ProjectId) -> Result<(Name, Name), MemoryError> {
+        if let Some(names) =
+            self.with_directory(|directory| directory.project_names.get(&id).cloned())
+        {
+            return Ok(names);
+        }
+        let mut conn = self.store.acquire().await.map_err(store_error)?;
+        let project = hierarchy::get_project(&mut conn, id)
+            .await
+            .map_err(store_error)?
+            .filter(|project| project.organization == self.organization)
+            .ok_or_else(|| {
+                MemoryError::NotFound("saved source metadata is unavailable".to_owned())
+            })?;
+        drop(conn);
+        let workspace = self.stored_workspace_name(project.workspace).await?;
+        Ok((workspace, project.name))
+    }
+
+    async fn stored_scope(&self, scope: &RecordScope) -> Result<Scope, MemoryError> {
+        match scope {
+            RecordScope::Workspace(id) => {
+                Ok(Scope::Workspace(self.stored_workspace_name(*id).await?))
+            }
+            RecordScope::Project(id) => {
+                let (workspace, project) = self.stored_project_names(*id).await?;
+                Ok(Scope::Project { workspace, project })
+            }
+            _ => self.scope_from_store(scope),
+        }
+    }
+
+    async fn evidence_from_store(
         &self,
         evidence: &[RecordEvidence],
-    ) -> Result<Vec<Evidence>, MemoryError> {
-        self.with_directory(|d| {
-            evidence
-                .iter()
-                .map(|e| {
-                    let (_, project) =
-                        d.project_names.get(&e.project).cloned().ok_or_else(|| {
-                            MemoryError::Invalid(format!(
-                                "evidence project {} is not registered",
-                                e.project
-                            ))
-                        })?;
-                    Ok(Evidence {
-                        project,
-                        view: ViewId::new(e.view.clone())
-                            .map_err(|err| MemoryError::Invalid(format!("stored view: {err}")))?,
-                        commit: CommitId::new(e.commit.clone())
-                            .map_err(|err| MemoryError::Invalid(format!("stored commit: {err}")))?,
-                        path: e.path.clone(),
-                        range: e.lines,
-                        content_hash: e.content_hash,
-                    })
-                })
-                .collect()
-        })
+    ) -> Result<(Vec<Evidence>, Vec<Option<Name>>), MemoryError> {
+        let mut output = Vec::with_capacity(evidence.len());
+        let mut workspaces = Vec::with_capacity(evidence.len());
+        let mut names: BTreeMap<ProjectId, (Name, Name)> = BTreeMap::new();
+        for e in evidence {
+            let (workspace, project) = match names.get(&e.project) {
+                Some(names) => names.clone(),
+                None => {
+                    let resolved = self.stored_project_names(e.project).await?;
+                    names.insert(e.project, resolved.clone());
+                    resolved
+                }
+            };
+            output.push(Evidence {
+                project,
+                view: ViewId::new(e.view.clone())
+                    .map_err(|err| MemoryError::Invalid(format!("stored view: {err}")))?,
+                commit: CommitId::new(e.commit.clone())
+                    .map_err(|err| MemoryError::Invalid(format!("stored commit: {err}")))?,
+                path: e.path.clone(),
+                range: e.lines,
+                content_hash: e.content_hash,
+            });
+            workspaces.push(Some(workspace));
+        }
+        Ok((output, workspaces))
     }
 
     fn history_to_store(
@@ -369,7 +475,18 @@ impl StoreMemory {
             .collect()
     }
 
-    fn record_to_store(&self, record: &KnowledgeRecord) -> Result<NewRecord, MemoryError> {
+    fn record_to_store(
+        &self,
+        record: &KnowledgeRecord,
+        workspace: Option<&Name>,
+    ) -> Result<NewRecord, MemoryError> {
+        if let (Some(scope), Some(context)) = (Self::scope_workspace(&record.scope), workspace)
+            && scope != context
+        {
+            return Err(MemoryError::Invalid(
+                "memory scope does not match the evidence workspace".to_owned(),
+            ));
+        }
         Ok(NewRecord {
             id: record_id(record.id),
             organization: self.organization,
@@ -389,7 +506,10 @@ impl StoreMemory {
                 .map(|s| s.as_str().to_owned())
                 .collect(),
             superseded_by: record.superseded_by.map(record_id),
-            evidence: self.evidence_to_store(&record.scope, &record.evidence)?,
+            evidence: self.evidence_to_store(
+                &record.evidence,
+                workspace.or_else(|| Self::scope_workspace(&record.scope)),
+            )?,
             history: Self::history_to_store(&record.history)?,
             created_at: to_datetime(record.created_at)?,
             updated_at: to_datetime(record.updated_at)?,
@@ -417,9 +537,12 @@ impl StoreMemory {
             })
             .collect::<Result<Vec<_>, MemoryError>>()?;
         let author: Actor = from_json(stored.author.clone(), "author")?;
+        // Resolve canonical ids through hierarchy metadata even when a source
+        // is not configured here. This neither registers nor opens that source.
+        let (evidence, evidence_workspaces) = self.evidence_from_store(&stored.evidence).await?;
         let record = KnowledgeRecord {
             id: RecordId::from_uuid(stored.id.0),
-            scope: self.scope_from_store(&stored.scope)?,
+            scope: self.stored_scope(&stored.scope).await?,
             kind: kind_from_store(stored.kind),
             subject: Subject::new(&stored.subject)
                 .map_err(|e| MemoryError::Invalid(format!("stored subject: {e}")))?,
@@ -430,7 +553,7 @@ impl StoreMemory {
             author,
             created_at: Timestamp::from_datetime(stored.created_at),
             updated_at: Timestamp::from_datetime(stored.updated_at),
-            evidence: self.evidence_from_store(&stored.evidence)?,
+            evidence,
             related_symbols: stored
                 .related_symbols
                 .iter()
@@ -448,6 +571,7 @@ impl StoreMemory {
         Ok(RecordRow {
             record,
             revision: stored.revision,
+            evidence_workspaces,
         })
     }
 
@@ -457,15 +581,7 @@ impl StoreMemory {
     ) -> Result<Vec<RecordRow>, MemoryError> {
         let mut rows = Vec::with_capacity(stored.len());
         for record in stored {
-            match self.record_from_store(record).await {
-                Ok(row) => rows.push(row),
-                // Records of projects this engine does not serve are skipped,
-                // not fatal for the whole listing.
-                Err(MemoryError::Invalid(reason)) => {
-                    tracing::debug!(%reason, "skipping a memory record the engine cannot map");
-                }
-                Err(other) => return Err(other),
-            }
+            rows.push(self.record_from_store(record).await?);
         }
         Ok(rows)
     }
@@ -536,7 +652,23 @@ impl MemoryRepo for StoreMemory {
         record: &'a KnowledgeRecord,
     ) -> BoxFuture<'a, Result<RecordRow, MemoryError>> {
         Box::pin(async move {
-            let new = self.record_to_store(record)?;
+            let new = self.record_to_store(record, None)?;
+            let mut conn = self.store.acquire().await.map_err(store_error)?;
+            let stored = knowledge::insert_record(&mut conn, &new)
+                .await
+                .map_err(store_error)?;
+            drop(conn);
+            self.record_from_store(stored).await
+        })
+    }
+
+    fn insert_record_in_workspace<'a>(
+        &'a self,
+        record: &'a KnowledgeRecord,
+        workspace: &'a Name,
+    ) -> BoxFuture<'a, Result<RecordRow, MemoryError>> {
+        Box::pin(async move {
+            let new = self.record_to_store(record, Some(workspace))?;
             let mut conn = self.store.acquire().await.map_err(store_error)?;
             let stored = knowledge::insert_record(&mut conn, &new)
                 .await
@@ -552,6 +684,42 @@ impl MemoryRepo for StoreMemory {
         after: &'a KnowledgeRecord,
     ) -> BoxFuture<'a, Result<RecordRow, MemoryError>> {
         Box::pin(async move {
+            if after.id != before.record.id || after.scope != before.record.scope {
+                return Err(MemoryError::Invalid(
+                    "memory identity and scope cannot change".to_owned(),
+                ));
+            }
+            let current = {
+                let mut conn = self.store.acquire().await.map_err(store_error)?;
+                knowledge::get_record(&mut conn, record_id(before.record.id))
+                    .await
+                    .map_err(store_error)?
+                    .filter(|record| record.organization == self.organization)
+                    .ok_or_else(|| {
+                        MemoryError::NotFound("memory record is unavailable".to_owned())
+                    })?
+            };
+            if current.revision != before.revision || current.version != before.record.version {
+                return Err(MemoryError::Conflict(
+                    "memory changed since it was read".to_owned(),
+                ));
+            }
+            // Release the connection before resolving hierarchy metadata, which
+            // may acquire a connection of its own in a single-connection pool.
+            let (evidence, workspaces) = self.evidence_from_store(&current.evidence).await?;
+            if self.stored_scope(&current.scope).await? != before.record.scope
+                || evidence != before.record.evidence
+                || workspaces != before.evidence_workspaces
+            {
+                return Err(MemoryError::Conflict(
+                    "saved memory identity changed since it was read".to_owned(),
+                ));
+            }
+            if after.version == before.record.version && after.evidence != before.record.evidence {
+                return Err(MemoryError::Invalid(
+                    "changed memory evidence requires a new content version".to_owned(),
+                ));
+            }
             let appended = after
                 .history
                 .get(before.record.history.len()..)
@@ -561,7 +729,15 @@ impl MemoryRepo for StoreMemory {
                     title: after.title.clone(),
                     body: after.body.clone(),
                     tags: after.tags.clone(),
-                    evidence: self.evidence_to_store(&after.scope, &after.evidence)?,
+                    evidence: self.with_directory(|directory| {
+                        updated_evidence(
+                            directory,
+                            &before.record.evidence,
+                            &after.evidence,
+                            &current.evidence,
+                            Self::scope_workspace(&after.scope),
+                        )
+                    })?,
                 })
             } else {
                 None
@@ -732,6 +908,53 @@ impl MemoryRepo for StoreMemory {
         })
     }
 
+    fn list_owned_tasks<'a>(
+        &'a self,
+        workspace: Option<&'a Name>,
+        statuses: &'a [TaskStatus],
+        owner: Option<&'a str>,
+        limit: u32,
+    ) -> BoxFuture<'a, Result<Vec<TaskRow>, MemoryError>> {
+        Box::pin(async move {
+            let workspace = match workspace {
+                Some(name) => Some(self.with_directory(|d| d.workspace(name))?),
+                None => None,
+            };
+            let wanted =
+                usize::try_from(limit.clamp(1, tasks::MAX_TASKS_LISTED)).unwrap_or(usize::MAX);
+            let mut filter = TaskFilter {
+                organization: self.organization,
+                workspace,
+                owner: None,
+                statuses: statuses.iter().copied().map(status_to_store).collect(),
+                limit: tasks::MAX_TASKS_LISTED,
+                before: None,
+            };
+            let mut conn = self.store.acquire().await.map_err(store_error)?;
+            let mut rows = Vec::new();
+            loop {
+                let stored = tasks::list_tasks(&mut conn, &filter)
+                    .await
+                    .map_err(store_error)?;
+                let exhausted = stored.len() < usize::try_from(filter.limit).unwrap_or(usize::MAX);
+                // Keep database timestamp precision; domain timestamps cannot
+                // safely locate the next page when several updates share a second.
+                filter.before = stored.last().map(tasks::TaskCursor::after);
+                for task in stored {
+                    if task.owner.is_none() || task.owner.as_deref() == owner {
+                        rows.push(self.task_from_store(task)?);
+                        if rows.len() == wanted {
+                            return Ok(rows);
+                        }
+                    }
+                }
+                if exhausted {
+                    return Ok(rows);
+                }
+            }
+        })
+    }
+
     fn update_task<'a>(
         &'a self,
         before: &'a TaskRow,
@@ -808,5 +1031,139 @@ impl MemoryRepo for StoreMemory {
                 })
                 .collect()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use knowell_core::{ContentHash, LineRange, RepoPath};
+    use uuid::Uuid;
+
+    fn pointer(path: &str) -> Evidence {
+        Evidence {
+            project: Name::new("synthetic-project").unwrap(),
+            view: ViewId::new("branch:main").unwrap(),
+            commit: CommitId::new("a".repeat(40)).unwrap(),
+            path: RepoPath::new(path).unwrap(),
+            range: LineRange::new(1, 1).unwrap(),
+            content_hash: ContentHash::of(b"synthetic source"),
+        }
+    }
+
+    fn namesakes() -> (Directory, Name, Name, ProjectId, ProjectId) {
+        let mut directory = Directory::default();
+        let private = Name::new("synthetic-private").unwrap();
+        let public = Name::new("synthetic-public").unwrap();
+        let private_id = ProjectId(Uuid::from_u128(11));
+        let public_id = ProjectId(Uuid::from_u128(12));
+        for (workspace, workspace_id, project_id) in
+            [(&private, 1, private_id), (&public, 2, public_id)]
+        {
+            directory.add_workspace(
+                workspace,
+                WorkspaceId(Uuid::from_u128(workspace_id)),
+                [(Name::new("synthetic-project").unwrap(), project_id)],
+            );
+        }
+        (directory, private, public, private_id, public_id)
+    }
+
+    #[test]
+    fn contextual_project_mapping_is_exact_and_legacy_ambiguity_remains_an_error() {
+        let (directory, private, public, private_id, public_id) = namesakes();
+        let project = Name::new("synthetic-project").unwrap();
+        assert_eq!(
+            directory
+                .evidence_project(Some(&private), &project)
+                .unwrap(),
+            private_id
+        );
+        assert_eq!(
+            directory.evidence_project(Some(&public), &project).unwrap(),
+            public_id
+        );
+        assert!(matches!(
+            directory.evidence_project(None, &project),
+            Err(MemoryError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn content_updates_preserve_canonical_ids_without_registered_origins() {
+        let directory = Directory::default();
+        let first = pointer("src/first.rs");
+        let second = pointer("src/second.rs");
+        let before = vec![first.clone(), second.clone()];
+        let canonical = vec![
+            stored_evidence(ProjectId(Uuid::from_u128(11)), &first),
+            stored_evidence(ProjectId(Uuid::from_u128(12)), &second),
+        ];
+        assert_eq!(
+            updated_evidence(&directory, &before, &before, &canonical, None).unwrap(),
+            canonical
+        );
+        let after = vec![second, first];
+        assert_eq!(
+            updated_evidence(&directory, &before, &after, &canonical, None).unwrap(),
+            canonical.iter().rev().cloned().collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn new_unscoped_evidence_does_not_guess_a_unique_registered_namesake() {
+        let mut directory = Directory::default();
+        let workspace = Name::new("synthetic-public").unwrap();
+        let project_id = ProjectId(Uuid::from_u128(12));
+        let evidence = pointer("src/KNOWELL_CANARY_POINTER.rs");
+        directory.add_workspace(
+            &workspace,
+            WorkspaceId(Uuid::from_u128(2)),
+            [(evidence.project.clone(), project_id)],
+        );
+        assert_eq!(
+            directory.evidence_project(None, &evidence.project).unwrap(),
+            project_id
+        );
+        let error = updated_evidence(&directory, &[], std::slice::from_ref(&evidence), &[], None)
+            .unwrap_err();
+        assert!(matches!(error, MemoryError::Invalid(_)));
+        assert!(!error.to_string().contains("KNOWELL_CANARY"));
+        assert_eq!(
+            updated_evidence(
+                &directory,
+                &[],
+                std::slice::from_ref(&evidence),
+                &[],
+                Some(&workspace)
+            )
+            .unwrap(),
+            vec![stored_evidence(project_id, &evidence)],
+        );
+    }
+
+    #[test]
+    fn indistinguishable_saved_pointers_retain_order_but_reject_ambiguous_remaps() {
+        let directory = Directory::default();
+        let evidence = pointer("src/KNOWELL_CANARY_POINTER.rs");
+        let before = vec![evidence.clone(), evidence.clone()];
+        let canonical = vec![
+            stored_evidence(ProjectId(Uuid::from_u128(11)), &evidence),
+            stored_evidence(ProjectId(Uuid::from_u128(12)), &evidence),
+        ];
+        assert_eq!(
+            updated_evidence(&directory, &before, &before, &canonical, None).unwrap(),
+            canonical
+        );
+        let error = updated_evidence(
+            &directory,
+            &before,
+            std::slice::from_ref(&evidence),
+            &canonical,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(error, MemoryError::Invalid(_)));
+        assert!(!error.to_string().contains("KNOWELL_CANARY"));
     }
 }
