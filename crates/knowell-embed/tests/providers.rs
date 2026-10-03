@@ -514,6 +514,33 @@ fn gemini_validates_configuration() {
     assert!(GeminiEmbedder::new(secret(), with_creds).is_err());
 }
 
+#[test]
+fn gemini_batch_must_fit_configured_request_quota() {
+    let make = |entries, rpm| {
+        GeminiEmbedder::new(
+            secret(),
+            GeminiConfig {
+                batch: BatchLimits {
+                    max_entries: entries,
+                    ..GeminiConfig::default().batch
+                },
+                limits: RequestLimits {
+                    requests_per_minute: rpm,
+                    ..RequestLimits::default()
+                },
+                ..GeminiConfig::default()
+            },
+        )
+    };
+    assert!(make(100, None).is_ok());
+    assert!(make(100, Some(100)).is_ok());
+    assert!(make(1, Some(1)).is_ok());
+    let err = make(100, Some(99)).unwrap_err();
+    assert!(matches!(err, EmbedError::Config(_)));
+    assert!(err.to_string().contains("reduce the batch entry limit"));
+    assert!(make(1, Some(0)).is_err());
+}
+
 #[tokio::test]
 async fn gemini_errors_and_debug_never_contain_the_key() {
     // 401
@@ -646,6 +673,33 @@ async fn gemini_works_under_configured_rate_limits() {
             .unwrap();
     }
     assert_eq!(server.received_requests().await.unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn gemini_rate_limit_charges_each_batch_entry() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(GEMINI_PATH))
+        .respond_with(gemini_ok(128))
+        .mount(&server)
+        .await;
+    let mut config = gemini_config(&server, 128);
+    config.limits.requests_per_minute = Some(120);
+    let embedder = GeminiEmbedder::new(secret(), config).unwrap();
+
+    let start = Instant::now();
+    for entries in [100, 21] {
+        let docs = vec![DocumentInput::new("synthetic quota input"); entries];
+        let out = embedder.embed_documents_with_usage(&docs).await.unwrap();
+        assert_eq!(out.embeddings.len(), entries);
+        assert_eq!(out.usage.requests, 1);
+    }
+    // The first batch leaves 20 units; the next needs about 500 ms to refill
+    // one more. Counting only HTTP batches would send both immediately.
+    assert!(start.elapsed() >= Duration::from_millis(450));
+    let sent = bodies(&server).await;
+    let entries: Vec<usize> = sent.iter().map(request_count).collect();
+    assert_eq!(entries, vec![100, 21]);
 }
 
 // ---------------------------------------------------------------- OpenAI

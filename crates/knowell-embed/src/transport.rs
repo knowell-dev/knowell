@@ -11,7 +11,7 @@ use tokio::sync::Semaphore;
 use url::Url;
 
 use crate::error::EmbedError;
-use crate::limits::{RequestLimits, RetryPolicy, TokenBucket};
+use crate::limits::{RateLimiter, RequestLimits, RetryPolicy};
 
 /// Provider error bodies longer than this many characters are cut.
 const MAX_ERROR_CHARS: usize = 300;
@@ -94,8 +94,7 @@ pub(crate) struct Transport {
     provider: &'static str,
     client: reqwest::Client,
     permits: Semaphore,
-    requests: Option<TokenBucket>,
-    tokens: Option<TokenBucket>,
+    rate: RateLimiter,
     retry: RetryPolicy,
     masker: Masker,
     auth: Option<(HeaderName, HeaderValue)>,
@@ -158,8 +157,7 @@ impl Transport {
             provider,
             client,
             permits: Semaphore::new(limits.max_concurrency),
-            requests: limits.requests_per_minute.map(TokenBucket::per_minute),
-            tokens: limits.tokens_per_minute.map(TokenBucket::per_minute),
+            rate: RateLimiter::new(limits.requests_per_minute, limits.tokens_per_minute),
             retry: limits.retry,
             masker,
             auth,
@@ -191,12 +189,14 @@ impl Transport {
 
     /// POSTs `body` as JSON, retrying transient failures.
     ///
-    /// `token_cost` is the estimated token count charged to the token-rate
-    /// bucket for every attempt.
+    /// `request_cost` is the provider-specific request quota charged for
+    /// every attempt; `token_cost` is the estimated token count charged to
+    /// the token-rate bucket for every attempt.
     pub(crate) async fn post_json(
         &self,
         url: &Url,
         body: &serde_json::Value,
+        request_cost: u64,
         token_cost: u64,
     ) -> Result<Reply, EmbedError> {
         let payload = serde_json::to_vec(body).map_err(|e| EmbedError::Response {
@@ -207,7 +207,7 @@ impl Transport {
         let mut attempt = 0u32;
         loop {
             attempt += 1;
-            match self.attempt(url, &payload, token_cost).await {
+            match self.attempt(url, &payload, request_cost, token_cost).await {
                 Ok(body) => {
                     return Ok(Reply {
                         body,
@@ -244,17 +244,13 @@ impl Transport {
         &self,
         url: &Url,
         payload: &[u8],
+        request_cost: u64,
         token_cost: u64,
     ) -> Result<Vec<u8>, Failure> {
-        if let Some(bucket) = &self.requests {
-            bucket.acquire(1).await;
-        }
-        if let Some(bucket) = &self.tokens {
-            bucket.acquire(token_cost).await;
-        }
         let _permit = self.permits.acquire().await.map_err(|_| {
             Failure::Fatal(EmbedError::Config("the request limiter was closed".into()))
         })?;
+        self.rate.acquire(request_cost, token_cost).await;
 
         let mut request = self
             .client
