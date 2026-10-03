@@ -64,6 +64,10 @@ pub(crate) struct LiveEvidence {
     usd_per_million_tokens: f64,
     cost_estimate_usd: f64,
     provider_retries: u32,
+    request_units_per_minute: Option<u32>,
+    estimated_tokens_per_minute: Option<u32>,
+    batch_max_inputs: usize,
+    batch_max_estimated_tokens: u64,
     indexed_inputs: u64,
     elapsed_seconds: f64,
     os: &'static str,
@@ -76,7 +80,7 @@ pub(crate) struct LiveEvidence {
 impl LiveEvidence {
     pub(crate) fn markdown(&self) -> String {
         format!(
-            "\n## Live embedding conditions\n\nModel: `{}`; dimensions: {}; all returned dimensions validated.\n\nRequest field: `{}`. Fresh database and vector cache; serial indexing; default engine weights, quotas and chunking. Input accounting: {} tokens (provider counts where available, estimates otherwise); budget: {} tokens; estimated cost: ${:.6} at ${:.2}/million text tokens. No provider or job retries. These are accounting estimates, not a provider billing guarantee.\n\nIndexed inputs: {}; elapsed: {:.2} seconds; OS/architecture: {}/{}; PostgreSQL: {}; pgvector: {}. Latency includes cold indexing and all three retrievers; it is not search p95.\n",
+            "\n## Live embedding conditions\n\nModel: `{}`; dimensions: {}; all returned dimensions validated.\n\nRequest field: `{}`. Fresh database and vector cache; serial indexing; default engine weights, retrieval quotas and chunking. Input accounting: {} tokens (provider counts where available, estimates otherwise); budget: {} tokens; estimated cost: ${:.6} at ${:.2}/million text tokens. No provider or job retries. These are accounting estimates, not a provider billing guarantee.\n\nProvider rate caps: {} input request units/minute, {} estimated tokens/minute; batch caps: {} inputs, {} estimated tokens. Rate buckets initially hold one minute of capacity and refill continuously.\n\nIndexed inputs: {}; elapsed: {:.2} seconds; OS/architecture: {}/{}; PostgreSQL: {}; pgvector: {}. Latency includes cold indexing and all three retrievers; it is not search p95.\n",
             self.model,
             self.dimensions,
             self.request_dimension_field,
@@ -84,6 +88,12 @@ impl LiveEvidence {
             self.token_budget,
             self.cost_estimate_usd,
             self.usd_per_million_tokens,
+            self.request_units_per_minute
+                .map_or_else(|| "unlimited".into(), |v| v.to_string()),
+            self.estimated_tokens_per_minute
+                .map_or_else(|| "unlimited".into(), |v| v.to_string()),
+            self.batch_max_inputs,
+            self.batch_max_estimated_tokens,
             self.indexed_inputs,
             self.elapsed_seconds,
             self.os,
@@ -171,6 +181,7 @@ async fn build_and_measure(
     let budget = live
         .map(|options| Budget::new(Some(options.max_tokens), None, USD_PER_MILLION))
         .transpose()?;
+    let mut live_rate_limits = None;
     let embedder = match live {
         Some(options) => {
             let mut config = GeminiConfig {
@@ -179,13 +190,20 @@ async fn build_and_measure(
                 ..GeminiConfig::default()
             };
             config.limits.max_concurrency = 1;
-            config.limits.requests_per_minute = Some(60);
+            // Keep the initial burst plus one minute of refill below the
+            // observed free-tier 100 input/minute and 30,000 token/minute quotas.
+            config.batch.max_entries = 40;
+            config.batch.max_batch_tokens = 8_192;
+            config.limits.requests_per_minute = Some(40);
+            config.limits.tokens_per_minute = Some(10_000);
             config.limits.retry.max_retries = 0;
             #[cfg(test)]
             {
                 config.base_url = options.base_url.clone();
                 config.limits.requests_per_minute = None;
+                config.limits.tokens_per_minute = None;
             }
+            live_rate_limits = Some((config.batch, config.limits));
             AnyEmbedder::Gemini(GeminiEmbedder::new(
                 knowell_secrets::resolve(&options.key)?,
                 config,
@@ -267,6 +285,8 @@ async fn build_and_measure(
     let evidence = match (live, budget) {
         (Some(options), Some(budget)) => {
             let server = store.check_server().await?;
+            let (batch, limits) =
+                live_rate_limits.context("live evaluation rate limits are missing")?;
             Some(LiveEvidence {
                 model: GEMINI_EMBEDDING_MODEL,
                 dimensions,
@@ -278,6 +298,10 @@ async fn build_and_measure(
                 usd_per_million_tokens: USD_PER_MILLION,
                 cost_estimate_usd: budget.spent_usd(),
                 provider_retries: 0,
+                request_units_per_minute: limits.requests_per_minute,
+                estimated_tokens_per_minute: limits.tokens_per_minute,
+                batch_max_inputs: batch.max_entries,
+                batch_max_estimated_tokens: batch.max_batch_tokens,
                 indexed_inputs: engine.indexer().stats().inputs_embedded,
                 elapsed_seconds: started.elapsed().as_secs_f64(),
                 os: std::env::consts::OS,
@@ -305,7 +329,7 @@ mod tests {
     use axum::{Json, Router, http::HeaderMap, routing::post};
     use knowell_eval::{FixtureSpec, QuerySet, Scale, WriteOptions, generate, walk_fixture};
     use serde_json::{Value, json};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn live_measurement_indexes_only_synthetic_content_and_records_conditions() {
@@ -315,12 +339,21 @@ mod tests {
         }
         let count = Arc::new(AtomicUsize::new(0));
         let calls = Arc::clone(&count);
+        let estimated = Arc::new(AtomicU64::new(0));
+        let sent_estimates = Arc::clone(&estimated);
         let app = Router::new().route("/v1beta/models/gemini-embedding-2:batchEmbedContents", post(move |headers: HeaderMap, Json(body): Json<Value>| {
             let calls = Arc::clone(&calls);
+            let sent_estimates = Arc::clone(&sent_estimates);
             async move {
                 assert!(headers.get("x-goog-api-key").is_some_and(|v| v == "KNOWELL_CANARY_fake_live_key"));
                 calls.fetch_add(1, Ordering::SeqCst);
                 let requests = body["requests"].as_array().unwrap();
+                assert!(requests.len() <= 40);
+                let estimated_tokens: u64 = requests.iter().map(|request| {
+                    knowell_embed::estimate_tokens(request["content"]["parts"][0]["text"].as_str().unwrap())
+                }).sum();
+                assert!(estimated_tokens <= 8_192);
+                sent_estimates.fetch_add(estimated_tokens, Ordering::SeqCst);
                 let embeddings: Vec<Value> = requests.iter().map(|request| {
                     assert_eq!(request["model"], "models/gemini-embedding-2");
                     assert_eq!(request["outputDimensionality"], 768);
@@ -382,6 +415,11 @@ mod tests {
         assert!(evidence.all_returned_dimensions_validated);
         assert!(evidence.accounted_input_tokens > 0 && evidence.indexed_inputs > 0);
         assert_eq!(evidence.provider_retries, 0);
+        eprintln!(
+            "synthetic mock indexed {} inputs; sent {} estimated tokens",
+            evidence.indexed_inputs,
+            estimated.load(Ordering::SeqCst)
+        );
         assert!(
             !serde_json::to_string(&evidence)
                 .unwrap()

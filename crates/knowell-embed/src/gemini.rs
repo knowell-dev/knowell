@@ -47,6 +47,7 @@ pub struct GeminiConfig {
     pub dimensions: u32,
     /// Batching limits. Defaults: 100 entries, 50 000 estimated tokens per
     /// request, 8 192 tokens per input (the model's input limit).
+    /// `max_entries` must not exceed `limits.requests_per_minute` when set.
     pub batch: BatchLimits,
     /// Concurrency, rate, timeout and retry settings.
     pub limits: RequestLimits,
@@ -104,6 +105,14 @@ impl GeminiEmbedder {
         }
         config.batch.validate(GEMINI_MAX_BATCH_ENTRIES)?;
         config.limits.validate(&config.batch)?;
+        if let Some(rpm) = config.limits.requests_per_minute
+            && config.batch.max_entries as u64 > u64::from(rpm)
+        {
+            return Err(EmbedError::Config(
+                "gemini max_entries must not exceed requests_per_minute; reduce the batch entry limit"
+                    .into(),
+            ));
+        }
 
         let base = match &config.base_url {
             Some(url) => url.as_str().trim_end_matches('/').to_owned(),
@@ -208,7 +217,7 @@ impl BatchSender for GeminiEmbedder {
         let body = json!({ "requests": requests });
         let reply = self
             .transport
-            .post_json(&self.endpoint, &body, estimated_tokens)
+            .post_json(&self.endpoint, &body, texts.len() as u64, estimated_tokens)
             .await?;
         let parsed: BatchResponse = self.transport.parse(&reply.body)?;
         Ok(BatchOutput {

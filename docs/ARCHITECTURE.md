@@ -412,6 +412,12 @@ Profile settings: provider/model, dimensions, precision, chunking, candidate cou
 `ef_search`, reranking, concurrency / rate limit / batch, budgets (tokens, currency, disk,
 retention).
 
+Provider request and estimated-token rate quotas are reserved together immediately before
+sending. Gemini conservatively counts each batch input as one request quota unit; the
+OpenAI-compatible and Ollama transports count HTTP batches. A Gemini batch must fit its
+configured request quota capacity. These local limits do not reserve shared provider quota
+or guarantee a billing total.
+
 - The panel shows dimensions and **measured quality separately**; an unmeasured profile
   gets no quality score.
 - **Profile switches are blue-green:** the new index is built in the background while the

@@ -12,6 +12,9 @@ is released. Nothing has been released yet.
 
 - Emit absolute source file URIs in SARIF so GitHub places primary and related
   locations under the checkout correctly, including monorepo project subdirectories.
+- Count Gemini batch entries separately in the request limiter, reject batches
+  larger than the configured quota capacity, reserve request and token rates together,
+  and bound live evaluation token rates.
 - Verify real Knowell SARIF upload and GitHub processing with a main-only manual
   workflow that checks expected rules and committed source locations before upload.
 - Add an explicit synthetic-only Gemini evaluation command and an opt-in,

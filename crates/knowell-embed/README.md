@@ -45,9 +45,18 @@ needs a new profile.
   Calls are sent sequentially batch by batch; run several calls concurrently to use the limit.
 - **Token buckets**: optional requests/minute and (estimated) tokens/minute, refilled
   continuously; the bucket capacity is one minute of quota.
+  Each attempt acquires a concurrency slot, then consumes both quotas together just
+  before sending, so a wait for one quota cannot refill an earlier reservation of the other.
+  Gemini conservatively charges one request quota unit per input entry in each HTTP
+  batch; OpenAI-compatible and Ollama providers charge one unit per HTTP batch.
+  Each retry consumes the same request and token quota again. These are local throttling
+  units, not a claim about the provider's billing or actual quota accounting. Limits are
+  per provider instance; other instances using the same API project share its quota.
 - **Batching**: at most 100 entries (Gemini) and `max_batch_tokens` estimated tokens per
   request. Token estimates are conservative (1 token per 3 characters). An input above
   `max_input_tokens` (8192 for Gemini) is refused with `InputTooLong`, never truncated.
+  Gemini rejects a configuration whose `max_entries` exceeds its configured
+  `requests_per_minute`, because the whole batch must fit the request quota bucket.
 - **Retries**: 429, 408, 5xx, timeouts and connection failures, exponential backoff with
   jitter in `[delay/2, delay]`. `Retry-After` (delay-seconds) is honoured; if it exceeds
   `max_retry_after` the call fails with `RateLimited` so the caller can reschedule.
@@ -89,9 +98,10 @@ Differences and caveats:
 - The 100-entry cap is **our** conservative limit; the reference states no maximum.
 - `outputDimensionality` is sent as a top-level field of each request entry. The guide's
   curl example uses a top-level `output_dimensionality`, while the API reference marks the
-  top-level fields as deprecated in favour of an `embedContentConfig` object. Not
-  verified against the live service; switch in `gemini.rs` if the top-level form is ever
-  dropped.
+  top-level fields as deprecated in favour of an `embedContentConfig` object. The
+  top-level form was verified for one synthetic text at 768 dimensions on
+  2026-10-03. Full engine evaluation at all three recommended dimensions remains
+  pending; switch in `gemini.rs` if the top-level form is ever dropped.
 
 ### Batch API (deferred)
 

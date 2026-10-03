@@ -181,7 +181,7 @@ impl BatchSender for OpenAiCompatibleEmbedder {
         }
         let reply = self
             .transport
-            .post_json(&self.endpoint, &body, estimated_tokens)
+            .post_json(&self.endpoint, &body, 1, estimated_tokens)
             .await?;
         let parsed: Response = self.transport.parse(&reply.body)?;
 
