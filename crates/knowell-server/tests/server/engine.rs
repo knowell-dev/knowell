@@ -269,6 +269,160 @@ async fn permissions_before_the_engine() {
     assert_eq!(engine.calls().len(), 1);
 }
 
+fn organization_profile_response(request: &EngineRequest) -> Result<Value, EngineError> {
+    match request {
+        EngineRequest::Profiles => {
+            Ok(json!([{"id": "synthetic-profile", "model": "synthetic-model"}]))
+        }
+        EngineRequest::EvalReports => {
+            Ok(json!([{"id": "synthetic-report", "querySet": "synthetic-queries"}]))
+        }
+        EngineRequest::SwitchEstimate { to_profile_id } => Ok(json!({
+            "toProfileId": to_profile_id,
+            "estimatedTokens": 42,
+        })),
+        _ => Err(EngineError::Invalid {
+            message: "unexpected synthetic request".into(),
+        }),
+    }
+}
+
+fn callers_without_organization_read(h: &Harness) -> Vec<(&'static str, String)> {
+    h.grant(
+        user(2),
+        Role::Viewer,
+        ResourceScope::project(n("main"), n("api")),
+    );
+    h.grant(user(3), Role::Viewer, ResourceScope::workspace(n("main")));
+    h.grant(user(5), Role::Viewer, ResourceScope::Organization);
+    vec![
+        ("project viewer", h.token(user(2), &[TokenScope::Read])),
+        ("workspace viewer", h.token(user(3), &[TokenScope::Read])),
+        ("no grants", h.token(user(4), &[TokenScope::Read])),
+        (
+            "organization viewer without read scope",
+            h.token(user(5), &[TokenScope::Write]),
+        ),
+        (
+            "organization viewer with admin scope only",
+            h.token(user(5), &[TokenScope::Admin]),
+        ),
+    ]
+}
+
+async fn assert_organization_read_before_delegation(path: &str) {
+    let engine = FakeEngine::new(organization_profile_response);
+    let h = harness_with(config(), |b| b.with_engine(engine.clone()));
+    for (label, token) in callers_without_organization_read(&h) {
+        let reply = h.send(get(path).bearer(&token).build()).await;
+        assert_eq!(
+            reply.status,
+            StatusCode::FORBIDDEN,
+            "{label}: {}",
+            reply.text()
+        );
+        reply.problem(StatusCode::FORBIDDEN, "forbidden");
+        assert!(
+            engine.calls().is_empty(),
+            "{label} reached the organization metadata engine"
+        );
+    }
+}
+
+#[tokio::test]
+async fn profiles_require_organization_read_before_delegation() {
+    assert_organization_read_before_delegation("/api/v1/profiles").await;
+}
+
+#[tokio::test]
+async fn switch_estimates_require_organization_read_before_delegation() {
+    assert_organization_read_before_delegation("/api/v1/profiles/balanced/switch-estimate").await;
+}
+
+#[tokio::test]
+async fn evaluation_reports_require_organization_read_before_delegation() {
+    assert_organization_read_before_delegation("/api/v1/quality/reports").await;
+}
+
+fn invalid_estimate_ids() -> [String; 2] {
+    [
+        "KNOWELL_CANARY_FAKE_ESTIMATE%1B".into(),
+        "KNOWELL_CANARY_FAKE_LONG_ESTIMATE".repeat(5),
+    ]
+}
+
+#[tokio::test]
+async fn denied_estimates_do_not_validate_or_resolve_profile_ids() {
+    let engine = FakeEngine::new(organization_profile_response);
+    let h = harness_with(config(), |b| b.with_engine(engine.clone()));
+    let [malformed, oversized] = invalid_estimate_ids();
+    let ids = [
+        malformed,
+        oversized,
+        "balanced".into(),
+        "missing-synthetic-profile".into(),
+    ];
+    for (label, token) in callers_without_organization_read(&h) {
+        for id in &ids {
+            let path = format!("/api/v1/profiles/{id}/switch-estimate");
+            let reply = h.send(get(&path).bearer(&token).build()).await;
+            assert_eq!(
+                reply.status,
+                StatusCode::FORBIDDEN,
+                "{label}: {}",
+                reply.text()
+            );
+            reply.problem(StatusCode::FORBIDDEN, "forbidden");
+            assert!(!reply.text().contains("KNOWELL_CANARY"));
+            assert!(engine.calls().is_empty(), "{label} reached estimate lookup");
+        }
+    }
+}
+
+#[tokio::test]
+async fn organization_viewer_keeps_profile_responses_and_estimate_validation() {
+    let engine = FakeEngine::new(organization_profile_response);
+    let h = harness_with(config(), |b| b.with_engine(engine.clone()));
+    h.grant(user(6), Role::Viewer, ResourceScope::Organization);
+    let token = h.token(user(6), &[TokenScope::Read]);
+    let routes = [
+        ("/api/v1/profiles", EngineRequest::Profiles),
+        ("/api/v1/quality/reports", EngineRequest::EvalReports),
+        (
+            "/api/v1/profiles/balanced/switch-estimate",
+            EngineRequest::SwitchEstimate {
+                to_profile_id: "balanced".into(),
+            },
+        ),
+    ];
+    for (path, request) in &routes {
+        let reply = h.send(get(path).bearer(&token).build()).await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+        assert_eq!(
+            reply.json(),
+            organization_profile_response(request).unwrap()
+        );
+    }
+    let calls = engine.calls();
+    assert_eq!(calls.len(), routes.len());
+    for (call, (_, request)) in calls.iter().zip(&routes) {
+        assert_eq!(&call.request, request);
+        assert_eq!(call.principal, user(6));
+        assert!(call.sees_everything);
+    }
+    for id in invalid_estimate_ids() {
+        let path = format!("/api/v1/profiles/{id}/switch-estimate");
+        let reply = h.send(get(&path).bearer(&token).build()).await;
+        reply.problem(StatusCode::BAD_REQUEST, "invalid_request");
+        assert!(!reply.text().contains("KNOWELL_CANARY"));
+        assert_eq!(
+            engine.calls().len(),
+            routes.len(),
+            "invalid estimate reached the engine"
+        );
+    }
+}
+
 #[tokio::test]
 async fn admin_overview_outside_the_hub() {
     let h = harness();

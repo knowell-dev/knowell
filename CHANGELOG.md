@@ -10,6 +10,9 @@ is released. Nothing has been released yet.
 
 ### Fixed
 
+- Enforce organization grants and token scopes before HTTP/native profile metadata,
+  switch estimates and quality reports, and before native usage, integrations, provider
+  changes and Hub administration. Validate native usage periods before date arithmetic.
 - Filter profile UUID lookups by organization before decoding and reject unsupported
   registration timestamps through checked conversion without a panic or value echo.
 - Recheck current grants on stored memory evidence, replacement links and task

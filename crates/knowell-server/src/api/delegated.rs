@@ -257,33 +257,28 @@ pub(super) async fn rules(
     .await
 }
 
-/// `GET /api/v1/profiles`.
+/// `GET /api/v1/profiles`: organization-wide readers only.
 pub(super) async fn profiles(
     State(state): State<AppState>,
     caller: Caller,
 ) -> Result<Json<Value>, ApiError> {
-    read(
-        &state,
-        &caller,
-        Action::ReadCode,
-        EngineRequest::Profiles,
-        Shape::Array,
-    )
-    .await
+    caller.require(&state, Action::ReadCode, Resource::Organization)?;
+    call(&state, &caller, EngineRequest::Profiles, Shape::Array).await
 }
 
-/// `GET /api/v1/profiles/{id}/switch-estimate`.
+/// `GET /api/v1/profiles/{id}/switch-estimate`: organization-wide readers only.
 pub(super) async fn switch_estimate(
     State(state): State<AppState>,
     caller: Caller,
     ApiPath(id): ApiPath<String>,
 ) -> Result<Json<Value>, ApiError> {
+    caller.require(&state, Action::ReadCode, Resource::Organization)?;
     SwitchRequest {
         to_profile_id: id.clone(),
     }
     .validate()?;
     let request = EngineRequest::SwitchEstimate { to_profile_id: id };
-    read(&state, &caller, Action::ReadCode, request, Shape::Object).await
+    call(&state, &caller, request, Shape::Object).await
 }
 
 /// `POST /api/v1/profiles/switch`: organization administrators only;
@@ -304,19 +299,13 @@ pub(super) async fn start_switch(
     Ok((StatusCode::ACCEPTED, Json(value)).into_response())
 }
 
-/// `GET /api/v1/quality/reports`.
+/// `GET /api/v1/quality/reports`: organization-wide readers only.
 pub(super) async fn eval_reports(
     State(state): State<AppState>,
     caller: Caller,
 ) -> Result<Json<Value>, ApiError> {
-    read(
-        &state,
-        &caller,
-        Action::ReadCode,
-        EngineRequest::EvalReports,
-        Shape::Array,
-    )
-    .await
+    caller.require(&state, Action::ReadCode, Resource::Organization)?;
+    call(&state, &caller, EngineRequest::EvalReports, Shape::Array).await
 }
 
 /// `GET /api/v1/usage?days=` query.

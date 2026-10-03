@@ -63,7 +63,8 @@ or session cookie; cookie-authenticated non-GET requests also need an allowed `O
 | POST | `/api/v1/search` | `read_code` pre-check | engine |
 | GET | `/api/v1/graph?mode=&parent=`, `/graph/insights` | `read_code` pre-check | engine |
 | POST | `/api/v1/graph/trace`, `/graph/impact`, `/context` | `read_code` pre-check | engine |
-| GET | `/api/v1/domains`, `/glossary`, `/rules`, `/profiles`, `/profiles/{id}/switch-estimate`, `/quality/reports` | `read_code` pre-check | engine |
+| GET | `/api/v1/domains`, `/glossary`, `/rules` | `read_code` pre-check | engine |
+| GET | `/api/v1/profiles`, `/profiles/{id}/switch-estimate`, `/quality/reports` | org-wide `read_code` before profile-id validation | engine |
 | GET | `/api/v1/memory`, `/tasks` | `read_memory` pre-check | engine |
 | POST | `/api/v1/memory/{id}/decision` | `accept_memory` pre-check (engine authorizes the record's scope and audits) | engine |
 | POST | `/api/v1/profiles/switch` | org-wide `manage_providers` (audited) → 202 | engine |
@@ -77,6 +78,12 @@ The pre-check (`Caller::precheck`) applies what is known without the concrete re
 the agent action ceiling, the token's scope and a non-empty visibility. The engine gets the
 caller's principal, grants and visible projects (`EngineContext`) and filters inside search,
 graph expansion, context packing and memory.
+
+Profile metadata, switch estimates and evaluation reports require an organization
+grant and the read token scope. A project or workspace grant alone cannot authorize
+these reads. The native Engine checks the same organization boundary before selector
+validation or storage/file access. Organization usage, integrations, provider changes
+and Hub administration also retain their action-specific native checks.
 
 Job kinds and payloads (camelCase JSON) for the indexer:
 

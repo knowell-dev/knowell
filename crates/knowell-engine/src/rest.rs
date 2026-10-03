@@ -193,6 +193,26 @@ impl Engine {
         ctx: &EngineContext,
         request: EngineRequest,
     ) -> Result<Value, EngineError> {
+        let organization_action = match &request {
+            EngineRequest::Profiles
+            | EngineRequest::SwitchEstimate { .. }
+            | EngineRequest::EvalReports
+            | EngineRequest::Usage { .. }
+            | EngineRequest::Integrations => Some(Action::ReadCode),
+            EngineRequest::StartSwitch(_) => Some(Action::ManageProviders),
+            EngineRequest::Admin if self.inner.settings.role == knowell_config::ServerRole::Hub => {
+                Some(Action::ManageUsers)
+            }
+            _ => None,
+        };
+        // Native requests must enforce the same boundary as HTTP before a
+        // selector, stored record or report can reveal organization metadata.
+        if organization_action.is_some_and(|action| !access.allows(action, &Resource::Organization))
+        {
+            return Err(EngineError::Forbidden {
+                message: "organization permission is required for this operation".to_owned(),
+            });
+        }
         match request {
             EngineRequest::HealthDetail => self.rest_health(access).await,
             EngineRequest::Search(request) => self.rest_search(access, request).await,
@@ -229,6 +249,11 @@ impl Engine {
             EngineRequest::StartSwitch(request) => self.rest_start_switch(access, request).await,
             EngineRequest::EvalReports => self.rest_eval_reports(),
             EngineRequest::Usage { days } => {
+                if !(1..=365).contains(&days) {
+                    return Err(EngineError::Invalid {
+                        message: "`days` must be between 1 and 365".to_owned(),
+                    });
+                }
                 Ok(self.inner.usage.report(days, OffsetDateTime::now_utc()))
             }
             EngineRequest::Integrations => Ok(self.rest_integrations()),
