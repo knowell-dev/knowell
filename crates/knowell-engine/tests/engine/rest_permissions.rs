@@ -208,6 +208,7 @@ async fn native_organization_reads_deny_narrow_grants_and_non_read_credentials()
             EngineRequest::EvalReports,
             EngineRequest::Usage { days: 7 },
             EngineRequest::Integrations,
+            EngineRequest::Switches,
         ] {
             forbidden(call(&fixture.engine, &ctx, request).await);
         }
@@ -298,6 +299,19 @@ async fn native_start_switch_requires_org_manage_providers_before_parse_or_store
                 );
             }
             previous = Some(error);
+            // Cancelling and rolling back are management actions too, and
+            // the closed store proves no lookup happened first.
+            for request in [
+                EngineRequest::CancelSwitch {
+                    switch_id: probe.to_owned(),
+                },
+                EngineRequest::RollbackSwitch {
+                    switch_id: probe.to_owned(),
+                },
+            ] {
+                let error = forbidden(call(&fixture.engine, &ctx, request).await);
+                assert_eq!(Some(&error), previous.as_ref());
+            }
         }
     }
     assert_eq!(fixture.engine.indexer().stats(), stats);

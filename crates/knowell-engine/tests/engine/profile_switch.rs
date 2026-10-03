@@ -1,5 +1,6 @@
 //! Stored input formats are part of profile identity before a native switch mutates state.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use knowell_auth::{Grant, GrantSet, Principal, RequestId, ResourceScope, Role, visible_projects};
@@ -7,6 +8,8 @@ use knowell_config::{Origin, ResolvedWorkspace, Sourced, parse_engine};
 use knowell_embed::{AnyEmbedder, FAKE_MODEL, FakeEmbedder, INPUT_FORMAT_VERSION};
 use knowell_engine::Engine;
 use knowell_index::{EmbeddingPlan, Priority, Registration, SyncOutcome};
+use knowell_mcp::tools::{OpenWorkspaceInput, SearchInput};
+use knowell_mcp::{KnowellTools, MatchReason, Target};
 use knowell_server::{EngineContext, EngineError, EngineRequest, MemoryAuditSink, SwitchRequest};
 use knowell_store::embeddings::{self, EmbeddingProfile, NewEmbeddingProfile};
 use knowell_store::{ProfileId, ViewId};
@@ -14,8 +17,8 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::common::{
-    TestDb, Workspace, access, alice, fixture_workspace, git_available, indexer_config, name,
-    require_db,
+    TestDb, Workspace, access, alice, alice_caller, fixture_workspace, git_available,
+    indexer_config, name, require_db,
 };
 
 struct Fixture {
@@ -23,8 +26,33 @@ struct Fixture {
     view: ViewId,
     a: EmbeddingProfile,
     b: EmbeddingProfile,
-    _workspace: Workspace,
-    _data: tempfile::TempDir,
+    /// The configuration the view was indexed with.
+    active: ResolvedWorkspace,
+    workspace: Workspace,
+    data: tempfile::TempDir,
+}
+
+/// The engine with providers `a` (64 dimensions) and `b` (96), as a fresh
+/// process would build it.
+async fn build_engine(db: &TestDb, data: &std::path::Path) -> Engine {
+    let config = parse_engine(&format!(
+        "version = 1\n[providers.a]\nkind = \"ollama\"\nmodel = \"{FAKE_MODEL}\"\n[providers.b]\nkind = \"ollama\"\nmodel = \"{FAKE_MODEL}\"\n"
+    ))
+    .unwrap();
+    Engine::builder(db.store.clone(), indexer_config(data))
+        .engine_config(&config)
+        .embedder(
+            name("a"),
+            Arc::new(AnyEmbedder::Fake(FakeEmbedder::new(64).unwrap())),
+        )
+        .embedder(
+            name("b"),
+            Arc::new(AnyEmbedder::Fake(FakeEmbedder::new(96).unwrap())),
+        )
+        .access(Arc::new(access()))
+        .build()
+        .await
+        .unwrap()
 }
 
 fn configured(workspace: &ResolvedWorkspace, provider: &str, dimensions: u32) -> ResolvedWorkspace {
@@ -72,24 +100,7 @@ async fn fixture(db: &TestDb, active_b: bool) -> Fixture {
     let a_workspace = configured(&workspace.resolved, "a", 64);
     let b_workspace = configured(&workspace.resolved, "b", 96);
     let data = tempfile::tempdir().unwrap();
-    let config = parse_engine(&format!(
-        "version = 1\n[providers.a]\nkind = \"ollama\"\nmodel = \"{FAKE_MODEL}\"\n[providers.b]\nkind = \"ollama\"\nmodel = \"{FAKE_MODEL}\"\n"
-    ))
-    .unwrap();
-    let engine = Engine::builder(db.store.clone(), indexer_config(data.path()))
-        .engine_config(&config)
-        .embedder(
-            name("a"),
-            Arc::new(AnyEmbedder::Fake(FakeEmbedder::new(64).unwrap())),
-        )
-        .embedder(
-            name("b"),
-            Arc::new(AnyEmbedder::Fake(FakeEmbedder::new(96).unwrap())),
-        )
-        .access(Arc::new(access()))
-        .build()
-        .await
-        .unwrap();
+    let engine = build_engine(db, data.path()).await;
 
     // Registration supplies the canonical embed/prepared/parser compound format;
     // the test never invents the supported store profile's version string.
@@ -119,13 +130,15 @@ async fn fixture(db: &TestDb, active_b: bool) -> Fixture {
     assert!(coverage.inputs > 0);
     assert_eq!(coverage.embedded, coverage.inputs);
     assert!(coverage.complete);
+    let active = active.clone();
     Fixture {
         engine,
         view,
         a,
         b,
-        _workspace: workspace,
-        _data: data,
+        active,
+        workspace,
+        data,
     }
 }
 
@@ -322,6 +335,8 @@ async fn unsupported_input_formats_fail_before_profile_switch_mutation() {
         json!(status.active_commit),
         active["status"]["active_commit"]
     );
+    // The old profile keeps serving, complete, until the target covers the
+    // view; the stored switch reports the target's progress.
     let coverage = fixture
         .engine
         .indexer()
@@ -329,9 +344,27 @@ async fn unsupported_input_formats_fail_before_profile_switch_mutation() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(coverage.profile, fixture.b.id);
-    assert!(!coverage.complete);
-    assert_eq!(coverage.embedded, 0);
+    assert_eq!(coverage.profile, fixture.a.id);
+    assert!(coverage.complete);
+    assert_eq!(coverage.embedded, coverage.inputs);
+    let switches = call(&fixture.engine, &ctx, EngineRequest::Switches)
+        .await
+        .unwrap();
+    // Newest first: this switch, then the one the fixture's configuration
+    // change (from b to a) started while nothing was indexed yet.
+    let switches = switches.as_array().unwrap();
+    assert_eq!(switches.len(), 2);
+    assert_eq!(switches[1]["origin"], "configuration");
+    let ours = &switches[0];
+    assert_eq!(ours["id"], queued["switchId"]);
+    assert_eq!(ours["origin"], "request");
+    assert_eq!(ours["state"], "building");
+    assert_eq!(ours["fromProfileId"], fixture.a.id.to_string());
+    assert_eq!(ours["toProfileId"], fixture.b.id.to_string());
+    assert_eq!(ours["progress"], 0.0);
+    assert_eq!(ours["views"][0]["covered"], false);
+    assert_eq!(ours["views"][0]["embedded"], 0);
+    assert!(ours["views"][0]["inputs"].as_u64().unwrap() > 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -358,9 +391,12 @@ async fn estimates_require_matching_input_formats_even_for_dimension_reduction()
     assert_eq!(supported["fromProfileId"], fixture.b.id.to_string());
     assert_eq!(supported["toProfileId"], fixture.a.id.to_string());
     assert_eq!(supported["affectedProjects"], json!(["billing-api"]));
+    // No vectors are derived from another profile: a target without
+    // vectors for the generation is embedded again, also when it only has
+    // fewer dimensions.
     assert!(supported["chunksToRegenerate"].as_u64().unwrap() > 0);
-    assert_eq!(supported["needsReembedding"], false);
-    assert_eq!(supported["estimatedTokens"], 0);
+    assert_eq!(supported["needsReembedding"], true);
+    assert!(supported["estimatedTokens"].as_u64().unwrap() > 0);
     assert!(!cannot_start(&supported));
     for profile in unsupported {
         assert_eq!(profile.provider, fixture.a.provider);
@@ -396,4 +432,199 @@ async fn estimates_require_matching_input_formats_even_for_dimension_reduction()
     assert_eq!(snapshot(&db).await, before);
     assert_eq!(runtime(&fixture, &ctx).await, active);
     assert_eq!(fixture.engine.indexer().stats(), stats);
+}
+
+/// Embedding profile names of the semantic matches of a search.
+async fn semantic_profiles(engine: &Engine, target: Target) -> BTreeSet<String> {
+    let found = engine
+        .search(
+            &alice_caller(),
+            SearchInput {
+                target,
+                query: "how is a customer subscription cancelled".to_owned(),
+                ..SearchInput::default()
+            },
+        )
+        .await
+        .unwrap();
+    found
+        .hits
+        .iter()
+        .flat_map(|hit| hit.evidence.why.iter())
+        .filter_map(|why| match why {
+            MatchReason::Semantic { profile, .. } => Some(profile.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn workspace_target(fixture: &Fixture) -> Target {
+    Target::workspace(fixture.active.name.clone(), Vec::new())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn switches_serve_one_profile_at_a_time_survive_restarts_and_roll_back() {
+    if !git_available() {
+        return;
+    }
+    let db = require_db!();
+    let fixture = fixture(&db, false).await;
+    let ctx = owner();
+    let (a, b) = (fixture.a.name.to_string(), fixture.b.name.to_string());
+    let only = |name: &str| BTreeSet::from([name.to_owned()]);
+    let opened = fixture
+        .engine
+        .open_workspace(&alice_caller(), OpenWorkspaceInput::default())
+        .await
+        .unwrap();
+    let old_context = Target::context(opened.context_id);
+    assert_eq!(
+        semantic_profiles(&fixture.engine, workspace_target(&fixture)).await,
+        only(&a)
+    );
+
+    // Start: the old profile keeps answering until the target is built.
+    let started = call(
+        &fixture.engine,
+        &ctx,
+        EngineRequest::StartSwitch(SwitchRequest {
+            to_profile_id: fixture.b.id.to_string(),
+        }),
+    )
+    .await
+    .unwrap();
+    let switch_id = started["switchId"].as_str().unwrap().to_owned();
+    assert_eq!(
+        semantic_profiles(&fixture.engine, workspace_target(&fixture)).await,
+        only(&a)
+    );
+    fixture.engine.indexer().run_until_idle().await.unwrap();
+
+    // Flipped: new searches use the target; a context opened before the
+    // switch keeps the profile it was opened with.
+    assert_eq!(
+        semantic_profiles(&fixture.engine, workspace_target(&fixture)).await,
+        only(&b)
+    );
+    assert_eq!(
+        semantic_profiles(&fixture.engine, old_context.clone()).await,
+        only(&a)
+    );
+    let listed = call(&fixture.engine, &ctx, EngineRequest::Switches)
+        .await
+        .unwrap();
+    assert_eq!(listed[0]["state"], "active");
+    assert_eq!(listed[0]["progress"], 1.0);
+    assert!(listed[0]["reversibleUntil"].is_string());
+
+    // Roll back: the old vectors still cover the generation, so it is
+    // immediate and sends nothing to a provider.
+    let calls = fixture.engine.indexer().stats().embedding_calls;
+    let reverse = call(
+        &fixture.engine,
+        &ctx,
+        EngineRequest::RollbackSwitch {
+            switch_id: switch_id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(reverse["state"], "active");
+    assert_eq!(reverse["rollbackOf"], switch_id.as_str());
+    assert_eq!(fixture.engine.indexer().stats().embedding_calls, calls);
+    assert_eq!(
+        semantic_profiles(&fixture.engine, workspace_target(&fixture)).await,
+        only(&a)
+    );
+    let listed = call(&fixture.engine, &ctx, EngineRequest::Switches)
+        .await
+        .unwrap();
+    assert_eq!(listed[1]["id"], switch_id.as_str());
+    assert_eq!(listed[1]["state"], "rolled-back");
+    // A switch that ended cannot be rolled back again or cancelled.
+    for request in [
+        EngineRequest::RollbackSwitch {
+            switch_id: switch_id.clone(),
+        },
+        EngineRequest::CancelSwitch {
+            switch_id: switch_id.clone(),
+        },
+    ] {
+        assert!(matches!(
+            call(&fixture.engine, &ctx, request).await,
+            Err(EngineError::Invalid { .. })
+        ));
+    }
+
+    // A commit, then a switch the process does not finish: a fresh engine
+    // resumes it from the store and flips.
+    let note = fixture
+        .workspace
+        .project_dir("billing-api")
+        .join("switch-note.md");
+    std::fs::write(
+        &note,
+        "# Switch note\n\nSynthetic text added before a restart.\n",
+    )
+    .unwrap();
+    fixture
+        .workspace
+        .commit_all("billing-api", "add a note before the restart");
+    fixture
+        .engine
+        .indexer()
+        .index_workspace(&fixture.active, Priority::Interactive)
+        .await
+        .unwrap();
+    let pending = call(
+        &fixture.engine,
+        &ctx,
+        EngineRequest::StartSwitch(SwitchRequest {
+            to_profile_id: fixture.b.id.to_string(),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(pending["state"], "building");
+    assert_eq!(pending["jobs"].as_array().unwrap().len(), 1);
+    let Fixture {
+        engine,
+        active,
+        data,
+        workspace: _workspace,
+        ..
+    } = fixture;
+    drop(engine);
+    let restarted = build_engine(&db, data.path()).await;
+    restarted.add_workspace(&active).await.unwrap();
+    restarted
+        .indexer()
+        .index_workspace(&active, Priority::Interactive)
+        .await
+        .unwrap();
+    assert_eq!(
+        semantic_profiles(
+            &restarted,
+            Target::workspace(active.name.clone(), Vec::new())
+        )
+        .await,
+        only(&b)
+    );
+    let listed = call(&restarted, &ctx, EngineRequest::Switches)
+        .await
+        .unwrap();
+    assert_eq!(listed[0]["id"], pending["switchId"]);
+    assert_eq!(listed[0]["state"], "active");
+    // Unknown and malformed switch ids are not found.
+    for id in [Uuid::now_v7().to_string(), "not-a-switch".to_owned()] {
+        assert!(matches!(
+            call(
+                &restarted,
+                &ctx,
+                EngineRequest::CancelSwitch { switch_id: id }
+            )
+            .await,
+            Err(EngineError::NotFound { .. })
+        ));
+    }
 }

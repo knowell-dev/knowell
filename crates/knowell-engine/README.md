@@ -141,8 +141,10 @@ Shapes follow `panel/src/lib/api/types.ts`:
 | `Memory`, `DecideMemory` | `MemoryRecord[]` / `MemoryRecord` (`stillValid` compares evidence hashes with the active view); accepting a proposal tagged `supersedes:<id>` supersedes that record |
 | `Tasks` | `TaskRecord[]` (`changedSinceCheckpoint` = projects whose commit moved) |
 | `Rules` | `ArchRule[]` from records tagged `rule` (no architecture-rule engine yet: `violations` empty) |
-| `Profiles` | `EmbeddingProfile[]` from the store (`provider` is the stored kind, e.g. `fake`) |
-| `SwitchEstimate` | `SwitchEstimate`: chunks × bytes of the affected projects, tokens ≈ bytes/4, cost = tokens × `prices_usd_per_million_tokens[provider]` (µUSD), disk = chunks × dims × 2 B; duration not measured (0, with a warning) |
+| `Profiles` | `EmbeddingProfile[]` from the store (`provider` is the stored kind, e.g. `fake`); `active` when a visible project's view serves it; `switch` is the state and progress of the newest switch to it |
+| `SwitchEstimate` | `SwitchEstimate`: chunks × bytes of the affected projects whose pinned generation the target does not cover yet (no vectors are derived from another profile), tokens ≈ bytes/4, cost = tokens × `prices_usd_per_million_tokens[provider]` (µUSD), disk = chunks × dims × 2 B; duration not measured (0, with a warning) |
+| `Switches` | `ProfileMigration[]` from the stored switches, newest first, with origin, requester, member views and their coverage, failures, activation time and `reversibleUntil` |
+| `CancelSwitch`, `RollbackSwitch` | the cancelled switch / the reverse switch (see below) |
 | `EvalReports` | `EvalReport[]` from `*.json` reports in `eval_reports_dir` |
 | `Usage` | `UsageReport` from the stored hourly MCP usage plus calls not yet flushed (every `usage_flush_interval`, default 5 s, and by `Engine::flush_usage` at shutdown); latency percentiles are histogram bucket bounds (at most 25 % high); each agent label counts as one session |
 | `Integrations` | `IntegrationsStatus` (MCP status and `lastCallAt` from stored and buffered usage; agent and webhook checks belong to the CLI/server: empty) |
@@ -150,8 +152,9 @@ Shapes follow `panel/src/lib/api/types.ts`:
 | `Domains`, `Glossary` | from `EngineSettings::domains` / `glossary`; empty arrays when none are configured |
 
 Native REST dispatch requires organization `ReadCode` for profiles, switch estimates,
-evaluation reports, usage and integrations before selector validation or I/O.
-`StartSwitch` requires organization `ManageProviders`; Hub administration requires
+switch lists, evaluation reports, usage and integrations before selector validation or
+I/O. `StartSwitch`, `CancelSwitch` and `RollbackSwitch` require organization
+`ManageProviders`; Hub administration requires
 organization `ManageUsers`. Grants, token scopes and the agent action ceiling apply.
 Non-Hub administration still returns its constant unavailable response. Usage periods
 are validated as 1–365 days after authorization, before date arithmetic.
@@ -165,19 +168,24 @@ Engine-defined bodies:
   `project/…` target).
 - `Context` (`POST /context`) → the `build_context` output.
 - `StartSwitch` (`POST /profiles/switch`, 202) → `{switchId, fromProfileId, toProfileId,
-  views, jobs, startedAt, state: "building"}`. The workspaces are re-registered with the
-  target profile and the affected views are rebuilt in the background. Semantic search
-  selects a profile whose active index generation covers the pinned source generation;
-  source activation can precede embedding completion and therefore report a coverage
-  gap. `Profiles` shows process-local `switch.progress`; seamless restart-safe switching
-  and rollback remain open.
+  views, jobs, startedAt, state, switches}`: one stored switch per workspace for the
+  visible projects that do not serve the target (`knowell_index::Indexer::start_switch`).
   The target must match a configured embedder's provider, model, dimensions and complete
-  embedding/prepared/parser input format before any workspace or job changes. Unsupported
-  formats are rejected; estimates warn that the switch cannot start. A format change
-  requires re-embedding even when the model is unchanged and dimensions decrease.
-  The existing same-format reduction estimate does not guarantee a provider-free switch:
-  missing inputs are embedded under the target profile; vector truncation and
-  normalization are not implemented by this switch path.
+  embedding/prepared/parser input format before anything is stored; unsupported formats
+  are rejected with one static message, and estimates warn that the switch cannot start.
+  While it builds, T2 builds the old and the target profile, so the old one keeps
+  answering every query; once the target covers every member view's active generation,
+  one transaction makes it serve all of them. The switch is stored: a restarted engine
+  resumes it when it indexes. A context pins the profile its views served when it was
+  opened, so an open context never changes profile mid-task, and an old generation is
+  searched through its retired (still complete) vector index generation.
+- `CancelSwitch` (`POST /profiles/switches/{id}/cancel`) stops a building switch; the old
+  profile keeps serving. `RollbackSwitch` (`POST /profiles/switches/{id}/rollback`, 202)
+  starts the reverse switch within the retention (7 days); when the old vectors still
+  cover the active generations it activates at once without provider calls.
+- No vectors are derived from another profile: a target without vectors for a
+  generation is embedded again, also for a dimension reduction (truncation and
+  normalization are not implemented).
 
 ## Evaluation hook
 
@@ -243,7 +251,7 @@ CLI opens this catalogue without a workspace or provider credentials.
 - Lexical search serves only the active generation of a view; a context pinned before an
   activation reports `lexical: … call open_workspace again` instead of using another
   generation.
-- Profile switch records are in process memory. Tool usage not yet flushed (at most
+- Tool usage not yet flushed (at most
   `usage_flush_interval`) is lost if the process crashes; provider token spend is not
   recorded yet (`spendUsdMicros` is 0).
 - `history` has no git log or blame (knowell-source has no reader for them).

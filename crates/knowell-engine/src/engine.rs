@@ -108,8 +108,6 @@ pub(crate) struct Inner {
     /// registration ever named (a switched-away profile keeps serving the
     /// generations its vectors cover).
     pub(crate) profile_providers: RwLock<BTreeMap<ProfileId, Name>>,
-    /// Profile switches started by this process.
-    pub(crate) switches: Mutex<Vec<crate::rest::SwitchRecord>>,
 }
 
 /// Builds an [`Engine`]: the indexer, the embedders, the workspaces and the
@@ -257,7 +255,6 @@ impl EngineBuilder {
             usage: UsageRecorder::default(),
             overlay_generation: AtomicU64::new(0),
             profile_providers: RwLock::new(BTreeMap::new()),
-            switches: Mutex::new(Vec::new()),
             settings,
         });
         let engine = Engine { inner };

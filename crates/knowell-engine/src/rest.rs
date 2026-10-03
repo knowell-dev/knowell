@@ -9,15 +9,14 @@
 //! them.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, PoisonError};
+use std::sync::Arc;
 use std::time::Instant;
 
 use knowell_auth::{Action, AuditEvent, Resource};
-use knowell_config::{Origin, ResolvedWorkspace, Sourced};
 use knowell_core::{Name, RepoPath};
 use knowell_embed::Embedder;
 use knowell_graph::{InsightCode, InsightConfig};
-use knowell_index::{EmbeddingPlan, Priority, SyncOutcome};
+use knowell_index::{EmbeddingPlan, IndexError};
 use knowell_knowledge::{Actor, KnowledgeRecord, RecordId, RecordKind, RecordState, Rights, Scope};
 use knowell_mcp::tools::{
     AnalyzeImpactInput, BuildContextInput, ChangeSubject, FlowDirection, TraceFlowInput,
@@ -29,7 +28,10 @@ use knowell_server::{
     MemoryDecision, SearchRequest, SwitchRequest, TraceDirection, TraceRequest,
 };
 use knowell_store::embeddings::{self, EmbeddingProfile};
-use knowell_store::{ProfileId, audit as store_audit, identity};
+use knowell_store::switches::ProfileSwitch;
+use knowell_store::{
+    ProfileId, ProfileSwitchId, ProfileSwitchState, ViewId, audit as store_audit, identity,
+};
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -50,18 +52,74 @@ type Targets = Vec<(Arc<WorkspaceEntry>, Option<BTreeSet<Name>>)>;
 /// Glossary terms: domain, synonyms and code names per term.
 type GlossaryTerms = BTreeMap<String, (Option<Name>, Vec<Value>, Vec<String>)>;
 
-/// A blue/green profile switch started by this process.
-#[derive(Debug, Clone)]
-pub(crate) struct SwitchRecord {
-    pub(crate) id: Uuid,
-    pub(crate) from: Option<ProfileId>,
-    pub(crate) to: ProfileId,
-    pub(crate) views: Vec<knowell_store::ViewId>,
-    pub(crate) started: OffsetDateTime,
-}
-
 fn iso(at: OffsetDateTime) -> Value {
     at.format(&Rfc3339).map_or(Value::Null, Value::String)
+}
+
+/// How long after activation a requested profile switch can be rolled
+/// back: 7 days, in seconds.
+pub(crate) const SWITCH_RETENTION_SECONDS: u64 = 7 * 24 * 60 * 60;
+
+/// The panel's `ProfileMigration` state of a stored switch.
+fn migration_state(state: ProfileSwitchState) -> &'static str {
+    match state {
+        ProfileSwitchState::Building => "building",
+        ProfileSwitchState::Active => "active",
+        ProfileSwitchState::Cancelled => "cancelled",
+        ProfileSwitchState::RolledBack => "rolled-back",
+    }
+}
+
+/// The audit label of who asked for a switch: the caller's label with
+/// anything outside `[A-Za-z0-9._:/@-]` replaced, at most 256 bytes.
+fn requester(access: &Access) -> String {
+    let label: String = access
+        .label()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || "._:/@-".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(256)
+        .collect();
+    if label.is_empty() {
+        "unknown".to_owned()
+    } else {
+        label
+    }
+}
+
+fn switch_id(id: &str) -> Result<ProfileSwitchId, EngineError> {
+    Uuid::parse_str(id)
+        .map(ProfileSwitchId)
+        .map_err(|_| EngineError::NotFound {
+            what: "profile switch".to_owned(),
+        })
+}
+
+/// Maps an indexer failure of a switch request to a REST error (messages
+/// carry no secret values).
+fn index_err(error: IndexError) -> EngineError {
+    match error {
+        IndexError::Invalid { reason, .. } => EngineError::Invalid { message: reason },
+        IndexError::Store(knowell_store::StoreError::InvalidInput(message)) => {
+            EngineError::Invalid { message }
+        }
+        IndexError::Store(knowell_store::StoreError::NotFound { entity, .. }) => {
+            EngineError::NotFound {
+                what: entity.to_owned(),
+            }
+        }
+        IndexError::Store(knowell_store::StoreError::AlreadyExists { .. }) => {
+            EngineError::Conflict {
+                message: "another profile switch is building in this workspace; cancel it or wait for it to finish".to_owned(),
+            }
+        }
+        other => internal(other.to_string()),
+    }
 }
 
 fn internal(message: impl Into<String>) -> EngineError {
@@ -199,7 +257,10 @@ impl Engine {
             | EngineRequest::EvalReports
             | EngineRequest::Usage { .. }
             | EngineRequest::Integrations => Some(Action::ReadCode),
-            EngineRequest::StartSwitch(_) => Some(Action::ManageProviders),
+            EngineRequest::StartSwitch(_)
+            | EngineRequest::CancelSwitch { .. }
+            | EngineRequest::RollbackSwitch { .. } => Some(Action::ManageProviders),
+            EngineRequest::Switches => Some(Action::ReadCode),
             EngineRequest::Admin if self.inner.settings.role == knowell_config::ServerRole::Hub => {
                 Some(Action::ManageUsers)
             }
@@ -247,6 +308,11 @@ impl Engine {
                 self.rest_switch_estimate(access, &to_profile_id).await
             }
             EngineRequest::StartSwitch(request) => self.rest_start_switch(access, request).await,
+            EngineRequest::Switches => self.rest_switches().await,
+            EngineRequest::CancelSwitch { switch_id } => self.rest_cancel_switch(&switch_id).await,
+            EngineRequest::RollbackSwitch { switch_id } => {
+                self.rest_rollback_switch(access, &switch_id).await
+            }
             EngineRequest::EvalReports => self.rest_eval_reports(),
             EngineRequest::Usage { days } => {
                 if !(1..=365).contains(&days) {
@@ -1317,42 +1383,115 @@ impl Engine {
             .map_err(store_err)
     }
 
-    /// The profile each visible project embeds with now.
-    fn active_profiles(&self, access: &Access) -> BTreeMap<ProfileId, Vec<(Name, Name)>> {
-        let mut out: BTreeMap<ProfileId, Vec<(Name, Name)>> = BTreeMap::new();
+    /// The profile each visible project's view serves (`None`: none), as
+    /// (workspace, project, view, profile), read in one statement. A view the
+    /// store has no record of (never registered with serving profiles) serves
+    /// what its configuration plans.
+    async fn visible_serving(
+        &self,
+        access: &Access,
+    ) -> Result<Vec<(Name, Name, ViewId, Option<ProfileId>)>, EngineError> {
+        let mut projects = Vec::new();
         for workspace in self.all_workspaces() {
             for project in &workspace.projects {
-                if !access.reads_project(&workspace.name, &project.name) {
-                    continue;
-                }
-                if let EmbeddingPlan::Embed { profile, .. } = &project.embedding {
-                    out.entry(*profile)
-                        .or_default()
-                        .push((workspace.name.clone(), project.name.clone()));
+                if access.reads_project(&workspace.name, &project.name) {
+                    projects.push((workspace.name.clone(), project.clone()));
                 }
             }
         }
-        out
+        let views: Vec<ViewId> = projects.iter().map(|(_, p)| p.view).collect();
+        let mut conn = self.inner.store.acquire().await.map_err(store_err)?;
+        let rows = knowell_store::switches::view_embeddings(&mut conn, &views)
+            .await
+            .map_err(store_err)?;
+        Ok(projects
+            .into_iter()
+            .map(|(workspace, project)| {
+                let serving = match rows.get(&project.view) {
+                    Some(row) => row.serving,
+                    None => match &project.embedding {
+                        EmbeddingPlan::Embed { profile, .. } => Some(*profile),
+                        _ => None,
+                    },
+                };
+                (workspace, project.name, project.view, serving)
+            })
+            .collect())
+    }
+
+    /// The registered switches, newest first; none before a workspace is
+    /// registered.
+    async fn stored_switches(&self) -> Result<Vec<ProfileSwitch>, EngineError> {
+        match self.inner.indexer.switches(200).await {
+            Ok(switches) => Ok(switches),
+            Err(IndexError::Invalid { .. }) => Ok(Vec::new()),
+            Err(error) => Err(index_err(error)),
+        }
+    }
+
+    /// A switch as the panel's `ProfileMigration` (plus its details).
+    async fn switch_json(&self, switch: &ProfileSwitch) -> Result<Value, EngineError> {
+        let progress = self
+            .inner
+            .indexer
+            .switch_progress(switch)
+            .await
+            .map_err(index_err)?;
+        let covered = progress.iter().filter(|p| p.covered).count();
+        let fraction = if progress.is_empty() {
+            1.0
+        } else {
+            covered as f64 / progress.len() as f64
+        };
+        let mut value = json!({
+            "id": switch.id.to_string(),
+            "fromProfileId": switch.from.map_or_else(String::new, |p| p.to_string()),
+            "toProfileId": switch.to.to_string(),
+            "state": migration_state(switch.state),
+            "progress": fraction,
+            "origin": switch.origin.as_str(),
+            "requestedBy": switch.requested_by,
+            "views": progress.iter().map(|p| json!({
+                "viewId": p.view.to_string(),
+                "activeGeneration": p.active_generation,
+                "covered": p.covered,
+                "inputs": p.inputs,
+                "embedded": p.embedded,
+                "failure": p.failure,
+            })).collect::<Vec<_>>(),
+            "createdAt": iso(switch.created_at),
+        });
+        if let Some(map) = value.as_object_mut() {
+            for (key, at) in [
+                ("activatedAt", switch.activated_at),
+                ("reversibleUntil", switch.reversible_until),
+                ("finishedAt", switch.finished_at),
+            ] {
+                if let Some(at) = at {
+                    map.insert(key.to_owned(), iso(at));
+                }
+            }
+            if let Some(original) = switch.rollback_of {
+                map.insert("rollbackOf".to_owned(), json!(original.to_string()));
+            }
+        }
+        Ok(value)
     }
 
     async fn rest_profiles(&self, access: &Access) -> Result<Value, EngineError> {
-        let active = self.active_profiles(access);
-        let providers = self
-            .inner
-            .profile_providers
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        let switches = self
-            .inner
-            .switches
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
+        let serving: BTreeSet<ProfileId> = self
+            .visible_serving(access)
+            .await?
+            .into_iter()
+            .filter_map(|(_, _, _, profile)| profile)
+            .collect();
+        let switches = self.stored_switches().await?;
         let mut out = Vec::new();
         for profile in self.profiles().await? {
-            let provider_name = providers.get(&profile.id);
-            let cloud = provider_name.is_some_and(|p| self.provider_is_cloud(p));
+            let provider_name = self.provider_for(&profile);
+            let cloud = provider_name
+                .as_ref()
+                .is_some_and(|p| self.provider_is_cloud(p));
             let mut value = json!({
                 "id": profile.id.to_string(),
                 "name": profile.name,
@@ -1364,26 +1503,29 @@ impl Engine {
                 "budgets": {},
                 "spentThisMonthUsdMicros": 0,
                 "measured": Value::Null,
-                "active": active.contains_key(&profile.id),
+                "active": serving.contains(&profile.id),
             });
             if let Some(map) = value.as_object_mut() {
                 if let Some(key) = provider_name
+                    .as_ref()
                     .and_then(|p| self.inner.providers.get(p))
                     .and_then(|c| c.api_key.as_ref())
                 {
                     // A reference such as `env:NAME`, never a value.
                     map.insert("apiKey".to_owned(), json!(key.to_string()));
                 }
-                if let Some(switch) = switches.iter().rev().find(|s| s.to == profile.id) {
-                    let progress = self.switch_progress(switch).await?;
-                    let state = if progress >= 1.0 {
-                        "active"
-                    } else {
-                        "building"
-                    };
+                // The newest switch to this profile that did not end unused.
+                if let Some(switch) = switches
+                    .iter()
+                    .find(|s| s.to == profile.id && s.state != ProfileSwitchState::Cancelled)
+                {
+                    let described = self.switch_json(switch).await?;
                     map.insert(
                         "switch".to_owned(),
-                        json!({"state": state, "progress": progress}),
+                        json!({
+                            "state": described.get("state"),
+                            "progress": described.get("progress"),
+                        }),
                     );
                 }
             }
@@ -1392,32 +1534,9 @@ impl Engine {
         Ok(Value::Array(out))
     }
 
-    /// Share of a switch's views whose active generation is covered by the
-    /// target profile's vectors.
-    async fn switch_progress(&self, switch: &SwitchRecord) -> Result<f64, EngineError> {
-        if switch.views.is_empty() {
-            return Ok(1.0);
-        }
-        let mut conn = self.inner.store.acquire().await.map_err(store_err)?;
-        let mut done = 0usize;
-        for view in &switch.views {
-            let active = knowell_store::views::get_view(&mut conn, *view)
-                .await
-                .map_err(store_err)?
-                .and_then(|v| v.active_generation);
-            let covered = embeddings::active_index_generation(&mut conn, *view, switch.to)
-                .await
-                .map_err(store_err)?
-                .is_some_and(|g| Some(g.view_generation) == active);
-            if covered {
-                done = done.saturating_add(1);
-            }
-        }
-        Ok(done as f64 / switch.views.len() as f64)
-    }
-
-    /// The engine provider whose embedder produces `profile`'s vectors.
-    fn provider_for(&self, profile: &EmbeddingProfile) -> Option<Name> {
+    /// The engine provider whose embedder produces `profile`'s vectors,
+    /// matched by identity (provider kind, model, dimensions, input format).
+    pub(crate) fn provider_for(&self, profile: &EmbeddingProfile) -> Option<Name> {
         self.inner.embedders.iter().find_map(|(name, embedder)| {
             let p = embedder.profile();
             let input_format_version = format!(
@@ -1444,13 +1563,17 @@ impl Engine {
             .iter()
             .find(|p| p.id.0 == to_id)
             .ok_or_else(not_found)?;
-        let active = self.active_profiles(access);
-        let from = active
+        // The switch starts from the profile most visible views serve.
+        let mut served: BTreeMap<ProfileId, usize> = BTreeMap::new();
+        for (_, _, _, profile) in self.visible_serving(access).await? {
+            if let Some(profile) = profile.filter(|p| *p != target.id) {
+                *served.entry(profile).or_default() += 1;
+            }
+        }
+        let from = served
             .iter()
-            .filter(|(id, _)| **id != target.id)
-            .max_by_key(|(_, projects)| projects.len())
+            .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
             .map(|(id, _)| *id);
-        let from_profile = from.and_then(|id| profiles.iter().find(|p| p.id == id));
         let mut affected = Vec::new();
         let mut chunks: u64 = 0;
         let mut bytes: u64 = 0;
@@ -1458,11 +1581,27 @@ impl Engine {
         for workspace in self.all_workspaces() {
             let pinned = self.rest_pin(access, &workspace.name).await?;
             for project in pinned.projects.values() {
-                let uses_target = matches!(&project.entry.embedding, EmbeddingPlan::Embed { profile, .. } if *profile == target.id);
-                if uses_target {
+                if project.serving_profile == Some(target.id) {
                     continue;
                 }
                 affected.push(project.entry.name.to_string());
+                // Vectors the target already has for the pinned generation
+                // (an earlier switch, a rollback) are reused, not regenerated.
+                let mut conn = self.inner.store.acquire().await.map_err(store_err)?;
+                let covered = embeddings::index_generation_at(&mut conn, project.pin(), target.id)
+                    .await
+                    .map_err(store_err)?
+                    .is_some_and(|ig| {
+                        matches!(
+                            ig.state,
+                            knowell_store::GenerationState::Active
+                                | knowell_store::GenerationState::Retired
+                        )
+                    });
+                drop(conn);
+                if covered {
+                    continue;
+                }
                 let snapshot = self.snapshot_of(project).await.map_err(tool_to_rest)?;
                 for list in snapshot.chunks.values() {
                     chunks = chunks.saturating_add(u64::try_from(list.len()).unwrap_or(0));
@@ -1480,15 +1619,9 @@ impl Engine {
                 }
             }
         }
-        let needs_reembedding = match from_profile {
-            Some(from) => {
-                !(from.provider == target.provider
-                    && from.model == target.model
-                    && from.input_format_version == target.input_format_version
-                    && target.dimensions <= from.dimensions)
-            }
-            None => true,
-        };
+        // Vectors are never derived from another profile's here: every
+        // chunk the target does not cover is embedded again.
+        let needs_reembedding = chunks > 0;
         let tokens = bytes.div_ceil(4);
         let price = self
             .inner
@@ -1528,6 +1661,10 @@ impl Engine {
         }))
     }
 
+    /// Starts one switch per workspace for the visible projects that do not
+    /// serve the target yet. The old profile keeps serving until the target
+    /// covers every member view; the switch is stored, so it survives a
+    /// restart, and can be rolled back within [`SWITCH_RETENTION_SECONDS`].
     async fn rest_start_switch(
         &self,
         access: &Access,
@@ -1543,101 +1680,82 @@ impl Engine {
             .find(|p| p.id.0 == to_id)
             .ok_or_else(not_found)?
             .clone();
-        let provider = self
-            .provider_for(&target)
-            .ok_or_else(|| EngineError::Invalid {
+        // Checked first, with one static answer: the profile's own embedder
+        // (identity includes the input format) or nothing.
+        if self.provider_for(&target).is_none() {
+            return Err(EngineError::Invalid {
                 message: "no embedder for this profile is configured in the engine".to_owned(),
-            })?;
-        let from = self
-            .active_profiles(access)
-            .into_iter()
-            .filter(|(id, _)| *id != target.id)
-            .max_by_key(|(_, p)| p.len())
-            .map(|(id, _)| id);
-        let mut views = Vec::new();
-        let mut jobs = Vec::new();
-        for workspace in self.all_workspaces() {
-            let mut resolved: ResolvedWorkspace = workspace.resolved.clone();
-            let mut changed = false;
-            for project in &mut resolved.projects {
-                if !access.reads_project(&workspace.name, &project.name) {
-                    continue;
-                }
-                let current = workspace.project(&project.name).map(|p| &p.embedding);
-                if matches!(current, Some(EmbeddingPlan::Embed { profile, .. }) if *profile == target.id)
-                {
-                    continue;
-                }
-                project.embedding.provider = Some(Sourced {
-                    value: provider.clone(),
-                    origin: Origin::Project,
-                });
-                project.embedding.model = Some(Sourced {
-                    value: target.model.clone(),
-                    origin: Origin::Project,
-                });
-                project.embedding.preset = Sourced {
-                    value: knowell_config::EmbeddingPreset::Custom,
-                    origin: Origin::Project,
-                };
-                project.embedding.dimensions = Sourced {
-                    value: target.dimensions,
-                    origin: Origin::Project,
-                };
-                changed = true;
-            }
-            if !changed {
-                continue;
-            }
-            // Re-registering selects the target profile for new builds. Source
-            // activation may precede T2; serving follows each rebuilt view's
-            // actual source generation and vector coverage.
-            let registration = self
-                .add_workspace(&resolved)
-                .await
-                .map_err(EngineError::from)?;
-            for view in &registration.views {
-                if !matches!(&view.embedding, EmbeddingPlan::Embed { profile, .. } if *profile == target.id)
-                {
-                    continue;
-                }
-                views.push(view.view);
-                match self
-                    .inner
-                    .indexer
-                    .rebuild_view(view.view, Priority::Background)
-                    .await
-                    .map_err(|e| internal(e.to_string()))?
-                {
-                    SyncOutcome::Queued { job, .. } => jobs.push(job.to_string()),
-                    SyncOutcome::UpToDate { .. } => {}
-                    SyncOutcome::Failed { reason, .. } => {
-                        tracing::warn!(%reason, "a view could not be queued for the profile switch");
-                    }
-                }
+            });
+        }
+        let mut by_workspace: BTreeMap<Name, Vec<ViewId>> = BTreeMap::new();
+        for (workspace, _, view, serving) in self.visible_serving(access).await? {
+            if serving != Some(target.id) {
+                by_workspace.entry(workspace).or_default().push(view);
             }
         }
-        let record = SwitchRecord {
-            id: Uuid::now_v7(),
-            from,
-            to: target.id,
-            views,
-            started: OffsetDateTime::now_utc(),
+        if by_workspace.is_empty() {
+            return Err(EngineError::Invalid {
+                message: "every visible project already serves this profile".to_owned(),
+            });
+        }
+        let requester = requester(access);
+        let mut started = Vec::new();
+        for views in by_workspace.values() {
+            let (switch, jobs) = self
+                .inner
+                .indexer
+                .start_switch(views, target.id, &requester, SWITCH_RETENTION_SECONDS)
+                .await
+                .map_err(index_err)?;
+            started.push((switch, jobs));
+        }
+        let mut described = Vec::with_capacity(started.len());
+        for (switch, _) in &started {
+            described.push(self.switch_json(switch).await?);
+        }
+        let Some((first, jobs)) = started.first() else {
+            return Err(internal("no profile switch was started"));
         };
-        self.inner
-            .switches
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(record.clone());
         Ok(json!({
-            "switchId": record.id.to_string(),
-            "fromProfileId": record.from.map(|p| p.to_string()),
-            "toProfileId": record.to.to_string(),
-            "views": record.views.iter().map(ToString::to_string).collect::<Vec<_>>(),
-            "jobs": jobs,
-            "startedAt": iso(record.started),
-            "state": "building",
+            "switchId": first.id.to_string(),
+            "fromProfileId": first.from.map(|p| p.to_string()),
+            "toProfileId": first.to.to_string(),
+            "views": first.views.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "jobs": jobs.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "startedAt": iso(first.created_at),
+            "state": migration_state(first.state),
+            "switches": described,
         }))
+    }
+
+    async fn rest_switches(&self) -> Result<Value, EngineError> {
+        let mut out = Vec::new();
+        for switch in self.stored_switches().await? {
+            out.push(self.switch_json(&switch).await?);
+        }
+        Ok(Value::Array(out))
+    }
+
+    async fn rest_cancel_switch(&self, id: &str) -> Result<Value, EngineError> {
+        let id = switch_id(id)?;
+        let switch = self
+            .inner
+            .indexer
+            .cancel_switch(id)
+            .await
+            .map_err(index_err)?;
+        self.switch_json(&switch).await
+    }
+
+    async fn rest_rollback_switch(&self, access: &Access, id: &str) -> Result<Value, EngineError> {
+        let id = switch_id(id)?;
+        let reverse = self
+            .inner
+            .indexer
+            .rollback_switch(id, &requester(access))
+            .await
+            .map_err(index_err)?;
+        self.switch_json(&reverse).await
     }
 
     fn rest_eval_reports(&self) -> Result<Value, EngineError> {

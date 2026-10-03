@@ -147,7 +147,8 @@ async fn a_requested_switch_survives_a_restart_and_rolls_back_without_provider_c
     let started = first
         .start_switch(&[main], narrow, "user:alice", 3600)
         .await
-        .unwrap();
+        .unwrap()
+        .0;
     assert_eq!(started.state, ProfileSwitchState::Building);
     assert_eq!((started.from, started.to), (Some(wide), narrow));
     // Queued, not run: the old profile still serves.
@@ -227,7 +228,8 @@ async fn commits_during_a_switch_keep_the_serving_profile_current_and_outages_ar
     let started = indexer
         .start_switch(&[main], narrow, "user:alice", 3600)
         .await
-        .unwrap();
+        .unwrap()
+        .0;
     drain(&indexer, &db).await;
     assert_eq!(
         indexer.switch(started.id).await.unwrap().unwrap().state,

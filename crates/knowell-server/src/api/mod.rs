@@ -79,6 +79,15 @@ fn api_v1(state: &AppState) -> Router<AppState> {
             get(delegated::switch_estimate),
         )
         .route("/profiles/switch", post(delegated::start_switch))
+        .route("/profiles/switches", get(delegated::switches))
+        .route(
+            "/profiles/switches/{id}/cancel",
+            post(delegated::cancel_switch),
+        )
+        .route(
+            "/profiles/switches/{id}/rollback",
+            post(delegated::rollback_switch),
+        )
         .route("/quality/reports", get(delegated::eval_reports))
         .route("/usage", get(delegated::usage))
         .route("/integrations", get(delegated::integrations))

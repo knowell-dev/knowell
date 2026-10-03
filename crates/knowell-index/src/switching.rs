@@ -26,7 +26,7 @@ use knowell_store::switches::{
 };
 use knowell_store::views::{self, GenerationPin};
 use knowell_store::{
-    GenerationState, JobState, OrganizationId, PgConnection, ProfileId, ProfileSwitchId,
+    GenerationState, JobId, JobState, OrganizationId, PgConnection, ProfileId, ProfileSwitchId,
     StoreError, ViewId, WorkspaceId, jobs,
 };
 use serde::Serialize;
@@ -214,15 +214,15 @@ impl<E: Embedder + 'static> Inner<E> {
     /// live job will build, then activates the switch if it covers every
     /// view. With `retry_failed` (an explicit request, never the periodic
     /// reconciliation, so a permanent provider error is not retried in a
-    /// loop) a failed build of the target is started again. Returns how many
-    /// jobs were queued.
+    /// loop) a failed build of the target is started again. Returns the jobs
+    /// it queued.
     pub(crate) async fn catch_up(
         &self,
         switch: &ProfileSwitch,
         retry_failed: bool,
-    ) -> Result<usize, IndexError> {
+    ) -> Result<Vec<JobId>, IndexError> {
         let mut conn = self.store.acquire().await?;
-        let mut queued = 0;
+        let mut queued = Vec::new();
         for view in &switch.views {
             // Views registered by another process are caught up there.
             if self.context(*view).is_err() {
@@ -287,7 +287,7 @@ impl<E: Embedder + 'static> Inner<E> {
                 jobs::enqueue_scoped(&mut conn, &job, jobs::JobScope::View(*view)).await?;
             self.wake_workers();
             if enqueued.created {
-                queued += 1;
+                queued.push(enqueued.id);
             }
         }
         self.try_activate(&mut conn, switch).await?;
@@ -385,7 +385,8 @@ impl<E: Embedder + 'static> Indexer<E> {
     /// profile) to `to`. While it builds, T2 builds both profiles and the
     /// old one keeps serving; it activates by itself once `to` covers every
     /// view's active generation. A rollback is accepted for
-    /// `retention_seconds` after activation.
+    /// `retention_seconds` after activation. Returns the switch and the
+    /// catch-up jobs it queued.
     ///
     /// # Errors
     /// [`IndexError::Invalid`] when the views are not registered, span
@@ -398,7 +399,7 @@ impl<E: Embedder + 'static> Indexer<E> {
         to: ProfileId,
         requested_by: &str,
         retention_seconds: u64,
-    ) -> Result<ProfileSwitch, IndexError> {
+    ) -> Result<(ProfileSwitch, Vec<JobId>), IndexError> {
         let inner = &self.inner;
         let contexts = views
             .iter()
@@ -469,8 +470,8 @@ impl<E: Embedder + 'static> Indexer<E> {
         )
         .await?;
         drop(conn);
-        inner.catch_up(&switch, true).await?;
-        Ok(self.switch(switch.id).await?.unwrap_or(switch))
+        let jobs = inner.catch_up(&switch, true).await?;
+        Ok((self.switch(switch.id).await?.unwrap_or(switch), jobs))
     }
 
     /// Cancels a building switch; the old profile keeps serving.

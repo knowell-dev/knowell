@@ -436,10 +436,13 @@ or guarantee a billing total.
 - The panel shows dimensions and **measured quality separately**; an unmeasured profile
   gets no quality score.
 - **Profile switches are blue-green:** the new index is built in the background while the
-  old one serves; it activates after quality and coverage checks; it stays reversible for
-  the retention period. The panel first shows affected projects, the amount of data to
-  regenerate, and a cost estimate. Reducing dimensions needs no API call (truncate and
-  normalize); increasing them means re-embedding.
+  old one serves; it activates once it covers every member view's active generation (one
+  transaction moves all of them); it stays reversible for the retention period. Switches
+  and each view's serving profile are stored, so a restart resumes them, and an open
+  context keeps the profile it was opened with. The panel first shows affected projects,
+  the amount of data to regenerate, and a cost estimate. A quality gate before activation
+  and reducing dimensions without an API call (truncate and normalize) are planned; today
+  a target without vectors is embedded.
 - A workspace uses one common profile by default (required for cross-project similarity);
   projects on different profiles are searched separately and merged in ranking.
 
@@ -669,15 +672,17 @@ foreign results. Stored provider/model/dimensions/input-format identity and prec
 registration time do not imply activity, locality, readiness, quality or spending.
 The standalone opener needs engine configuration without a workspace; it may migrate
 and set up organization identity, but constructs no provider clients and registers no
-source or profile. Estimates, switches, rollback and Hub transport remain open.
+source or profile. CLI switch commands and Hub transport remain open; switches are
+available through the engine and REST.
 
 `index` refreshes each selected workspace view, then drains and recovers leases only
 within its frozen registered view scope. Its completion report checks the observed
 commit or directory tree, required tiers and embedding coverage. Missing or superseded
 targets, retry delays and failures produce exit code 1; operational errors produce 2.
 Changed or unavailable content-policy manifests trigger full reconciliation even on an
-unchanged source target. `index --rebuild` explicitly rebuilds an unchanged target when
-the configured embedding profile changes. Local providers currently use their library
+unchanged source target. A changed configured embedding profile starts a blue-green
+switch when the views are indexed (never when they are only registered for a search or
+status); the old profile serves until the new one covers them. Local providers currently use their library
 batch, rate and spending defaults; configurable CLI caps remain open. These local commands
 do not yet implement hub transport. Directory source search remains limited by the
 commit-required MCP evidence schema and reports that missing evidence instead of
@@ -692,7 +697,8 @@ Organization profile metadata, switch estimates, quality reports, usage and inte
 metadata require organization `ReadCode` with the read token scope. Project/workspace
 visibility alone does not authorize these endpoints. Both HTTP handlers and native
 Engine dispatch check before profile selectors, stored metadata or report files are
-processed. Native provider switches require organization `ManageProviders`, and Hub
+processed. Switch lists need the same read access. Native provider switches (start,
+cancel, rollback) require organization `ManageProviders`, and Hub
 administration requires organization `ManageUsers`; the agent action ceiling applies.
 Native usage periods are bounded to 1–365 days after authorization.
 

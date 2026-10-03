@@ -1077,28 +1077,45 @@ impl Engine {
         })
     }
 
-    /// The profile whose active vector index covers exactly the pinned
-    /// generation of `view`: the planned profile first, then any profile a
-    /// registration named before (during a blue/green switch the old
-    /// profile keeps serving the generations its vectors cover).
+    /// The profile the view served when its context was pinned, if that
+    /// profile's vectors cover the pinned generation completely (an index
+    /// generation that is active, or retired by a newer one: its vectors are
+    /// kept). Never another profile in its place.
     async fn serving_profile(&self, view: &PreparedView) -> Result<Option<ProfileId>, String> {
-        let pin = view.pinned.pin();
-        let mut candidates = Vec::new();
-        if let EmbeddingPlan::Embed { profile, .. } = &view.pinned.entry.embedding {
-            candidates.push(*profile);
-        }
-        let known: Vec<ProfileId> = self
+        let Some(profile) = view.pinned.serving_profile else {
+            return Ok(None);
+        };
+        let mut conn = self
+            .inner
+            .store
+            .acquire()
+            .await
+            .map_err(|e| format!("store: {e}"))?;
+        let covered = embeddings::index_generation_at(&mut conn, view.pinned.pin(), profile)
+            .await
+            .map_err(|e| format!("store: {e}"))?
+            .is_some_and(|ig| {
+                matches!(
+                    ig.state,
+                    knowell_store::GenerationState::Active
+                        | knowell_store::GenerationState::Retired
+                )
+            });
+        Ok(covered.then_some(profile))
+    }
+
+    /// The configured provider whose embedder produces `profile` (by
+    /// identity), remembered once found.
+    async fn provider_of(&self, profile: ProfileId) -> Result<Option<Name>, String> {
+        if let Some(known) = self
             .inner
             .profile_providers
             .read()
             .unwrap_or_else(PoisonError::into_inner)
-            .keys()
-            .copied()
-            .collect();
-        for profile in known {
-            if !candidates.contains(&profile) {
-                candidates.push(profile);
-            }
+            .get(&profile)
+            .cloned()
+        {
+            return Ok(Some(known));
         }
         let mut conn = self
             .inner
@@ -1106,16 +1123,21 @@ impl Engine {
             .acquire()
             .await
             .map_err(|e| format!("store: {e}"))?;
-        for profile in candidates {
-            let covered = embeddings::active_index_generation(&mut conn, pin.view, profile)
-                .await
-                .map_err(|e| format!("store: {e}"))?
-                .is_some_and(|g| g.view_generation == pin.generation);
-            if covered {
-                return Ok(Some(profile));
-            }
+        let Some(stored) = embeddings::get_profile(&mut conn, profile)
+            .await
+            .map_err(|e| format!("store: {e}"))?
+        else {
+            return Ok(None);
+        };
+        let found = self.provider_for(&stored);
+        if let Some(name) = &found {
+            self.inner
+                .profile_providers
+                .write()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(profile, name.clone());
         }
-        Ok(None)
+        Ok(found)
     }
 
     /// Vector candidates: one `nearest` search per embedding profile over
@@ -1170,13 +1192,13 @@ impl Engine {
                 notes.push(Degradation::new(Component::Semantic, text));
                 continue;
             };
-            let provider = self
-                .inner
-                .profile_providers
-                .read()
-                .unwrap_or_else(PoisonError::into_inner)
-                .get(&profile)
-                .cloned();
+            let provider = match self.provider_of(profile).await {
+                Ok(provider) => provider,
+                Err(reason) => {
+                    failures.push(reason);
+                    continue;
+                }
+            };
             let Some(provider) = provider else {
                 notes.push(Degradation::new(
                     Component::Semantic,
@@ -1248,12 +1270,8 @@ impl Engine {
         limit: usize,
     ) -> Result<Vec<Candidate>, String> {
         let provider = self
-            .inner
-            .profile_providers
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&profile_id)
-            .cloned()
+            .provider_of(profile_id)
+            .await?
             .ok_or_else(|| "the embedding profile has no provider".to_owned())?;
         let Some(embedder) = self.inner.embedders.get(&provider) else {
             return Err(format!(

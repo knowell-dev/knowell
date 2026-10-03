@@ -45,8 +45,12 @@ dependencies; completion of the whole is defined by the acceptance scenarios at 
   and job recovery scoped. Hub transport and the other planned terminal commands remain
   open; this does not complete the milestone.
 - **Profile catalogue:** standalone list/show reads registered metadata without a
-  provider connection or workspace. Activation, estimates, switching, rollback and
-  measured real-embedding quality remain open.
+  provider connection or workspace.
+- **Profile switches:** blue-green switches are stored with each view's serving profile:
+  both profiles are built while one builds, all member views flip in one transaction,
+  open contexts keep their profile, restarts resume, and rollbacks within the retention
+  reuse the old vectors. CLI switch commands, a quality gate, derived (truncated)
+  profiles and measured real-embedding quality remain open.
 
 ### M4: Graph and contracts (planned)
 

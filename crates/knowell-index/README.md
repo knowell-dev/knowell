@@ -216,7 +216,7 @@ skipped (counted in the log).
 | `index.text` | T0 | `index.text:<view>:<target>:n<last generation>[:force]` | class |
 | `index.symbols` | T1 | `index.symbols:<view>:<target>:g<generation>` | class |
 | `index.relations` | T3 | `index.relations:<view>:<target>:g<generation>` | class |
-| `index.embeddings` | T2 | `index.embeddings:<view>:<target>:g<generation>` | class − 50 |
+| `index.embeddings` | T2 | `index.embeddings:<view>:<target>:g<generation>`; `...:p<profile>` when a profile switch catches up on one profile | class − 50 |
 
 `<target>` is the commit id, or `tree-<hash>` for directories. Classes: `Interactive` 300
 (explicit refresh), `Active` 200 (watcher events), `Background` 100 (initial indexing,
@@ -359,6 +359,26 @@ them costs a full read of the next build.
   on every sync.
 - Tier states of builds run by another process are reported as pending until they finish
   (T2 of an active generation is read from the store).
+
+## Profile switches
+
+The store records which embedding profile each view serves and which blue-green
+switches are building (`knowell_store::switches`); that record, not the process, is the
+truth. T2 builds the serving profile and, while the view belongs to a building switch,
+the switch's target, each only with the configured embedder whose provider kind, model,
+dimensions and input format match that profile (never a substitute). After a profile's
+vectors activate, the switch activates if its target covers the active generation of
+every member view: one transaction moves them all.
+
+- `Indexer::start_switch`, `cancel_switch`, `rollback_switch`, `switch`, `switches` and
+  `switch_progress` manage and report switches; starting one queues catch-up T2 jobs for
+  the active generations the target does not cover.
+- Registration only records the configured profile (the first one serves). Index runs
+  (`index_workspace`) and reconciliation start a switch when the configured profile
+  changed and resume building switches, so a restarted process completes them.
+- A failed build of a switch target is retried by explicit requests (index runs,
+  starting or rolling back a switch), never by the periodic reconciliation, so a
+  permanent provider error is not retried in a loop.
 
 ## Running the tests
 

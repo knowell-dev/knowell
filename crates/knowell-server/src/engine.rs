@@ -162,6 +162,20 @@ pub enum EngineRequest {
     },
     /// Start a blue-green profile switch (answer: any object).
     StartSwitch(SwitchRequest),
+    /// Profile switches, newest first (`ProfileMigration[]`).
+    Switches,
+    /// Cancel a building profile switch; the old profile keeps serving
+    /// (answer: the switch).
+    CancelSwitch {
+        /// Switch id.
+        switch_id: String,
+    },
+    /// Roll back an active profile switch within its retention (answer: the
+    /// reverse switch).
+    RollbackSwitch {
+        /// Switch id.
+        switch_id: String,
+    },
     /// Evaluation reports (`EvalReport[]`).
     EvalReports,
     /// Usage over the last `days` days (`UsageReport`).
@@ -195,6 +209,9 @@ impl EngineRequest {
             Self::Profiles => "profiles",
             Self::SwitchEstimate { .. } => "switch_estimate",
             Self::StartSwitch(_) => "start_switch",
+            Self::Switches => "switches",
+            Self::CancelSwitch { .. } => "cancel_switch",
+            Self::RollbackSwitch { .. } => "rollback_switch",
             Self::EvalReports => "eval_reports",
             Self::Usage { .. } => "usage",
             Self::Integrations => "integrations",
@@ -481,6 +498,11 @@ impl Validate for SwitchRequest {
     fn validate(&self) -> Result<(), ApiError> {
         check_text("toProfileId", &self.to_profile_id, MAX_ID_LEN, true)
     }
+}
+
+/// Checks a switch id taken from a request path.
+pub(crate) fn validate_switch_id(id: &str) -> Result<(), ApiError> {
+    check_text("switch id", id, MAX_ID_LEN, true)
 }
 
 #[cfg(test)]

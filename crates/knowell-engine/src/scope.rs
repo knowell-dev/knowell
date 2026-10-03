@@ -14,14 +14,14 @@ use std::time::{Duration, Instant};
 
 use knowell_auth::{Action, Resource, UserId};
 use knowell_core::{Name, TrackTarget};
-use knowell_index::{GitConfigMode, Overlay, TierState, TierStates};
+use knowell_index::{EmbeddingPlan, GitConfigMode, Overlay, TierState, TierStates};
 use knowell_mcp::{
     CommitId, ContextId, FreshnessTier, Gap, GapReason, IndexState, ProjectView, Target, ToolError,
     ViewLayer, ViewPin,
 };
 use knowell_source::git::{GitError, GitRepo};
 use knowell_store::views::{self, GenerationPin};
-use knowell_store::{SourceKind, ViewId};
+use knowell_store::{ProfileId, SourceKind, ViewId};
 use time::OffsetDateTime;
 
 use crate::access::Access;
@@ -53,6 +53,11 @@ pub(crate) struct PinnedProject {
     pub(crate) tiers: Option<TierStates>,
     pub(crate) activated_at: Option<OffsetDateTime>,
     pub(crate) overlay: Option<PinnedOverlay>,
+    /// The embedding profile the view served when the context was pinned
+    /// (`None`: none). Fixed for the context's lifetime, so a profile switch
+    /// that activates later never changes which vectors an open context
+    /// searches.
+    pub(crate) serving_profile: Option<ProfileId>,
 }
 
 impl PinnedProject {
@@ -564,8 +569,24 @@ impl Engine {
                     tiers: status.map(|s| s.tiers),
                     activated_at,
                     overlay: None,
+                    serving_profile: match &entry.embedding {
+                        EmbeddingPlan::Embed { profile, .. } => Some(*profile),
+                        _ => None,
+                    },
                 },
             );
+        }
+        // One statement for every pinned view, so a switch activating
+        // meanwhile is seen for all of them or for none.
+        let views: Vec<ViewId> = pinned.projects.values().map(|p| p.view).collect();
+        let serving = knowell_store::switches::view_embeddings(&mut conn, &views)
+            .await
+            .map_err(store_tool)?;
+        for project in pinned.projects.values_mut() {
+            // Without a stored record the configured profile serves.
+            if let Some(row) = serving.get(&project.view) {
+                project.serving_profile = row.serving;
+            }
         }
         Ok(pinned)
     }
