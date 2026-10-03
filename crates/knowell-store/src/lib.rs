@@ -18,6 +18,8 @@
 //! - [`tasks`] — tasks and append-only checkpoints.
 //! - [`identity`] — principals, grants and API tokens (hashes only).
 //! - [`audit`] — the append-only audit log.
+//! - [`switches`] — blue-green embedding profile switches and the profile
+//!   each view serves.
 //! - [`usage`] — durable MCP tool usage per organization, UTC hour, tool and
 //!   agent, with a latency histogram.
 //!
@@ -42,6 +44,7 @@ pub mod jobs;
 pub mod knowledge;
 mod migrations;
 mod store;
+pub mod switches;
 pub mod symbols;
 pub mod tasks;
 mod types;
@@ -52,13 +55,13 @@ pub use error::StoreError;
 pub use ids::{
     ApiTokenId, AuditEntryId, CheckpointReceiptId, ContractId, EdgeId, GrantId, IndexGenerationId,
     JobId, KnowledgeRecordId, ManifestId, OccurrenceId, OrganizationId, PrincipalId, ProfileId,
-    ProjectId, SourceId, SymbolId, TaskId, ViewId, WorkspaceId,
+    ProfileSwitchId, ProjectId, SourceId, SymbolId, TaskId, ViewId, WorkspaceId,
 };
 pub use store::{ServerInfo, ServerIssue, Store, StoreOptions, VectorExtension};
 pub use types::{
     ApiTokenScope, ContractKind, ContractRole, EvidenceType, GenerationState, GrantRole, JobState,
     KnowledgeAction, KnowledgeKind, KnowledgeScopeKind, KnowledgeState, NodeKind, OccurrenceRole,
-    PrincipalKind, Resolution, SourceKind, TaskStatus, ViewKind,
+    PrincipalKind, ProfileSwitchState, Resolution, SourceKind, TaskStatus, ViewKind,
 };
 pub use views::GenerationPin;
 

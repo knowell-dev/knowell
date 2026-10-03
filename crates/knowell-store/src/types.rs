@@ -101,6 +101,20 @@ pg_enum!(
 );
 
 pg_enum!(
+    /// Lifecycle of a blue-green embedding profile switch.
+    ProfileSwitchState = "profile_switch_state" {
+        /// Embeddings are built for both profiles; the old one still serves.
+        Building = "building",
+        /// The target profile serves every member view.
+        Active = "active",
+        /// Stopped before activation; the old profile kept serving.
+        Cancelled = "cancelled",
+        /// Undone by a rollback switch that activated.
+        RolledBack = "rolled_back",
+    }
+);
+
+pg_enum!(
     /// Role of a symbol occurrence.
     OccurrenceRole = "occurrence_role" {
         /// The symbol is defined here.
