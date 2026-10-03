@@ -54,11 +54,15 @@ dependencies; completion of the whole is defined by the acceptance scenarios at 
   repository as pull requests; documentation drift detection.
 - **Done when:** memory state-transition tests pass.
 
-### M6: Agent integration (planned)
+### M6: Agent integration (in progress)
 
 - **Deliverables:** MCP over stdio and Streamable HTTP; `open_workspace`; `build_context`;
   `know connect`; hub, worker, and edge roles; identity, RBAC, and audit.
 - **Done when:** the two-machine acceptance test and permission-leak tests pass.
+- **Current evidence:** database-backed MCP HTTP tests cover project isolation across
+  search, graph, context and memory, token scopes, changed grants and revoked credentials.
+  CLI tests issue private-file credentials, verify login against a real hub and revoke
+  them. Two-machine task continuation and live OIDC verification remain open.
 
 ### M7: Panel (planned)
 

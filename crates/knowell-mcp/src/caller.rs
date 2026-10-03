@@ -35,6 +35,15 @@ pub enum Principal {
         /// Stable subject id from the identity provider or token store.
         id: String,
     },
+    /// Typed identity supplied by trusted authentication middleware for
+    /// this request, including the presented credential's restrictions.
+    /// Never construct this from MCP arguments or client metadata.
+    Authenticated {
+        /// Verified user, service account or delegated agent.
+        principal: knowell_auth::Principal,
+        /// Credential scopes; `None` only for an unrestricted session.
+        scopes: Option<knowell_auth::TokenScopes>,
+    },
 }
 
 /// The MCP client, as it identified itself (self-reported, not authenticated).

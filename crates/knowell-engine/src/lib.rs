@@ -19,7 +19,7 @@ mod snapshot;
 mod tools;
 mod usage;
 
-pub use access::{Access, AccessResolver, StaticAccess};
+pub use access::{Access, AccessResolver, StaticAccess, StoreAccess};
 pub use engine::{Engine, EngineBuilder};
 pub use error::EngineError;
 pub use eval::{HYBRID_RETRIEVER, HybridRetriever};

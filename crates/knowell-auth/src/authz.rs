@@ -145,7 +145,7 @@ pub enum TokenScope {
 }
 
 /// A non-empty set of [`TokenScope`]s.
-#[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TokenScopes(BTreeSet<TokenScope>);
 
 impl TokenScopes {

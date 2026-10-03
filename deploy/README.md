@@ -17,6 +17,7 @@ cd deploy
 cp .env.example .env
 printf '%s' "$(openssl rand -hex 24)" > secrets/postgres_password
 printf 'postgres://knowell:%s@db:5432/knowell' "$(cat secrets/postgres_password)" > secrets/database_url
+openssl rand -hex 32 > secrets/token_pepper
 chmod 600 secrets/*
 docker compose up -d --build        # --build: compile from source; omit once an image is published
 docker compose ps                   # both services should become healthy
@@ -28,9 +29,58 @@ No secret value is written in any tracked file.
 
 - `secrets/postgres_password` and `secrets/database_url` are Docker secrets (files, git-ignored).
   `config/hub.toml` refers to the URL as `file:/run/secrets/database_url`.
+- `secrets/token_pepper` is the stable API-token pepper. The hub configuration references
+  `file:/run/secrets/token_pepper`; back it up securely. Replacing it invalidates issued tokens.
 - Provider API keys: add them to `.env` and reference them from the engine config as
   `env:NAME`, or add another file secret and reference it as `file:/run/secrets/<name>`.
   Never put a key into `compose.yml` or `config/hub.toml`.
+
+## Users, tokens and login
+
+Token commands are **local database administration**: run them on the installation that
+owns the hub database configuration. They do not accept a remote administrator token.
+For a non-Compose deployment, set `server.token_pepper = "env:KNOWELL_TOKEN_PEPPER"`
+(or a `file:/path` reference) in the engine configuration and provision the same secret
+to both `know token` and `know serve`. At least 16 bytes are required.
+
+Bootstrap the first user with an explicit role; later issuance omits `--create-user`:
+
+```sh
+docker compose exec hub know token create --principal owner --create-user --role admin \
+  --scopes read,write,admin --output /data/.knowell/owner.token
+docker compose exec hub know token list --principal owner
+```
+
+`--organization` defaults to `local`, matching `know serve`. A new user's grant defaults
+to that organization. Use `--grant-workspace NAME` and optionally `--grant-project NAME`
+to limit it to existing resources. Existing users' grants are never changed by issuance.
+Token scopes default to `read`; a write-capable agent token also needs `write`. The
+credential expires after 720 hours by default (`--expires-hours 1..8760`). MCP user calls
+act as agents and cannot accept memory even with an administrator credential.
+
+Creation writes a new owner-only file; it refuses to replace any existing path and never
+prints the token. Unix mode is 0600; Windows applies an owner ACL before writing bytes.
+Transfer the file securely to the edge machine, then use its absolute path:
+
+```sh
+know login https://hub.example.com --token-ref file:/absolute/path/owner.token
+```
+
+Login checks authenticated hub health before storing the URL and secret reference. It
+rejects redirects, invalid responses and remote HTTP; HTTP is allowed only on loopback.
+`--skip-verify` explicitly saves an unverified configuration. Login alone does not implement
+edge-to-hub indexing or two-machine task synchronization; those remain separate work.
+
+Revoke by the identifier returned by creation or listing:
+
+```sh
+docker compose exec hub know token revoke TOKEN_UUID
+```
+
+Listing reveals only metadata. Token creation and revocation are audited transactionally
+as local database-administrator operations. Revocation and stored grant changes apply to
+later HTTP calls, including existing MCP contexts. Keep database administrator credentials
+away from agents: they can use the local token commands to administer identities.
 
 ## Exposing the hub to a team
 

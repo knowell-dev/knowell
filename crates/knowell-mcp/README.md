@@ -219,7 +219,9 @@ error (-32602).
   (`principal`, `transport`, self-reported `client`) by a `CallerResolver`
   before the engine sees it; the resolver receives the HTTP request head
   (headers, extensions). The default `LocalOnly` accepts the local user only.
-  Token/OIDC resolvers for the hub are a later milestone.
+  `knowell_server::AuthenticatedCallers` transfers the middleware's typed identity and
+  token scopes for HTTP requests; missing authentication is rejected. The engine's
+  `StoreAccess` reads current grants. OIDC verification remains a later milestone.
 
 ### Protocol versions
 

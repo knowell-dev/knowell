@@ -28,7 +28,7 @@ let state = AppState::builder(config).with_engine(Arc::new(engine));      // RES
 |---|---|
 | `Engine::builder(store, indexer_config)` → `EngineBuilder` | `engine_config`, `embedder`, `workspace`, `settings`, `access`, `memory`, `relation_stage`, `build().await` |
 | `Engine::indexer()`, `store()`, `settings()`, `workspace_names()`, `add_workspace(&resolved)` | the parts, and late registration |
-| `Access`, `AccessResolver`, `StaticAccess` | identities; MCP callers resolve to **agents** acting for their user |
+| `Access`, `AccessResolver`, `StaticAccess`, `StoreAccess` | async identity resolution; MCP users become **agents**, verified agents and service accounts retain their identity |
 | `MemoryRepo` (+ `StoreMemory`, `InMemoryMemory`, `RecordQuery`, `RecordRow`, `TaskRow`, `CheckpointRow`, `MemoryError`) | persistence seam for knowledge records and tasks; the store implementation is the default |
 | `EngineSettings` (+ `DomainConfig`, `RelationStageInfo`) | search knobs, caches, context TTL, glossary, domains, eval report directory, prices, acceptance policy, role |
 | `HybridRetriever`, `HYBRID_RETRIEVER` | `knowell_eval::Retriever` named `hybrid` for `know eval run` |
@@ -110,6 +110,12 @@ relation stage is configured (`EngineSettings::relation_stage`). `GapReason` has
 `contracts_not_extracted` value; the prefix keeps it machine-detectable.
 
 ### Permission enforcement points
+
+The CLI uses `StoreAccess` for HTTP identities on every role, preserving token scopes
+and loading grants per call. A hub rejects untyped subjects and unauthenticated local
+callers. Standalone stdio retains its explicit machine-owner access. HTTP authentication
+uses `knowell_server::AuthenticatedCallers`; client-supplied metadata cannot supply a
+principal or widen a token's scopes.
 
 1. **Pinning** (`scope.rs`): only projects `visible_projects` + `authorize(ReadCode)` allow
    enter a manifest; invisible projects, ids and pins answer exactly like missing ones.

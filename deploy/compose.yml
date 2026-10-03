@@ -58,6 +58,7 @@ services:
         required: false
     secrets:
       - database_url
+      - token_pepper
     volumes:
       - knowell-data:/data
       - ./config/hub.toml:/data/.knowell/config.toml:ro
@@ -83,6 +84,8 @@ secrets:
     file: ./secrets/postgres_password
   database_url:
     file: ./secrets/database_url
+  token_pepper:
+    file: ./secrets/token_pepper
 
 volumes:
   pgdata:
