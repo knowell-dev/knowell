@@ -24,6 +24,11 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+# Stable Rust cannot restrict Command's inherited handles. This safe wrapper
+# supplies an explicit handle list without adding unsafe code to Knowell.
+windows-spawn.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 

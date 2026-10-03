@@ -188,6 +188,11 @@ is no second storage implementation.
 Major-version upgrade, backup, and restore of the managed instance are handled by `know`
 and covered by acceptance tests.
 
+The managed server outlives the CLI that starts it. `pg_ctl start` uses null standard
+streams and writes server diagnostics to `postgres.log`. On Windows an explicit handle
+list excludes the CLI's redirected pipes, so piping `know init` does not wait for the
+server to stop. Launcher timeout or cancellation still terminates the launcher.
+
 ### 5.2 Layers
 
 | Layer | Choice | Notes |

@@ -12,8 +12,19 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
+#[cfg(windows)]
+mod windows;
+
 /// How much of a failing program's output is kept in an error, in characters.
 const OUTPUT_TAIL_CHARS: usize = 2000;
+
+#[derive(Debug, Clone, Default)]
+enum OutputMode {
+    #[default]
+    Capture,
+    File(PathBuf),
+    Null,
+}
 
 /// Per-invocation options.
 #[derive(Debug, Clone)]
@@ -26,10 +37,8 @@ pub(crate) struct RunOptions {
     pub(crate) timeout: Duration,
     /// Text to mask in captured output.
     pub(crate) redact: Option<String>,
-    /// Send stdout and stderr to this file instead of pipes. Needed for
-    /// `pg_ctl start`: the server it spawns inherits pipe handles on Windows
-    /// and would keep them open, so reading to end-of-file never finishes.
-    pub(crate) output_file: Option<PathBuf>,
+    /// Where the child's standard output and error go.
+    output: OutputMode,
 }
 
 impl RunOptions {
@@ -39,7 +48,7 @@ impl RunOptions {
             cwd: None,
             timeout,
             redact: None,
-            output_file: None,
+            output: OutputMode::Capture,
         }
     }
 
@@ -54,7 +63,13 @@ impl RunOptions {
     }
 
     pub(crate) fn output_file(mut self, path: &Path) -> Self {
-        self.output_file = Some(path.to_path_buf());
+        self.output = OutputMode::File(path.to_path_buf());
+        self
+    }
+
+    /// Disconnect a server launcher from the caller's standard streams.
+    pub(crate) fn null_stdio(mut self) -> Self {
+        self.output = OutputMode::Null;
         self
     }
 
@@ -121,19 +136,29 @@ pub(crate) async fn run_unchecked(
         || "program".to_string(),
         |s| s.to_string_lossy().into_owned(),
     );
+    #[cfg(windows)]
+    if matches!(options.output, OutputMode::Null) {
+        return windows::run_null(program, args, options, &display).await;
+    }
     let mut command = Command::new(program);
     command.args(args).stdin(Stdio::null()).kill_on_drop(true);
-    if let Some(path) = &options.output_file {
-        let file = std::fs::File::create(path)
-            .map_err(|err| Error::io(format!("creating {}", path.display()), err))?;
-        let second = file
-            .try_clone()
-            .map_err(|err| Error::io(format!("duplicating {}", path.display()), err))?;
-        command
-            .stdout(Stdio::from(file))
-            .stderr(Stdio::from(second));
-    } else {
-        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    match &options.output {
+        OutputMode::File(path) => {
+            let file = std::fs::File::create(path)
+                .map_err(|err| Error::io(format!("creating {}", path.display()), err))?;
+            let second = file
+                .try_clone()
+                .map_err(|err| Error::io(format!("duplicating {}", path.display()), err))?;
+            command
+                .stdout(Stdio::from(file))
+                .stderr(Stdio::from(second));
+        }
+        OutputMode::Capture => {
+            command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        }
+        OutputMode::Null => {
+            command.stdout(Stdio::null()).stderr(Stdio::null());
+        }
     }
     // Do not let ambient PG* variables (PGPASSWORD, PGHOST, PGDATA, ...) steer the child.
     for (key, _) in std::env::vars_os() {
@@ -185,7 +210,7 @@ pub(crate) async fn run_unchecked(
         }
     };
     let status = status.map_err(|e| Error::io(format!("waiting for {display}"), e))?;
-    if let Some(path) = &options.output_file {
+    if let OutputMode::File(path) = &options.output {
         out = std::fs::read(path).unwrap_or_default();
     }
     let mask = |bytes: Vec<u8>| {
@@ -228,6 +253,9 @@ pub(crate) async fn run(program: &Path, args: &[OsString], options: &RunOptions)
 pub(crate) fn args<const N: usize>(items: [&str; N]) -> Vec<OsString> {
     items.iter().map(OsString::from).collect()
 }
+
+#[cfg(test)]
+mod pipe_tests;
 
 #[cfg(test)]
 mod tests {

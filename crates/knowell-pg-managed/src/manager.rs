@@ -367,9 +367,20 @@ impl ManagedPostgres {
         argv.push(self.layout.data_dir().into_os_string());
         argv.push(OsString::from("-l"));
         argv.push(self.layout.log_file().into_os_string());
-        let options =
-            RunOptions::new(SHORT_TIMEOUT).output_file(&self.layout.major_dir().join("pg_ctl.out"));
-        process::run(&pg_ctl, &argv, &options).await?;
+        let options = RunOptions::new(SHORT_TIMEOUT).null_stdio();
+        process::run(&pg_ctl, &argv, &options)
+            .await
+            .map_err(|error| match error {
+                Error::Command { program, code, .. } => Error::Command {
+                    program,
+                    code,
+                    output: format!(
+                        "check the server log at {}",
+                        self.layout.log_file().display()
+                    ),
+                },
+                other => other,
+            })?;
         tracing::info!(port, "postgresql started");
         Ok(port)
     }

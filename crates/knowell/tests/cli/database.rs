@@ -200,7 +200,7 @@ impl Drop for StopManaged {
 fn managed_init_backup_restore() {
     let sb = Sandbox::new();
     let _stop = StopManaged(sb.knowell_home());
-    let init = sb.run_to_files(&["init"]);
+    let init = sb.run_with_timeout(&["init"], std::time::Duration::from_secs(180));
     // Without the pgvector bundle init completes everything but the schema
     // and says so; with it, it completes.
     match init.code {
@@ -208,11 +208,19 @@ fn managed_init_backup_restore() {
         1 => assert!(init.stdout.contains("pgvector: NOT AVAILABLE"), "{init:?}"),
         _ => panic!("{init:?}"),
     }
-    let again = sb.run_to_files(&["init"]);
+    let pg = knowell_pg_managed::ManagedPostgres::new(knowell_pg_managed::ManagedConfig::new(
+        sb.knowell_home(),
+    ))
+    .unwrap();
+    assert!(matches!(
+        crate::common::block_on(pg.status()).unwrap(),
+        knowell_pg_managed::Status::Running { .. }
+    ));
+    let again = sb.run_with_timeout(&["init"], std::time::Duration::from_secs(180));
     assert_eq!(again.code, init.code, "init is not idempotent: {again:?}");
     assert!(again.stdout.contains("already initialised"), "{again:?}");
 
-    let doctor = sb.run_to_files(&["doctor", "--json"]);
+    let doctor = sb.run(&["doctor", "--json"]);
     let value: serde_json::Value = serde_json::from_str(&doctor.stdout).unwrap();
     let managed = value["checks"]
         .as_array()
@@ -224,13 +232,13 @@ fn managed_init_backup_restore() {
     assert_eq!(managed["status"], "ok", "{doctor:?}");
 
     let dump = sb.work().join("knowell.dump");
-    let backup = sb.run_to_files(&["backup", dump.to_str().unwrap()]);
+    let backup = sb.run(&["backup", dump.to_str().unwrap()]);
     assert_eq!(backup.code, 0, "{backup:?}");
     assert!(dump.is_file());
-    let exists = sb.run_to_files(&["restore", dump.to_str().unwrap()]);
+    let exists = sb.run(&["restore", dump.to_str().unwrap()]);
     assert_eq!(exists.code, 1, "{exists:?}");
     assert!(exists.stderr.contains("--into"), "{exists:?}");
-    let restore = sb.run_to_files(&["restore", dump.to_str().unwrap(), "--into", "knowell_copy"]);
+    let restore = sb.run(&["restore", dump.to_str().unwrap(), "--into", "knowell_copy"]);
     assert_eq!(restore.code, 0, "{restore:?}");
 }
 
