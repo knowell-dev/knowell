@@ -1,0 +1,223 @@
+# Manually verify ingestion of real Knowell SARIF from committed synthetic sources.
+name: SARIF ingestion smoke
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: sarif-smoke-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  ingestion:
+    name: real SARIF ingestion
+    if: github.repository == 'knowell-dev/knowell' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+      - uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # v1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: "false"
+      - name: Build the real check binary
+        run: python scripts/buildlock.py cargo build --locked --release -p knowell --bin know
+      - name: Check committed synthetic sources and validate SARIF locations
+        id: scan
+        env:
+          SARIF_DIR: ${{ runner.temp }}/sarif-smoke
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          from urllib.parse import urljoin, urlsplit
+          from urllib.request import url2pathname
+
+          repo = Path.cwd().resolve()
+          fixture = repo / "packs/js-http-client/tests"
+          output = Path(os.environ["SARIF_DIR"])
+          output.mkdir(parents=True, exist_ok=True)
+          config = output / "knowell.toml"
+          # The temporary config selects existing committed fixtures, not the repository's code.
+          config.write_text(
+              'version = 1\n[workspace]\nname = "sarif-smoke"\ntrack = "worktree"\n'
+              '[[project]]\nname = "client-fixtures"\npath = '
+              + json.dumps(repo.as_posix())
+              + '\nroot = "packs/js-http-client/tests"\n',
+              encoding="utf-8",
+          )
+          sarif = output / "knowell.sarif"
+          subprocess.run(
+              [str(repo / "target/release/know"), "--workspace", str(config), "check",
+               "--format", "sarif", "--fail-on", "never", "--output", str(sarif)],
+              check=True,
+          )
+          report = json.loads(sarif.read_text(encoding="utf-8"))
+          if report.get("version") != "2.1.0" or len(report.get("runs", [])) != 1:
+              raise SystemExit("expected one SARIF 2.1.0 run")
+          run = report["runs"][0]
+          if run["tool"]["driver"]["name"] != "knowell":
+              raise SystemExit("expected the real Knowell tool")
+          bases = run["originalUriBaseIds"]
+          if bases["client-fixtures"]["uri"] != fixture.resolve().as_uri() + "/":
+              raise SystemExit("the SARIF project root does not match the committed fixture")
+
+          expected_rule = "link.endpoint_without_provider"
+          expected_path = "packs/js-http-client/tests/pos-axios.ts"
+          expected_line = 5
+          expected_source = 'export const listCoupons = () => api.get("/v1/coupons");'
+          subprocess.run(["git", "ls-files", "--error-unmatch", expected_path],
+                         check=True, stdout=subprocess.DEVNULL)
+          source_lines = (repo / expected_path).read_text(encoding="utf-8").splitlines()
+          if source_lines[expected_line - 1].strip() != expected_source:
+              raise SystemExit("the expected committed fixture line changed")
+
+          results = run.get("results", [])
+          matched = False
+          for result in results:
+              for location in result.get("locations", []) + result.get("relatedLocations", []):
+                  physical = location["physicalLocation"]
+                  artifact = physical["artifactLocation"]
+                  uri = urlsplit(urljoin(bases[artifact["uriBaseId"]]["uri"], artifact["uri"]))
+                  if uri.scheme != "file" or uri.netloc or uri.query or uri.fragment:
+                      raise SystemExit("a fixture location is not a local file URI")
+                  path = Path(url2pathname(uri.path)).resolve()
+                  if not path.is_relative_to(fixture.resolve()) or not path.is_file():
+                      raise SystemExit("a SARIF location is outside the committed fixture")
+                  relative = path.relative_to(repo).as_posix()
+                  region = physical["region"]
+                  if (result["ruleId"] == expected_rule and relative == expected_path
+                          and region["startLine"] == expected_line
+                          and region["endLine"] == expected_line):
+                      matched = True
+          if not matched:
+              raise SystemExit("the expected rule, committed path and line are missing from SARIF")
+          evidence = {
+              "tool": "knowell",
+              "category": "knowell-sarif-smoke",
+              "commit_sha": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+              "results_count": len(results),
+              "expected_result": {
+                  "rule_id": expected_rule, "path": expected_path,
+                  "start_line": expected_line, "end_line": expected_line,
+              },
+              "sarif_sha256": hashlib.sha256(sarif.read_bytes()).hexdigest(),
+          }
+          (output / "validation.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+          print(f"validated {len(results)} real findings; expected committed source location matches")
+          PY
+      - name: Upload SARIF and wait for processing
+        id: upload
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          sarif_file: ${{ runner.temp }}/sarif-smoke/knowell.sarif
+          checkout_path: ${{ github.workspace }}
+          category: knowell-sarif-smoke
+          wait-for-processing: "true"
+      - name: Verify completed processing through the GitHub API
+        timeout-minutes: 6
+        env:
+          SARIF_ID: ${{ steps.upload.outputs.sarif-id }}
+          SARIF_DIR: ${{ runner.temp }}/sarif-smoke
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import time
+          from urllib.error import HTTPError, URLError
+          from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+          sarif_id = os.environ["SARIF_ID"]
+          if not re.fullmatch(r"[A-Za-z0-9-]{1,128}", sarif_id):
+              raise SystemExit("the upload did not provide a valid SARIF id")
+          # The upload action can warn and return success while processing is still pending.
+          evidence = {
+              "sarif_id": sarif_id,
+              "category": "knowell-sarif-smoke",
+          }
+
+          def record():
+              (Path(os.environ["SARIF_DIR"]) / "processing.json").write_text(
+                  json.dumps(evidence, indent=2) + "\n", encoding="utf-8",
+              )
+
+          class NoRedirect(HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+
+          api_root = "https://api.github.com/repos/knowell-dev/knowell/code-scanning"
+          request = Request(
+              f"{api_root}/sarifs/{sarif_id}",
+              headers={
+                  "Authorization": "Bearer " + os.environ["GH_TOKEN"],
+                  "Accept": "application/vnd.github+json",
+                  "X-GitHub-Api-Version": "2026-03-10",
+              },
+          )
+          opener = build_opener(NoRedirect())
+          for attempt in range(30):
+              try:
+                  with opener.open(request, timeout=5) as response:
+                      body = response.read(1024 * 1024 + 1)
+                  if len(body) > 1024 * 1024:
+                      raise ValueError("oversized response")
+                  status = json.loads(body)
+                  if not isinstance(status, dict):
+                      raise ValueError("unexpected response shape")
+              except HTTPError as error:
+                  evidence["http_status"] = error.code
+                  record()
+                  raise SystemExit(f"GitHub processing lookup failed (HTTP {error.code})") from None
+              except (URLError, TimeoutError, ValueError):
+                  raise SystemExit("GitHub processing lookup returned an invalid response or failed") from None
+              processing = status.get("processing_status")
+              if processing not in ("pending", "complete", "failed"):
+                  raise SystemExit("GitHub returned an unknown or missing processing status")
+              evidence["processing_status"] = processing
+              evidence["poll_attempts"] = attempt + 1
+              record()
+              if processing == "failed":
+                  raise SystemExit("GitHub failed to process the SARIF upload")
+              if processing == "complete":
+                  analyses_url = f"{api_root}/analyses?sarif_id={sarif_id}"
+                  if status.get("analyses_url") != analyses_url:
+                      raise SystemExit("GitHub did not return the expected analysis lookup URL")
+                  evidence["analyses_url"] = analyses_url
+                  record()
+                  break
+              if attempt < 29:
+                  time.sleep(5)
+          else:
+              raise SystemExit("GitHub SARIF processing did not complete within the polling limit")
+          print("GitHub completed SARIF processing; evidence is in the run artifact")
+          PY
+      - name: Preserve ingestion evidence
+        if: always() && steps.scan.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sarif-ingestion-evidence
+          path: |
+            ${{ runner.temp }}/sarif-smoke/knowell.sarif
+            ${{ runner.temp }}/sarif-smoke/validation.json
+            ${{ runner.temp }}/sarif-smoke/processing.json
+          if-no-files-found: error
+          retention-days: 14
