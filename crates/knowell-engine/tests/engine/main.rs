@@ -25,3 +25,4 @@ mod profile_switch;
 mod profiles;
 mod relations_privacy;
 mod rest_permissions;
+mod usage_durability;

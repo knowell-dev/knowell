@@ -85,6 +85,10 @@ is released. Nothing has been released yet.
 
 ### Added
 
+- Durable MCP tool usage (migration 0012): engines buffer calls per UTC hour, tool and
+  agent, add them to the store every few seconds and at shutdown, and report usage and
+  integration status from the store, so counters survive restarts. Reports now apply
+  the requested period to tools too; latency percentiles come from a histogram.
 - Durable checkpoint idempotency: decisions, the task update, the checkpoint and its
   receipt are stored in one transaction (migration 0011), so a `save_checkpoint` retry
   with the same caller and key returns the original checkpoint after an engine restart,

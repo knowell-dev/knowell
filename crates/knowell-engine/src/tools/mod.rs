@@ -61,7 +61,6 @@ impl Engine {
         self.inner.usage.record(&CallRecord {
             tool: tool.as_str(),
             agent,
-            session: agent,
             ok: result.is_ok(),
             output_bytes,
             latency_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),

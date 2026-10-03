@@ -72,6 +72,12 @@ pub(crate) fn run(_args: McpArgs, env: &Env) -> anyhow::Result<ExitCode> {
             .await
             .context("the MCP stdio session failed");
         indexing.cancel();
+        // Buffered tool usage reaches the database before the pool closes.
+        if let Some((engine, _)) = &built
+            && let Err(error) = engine.flush_usage().await
+        {
+            tracing::warn!(%error, "tool usage of this session could not be stored");
+        }
         if let Some(store) = deps.store {
             store.close().await;
         }

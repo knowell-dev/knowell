@@ -107,7 +107,7 @@ async fn migrations_apply_from_empty_and_rerun_cleanly() {
         .fetch_one(&mut *conn)
         .await
         .unwrap();
-    assert_eq!(applied, 11);
+    assert_eq!(applied, 12);
     let tables: Vec<String> = sqlx::query_scalar(
         "SELECT table_name::text FROM information_schema.tables
          WHERE table_schema = current_schema() AND table_name <> '_sqlx_migrations'
@@ -143,6 +143,7 @@ async fn migrations_apply_from_empty_and_rerun_cleanly() {
         "symbol",
         "task",
         "task_checkpoint",
+        "tool_usage_hour",
         "view",
         "view_generation",
         "view_manifest",

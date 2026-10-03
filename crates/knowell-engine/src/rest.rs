@@ -254,9 +254,21 @@ impl Engine {
                         message: "`days` must be between 1 and 365".to_owned(),
                     });
                 }
-                Ok(self.inner.usage.report(days, OffsetDateTime::now_utc()))
+                let now = OffsetDateTime::now_utc();
+                let since = now - time::Duration::days(i64::from(days));
+                let mut conn = self.inner.store.acquire().await.map_err(store_err)?;
+                let stored =
+                    knowell_store::usage::tool_usage(&mut conn, self.inner.organization, since)
+                        .await
+                        .map_err(store_err)?;
+                Ok(crate::usage::report(
+                    stored,
+                    self.inner.usage.buffered(),
+                    days,
+                    now,
+                ))
             }
-            EngineRequest::Integrations => Ok(self.rest_integrations()),
+            EngineRequest::Integrations => self.rest_integrations().await,
             EngineRequest::Admin => self.rest_admin().await,
             _ => Err(EngineError::Invalid {
                 message: "this request is not supported by this engine version".to_owned(),
@@ -1708,8 +1720,12 @@ impl Engine {
         Ok(Value::Array(out))
     }
 
-    fn rest_integrations(&self) -> Value {
-        let last = self.inner.usage.last_call();
+    async fn rest_integrations(&self) -> Result<Value, EngineError> {
+        let mut conn = self.inner.store.acquire().await.map_err(store_err)?;
+        let stored = knowell_store::usage::last_tool_call(&mut conn, self.inner.organization)
+            .await
+            .map_err(store_err)?;
+        let last = stored.max(self.inner.usage.last_call());
         let recent =
             last.is_some_and(|t| OffsetDateTime::now_utc() - t < time::Duration::minutes(5));
         let hub = self.inner.settings.role == knowell_config::ServerRole::Hub;
@@ -1721,7 +1737,7 @@ impl Engine {
         if let (Some(at), Some(map)) = (last, mcp.as_object_mut()) {
             map.insert("lastCallAt".to_owned(), iso(at));
         }
-        json!({"mcp": mcp, "agents": [], "webhooks": []})
+        Ok(json!({"mcp": mcp, "agents": [], "webhooks": []}))
     }
 
     async fn rest_admin(&self) -> Result<Value, EngineError> {

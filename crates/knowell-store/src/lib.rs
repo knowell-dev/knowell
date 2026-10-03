@@ -18,6 +18,8 @@
 //! - [`tasks`] — tasks and append-only checkpoints.
 //! - [`identity`] — principals, grants and API tokens (hashes only).
 //! - [`audit`] — the append-only audit log.
+//! - [`usage`] — durable MCP tool usage per organization, UTC hour, tool and
+//!   agent, with a latency histogram.
 //!
 //! Repository functions are plain `async fn`s taking `&mut PgConnection`, so
 //! they work on a pooled connection ([`Store::acquire`]) and inside a
@@ -43,6 +45,7 @@ mod store;
 pub mod symbols;
 pub mod tasks;
 mod types;
+pub mod usage;
 pub mod views;
 
 pub use error::StoreError;
