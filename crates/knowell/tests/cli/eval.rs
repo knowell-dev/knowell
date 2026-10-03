@@ -147,3 +147,38 @@ fn hybrid_refuses_a_server_without_pgvector() {
     assert_eq!(result.code, 2, "{result:?}");
     assert!(result.stderr.contains("requires pgvector"));
 }
+
+#[test]
+fn live_eval_rejects_invalid_requests_before_resolving_secrets() {
+    let sb = Sandbox::new();
+    for (key, dimensions, budget, expected) in [
+        (
+            "KNOWELL_CANARY_pasted_live_key",
+            "768",
+            "500000",
+            "reference",
+        ),
+        ("env:KNOWELL_MISSING_LIVE_KEY", "64", "500000", "dimensions"),
+        ("env:KNOWELL_MISSING_LIVE_KEY", "768", "0", "budget"),
+        ("env:KNOWELL_MISSING_LIVE_KEY", "768", "500001", "budget"),
+    ] {
+        let out = sb.run(&[
+            "eval",
+            "live",
+            "--database-url",
+            "env:KNOWELL_MISSING_EVAL_DB",
+            "--api-key-ref",
+            key,
+            "--dimensions",
+            dimensions,
+            "--max-tokens",
+            budget,
+            "--json",
+            "never-written.json",
+        ]);
+        assert_eq!(out.code, 2, "{out:?}");
+        assert!(out.stderr.contains(expected), "{out:?}");
+        assert!(!out.all().contains("KNOWELL_CANARY_pasted_live_key"));
+        assert!(!sb.work().join("never-written.json").exists());
+    }
+}

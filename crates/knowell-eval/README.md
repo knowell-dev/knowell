@@ -55,6 +55,44 @@ absent queries with results (abstention 0). This is a measured limitation of the
 current deterministic pipeline, not a quality improvement claim. No weights,
 quotas or chunk sizes were tuned to this evaluation set.
 
+### Live Gemini evaluation
+
+`know eval live --database-url env:KNOWELL_EVAL_DATABASE_URL
+--api-key-ref env:GEMINI_API_KEY --dimensions 768 --max-tokens 500000
+--json eval-live.json` explicitly sends the built-in Small fixture (seed 42)
+through Gemini Embedding 2. It accepts only 768, 1536 or 3072 dimensions, never
+an arbitrary workspace, model or API endpoint. Only the generated fixture's
+resolved policy is changed to allow cloud embedding. The normal secret boundary
+still excludes sensitive paths and redacts synthetic canaries before provider
+calls. The API key is resolved from its reference and is never written to reports.
+
+Indexing and queries share the token budget. Provider retries and job retries are
+disabled. The cap is based on token estimates before sending and provider usage
+after success; it is not an exact provider billing ceiling. Each dimension may
+account for at most 500,000 estimated tokens, approximately USD 0.10 at the
+[standard text price of USD 0.20/million tokens](https://ai.google.dev/gemini-api/docs/pricing#gemini-embedding-2)
+checked on 2026-10-03. All three dimensions therefore have a combined estimated
+cap of USD 0.30 per workflow run. Provider billing remains authoritative.
+
+Reports include model, requested dimensions, the actual request field
+`requests[].outputDimensionality`, dimension-validation success, token accounting,
+estimated cost, input count, database versions, OS/architecture and cold-cache
+conditions. Every returned vector is checked against the requested dimension;
+wrong dimensions, partial coverage, budgets and provider failures prevent a
+successful report. The top-level dimension field is documented as deprecated in
+the [API reference](https://ai.google.dev/api/embeddings); a successful real run
+is needed to verify that it is still accepted. No live result has been recorded yet.
+
+The Nightly `live-embeddings` matrix runs serially, only on this repository's
+`main`, in the protected `live-embeddings` environment. The owner must provision
+`GEMINI_API_KEY` as an environment secret; never add it as a repository secret or
+paste it into chat. The build step does not receive the key. An explicitly enabled
+`live_embeddings` workflow dispatch runs the experiment once. Scheduled runs
+remain disabled until the owner sets `LIVE_EMBEDDINGS_ENABLED=true` after approving
+recurring spending. Results are retained as dimension-specific artifacts for 30
+days and summarized in the workflow run. No real-embedding baseline or ranking
+tuning is justified until those measurements have completed.
+
 ## Why a synthetic fixture
 
 Retrieval quality depends heavily on the code it runs on, and the only code
