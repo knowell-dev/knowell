@@ -38,8 +38,7 @@ pub fn fingerprint(finding: &Finding) -> String {
     )
 }
 
-/// A SARIF `location` with a physical location relative to the project
-/// root (`uriBaseId` = project name).
+/// A SARIF `location` with an absolute, URI-encoded source-file location.
 fn location(
     location: &Location,
     id: Option<usize>,
@@ -54,15 +53,13 @@ fn location(
         .map_err(|_| LinkError::InvalidSarifRoot(location.project.clone()))?
         .pop_if_empty()
         .extend(location.path.components());
-    let uri = root
-        .make_relative(&absolute)
-        .ok_or_else(|| LinkError::InvalidSarifRoot(location.project.clone()))?;
     let mut physical = Map::new();
+    // GitHub ignores project URI bases when mapping a relative artifact URI.
+    // An absolute URI lets the uploader map it against the repository checkout.
     physical.insert(
         "artifactLocation".to_owned(),
         json!({
-            "uri": uri,
-            "uriBaseId": location.project.as_str(),
+            "uri": absolute.as_str(),
         }),
     );
     if let Some(range) = location.range {
@@ -122,10 +119,12 @@ fn result(finding: &Finding, roots: &BTreeMap<Name, Url>) -> Result<Value, LinkE
 
 /// Renders findings as a SARIF 2.1.0 log with one run. Every known check
 /// code is listed as a rule (fixed order); results reference rules by id and
-/// index, carry physical locations relative to their project root
-/// (`uriBaseId` = project name, resolved by `originalUriBaseIds`), related
-/// locations and a partial fingerprint for stable de-duplication. Paths are
-/// URI-encoded, including reserved characters and non-ASCII bytes.
+/// index, carry absolute `file:` URIs for primary and related locations and a
+/// partial fingerprint for stable de-duplication. Paths are URI-encoded,
+/// including reserved characters and non-ASCII bytes. Artifact locations do not
+/// depend on `uriBaseId`; uploaders such as GitHub can resolve them against the
+/// scanned repository's checkout root. `originalUriBaseIds` records the project
+/// directories as metadata for other SARIF consumers.
 ///
 /// `roots` maps each project to its absolute source-directory `file:` URI,
 /// including a trailing slash. For a monorepo project this is the project
@@ -231,19 +230,32 @@ mod tests {
     #[test]
     fn encoded_locations_resolve_with_unix_and_windows_roots() {
         let finding = finding();
-        for base in [
-            "file:///checkout/apps/web/",
-            "file:///C:/checkout/apps/web/",
+        for (base, checkout) in [
+            ("file:///checkout/apps/web/", "file:///checkout/"),
+            ("file:///C:/checkout/apps/web/", "file:///C:/checkout/"),
+            (
+                "file:///checkout%20%23100%25/apps/web/",
+                "file:///checkout%20%23100%25/",
+            ),
         ] {
             let root = Url::parse(base).unwrap();
-            let roots = BTreeMap::from([(Name::new("web").unwrap(), root.clone())]);
+            let roots = BTreeMap::from([(Name::new("web").unwrap(), root)]);
             let report = to_sarif(std::slice::from_ref(&finding), "test", &roots).unwrap();
             let run = &report["runs"][0];
             assert_eq!(run["originalUriBaseIds"]["web"]["uri"], base);
             let physical = &run["results"][0]["locations"][0]["physicalLocation"];
-            let uri = physical["artifactLocation"]["uri"].as_str().unwrap();
-            assert_eq!(uri, "src/space%20%23100%25/caf%C3%A9.ts");
-            assert_eq!(root.join(uri).unwrap().as_str(), format!("{base}{uri}"));
+            let artifact = &physical["artifactLocation"];
+            assert!(artifact.get("uriBaseId").is_none());
+            let uri = artifact["uri"].as_str().unwrap();
+            assert_eq!(uri, format!("{base}src/space%20%23100%25/caf%C3%A9.ts"));
+            let absolute = Url::parse(uri).unwrap();
+            assert_eq!(absolute.scheme(), "file");
+            assert_eq!(absolute.query(), None);
+            assert_eq!(absolute.fragment(), None);
+            assert_eq!(
+                Url::parse(checkout).unwrap().make_relative(&absolute),
+                Some("apps/web/src/space%20%23100%25/caf%C3%A9.ts".to_owned())
+            );
             assert_eq!(physical["region"]["startLine"], 7);
             assert_eq!(physical["region"]["endLine"], 9);
         }
@@ -256,6 +268,11 @@ mod tests {
             project: Name::new("api").unwrap(),
             path: RepoPath::new("openapi.yaml").unwrap(),
             range: None,
+        });
+        finding.locations.push(Location {
+            project: Name::new("api").unwrap(),
+            path: RepoPath::new("schema #100%/café.yaml").unwrap(),
+            range: Some(LineRange::new(2, 4).unwrap()),
         });
         let roots = BTreeMap::from([
             (
@@ -272,12 +289,81 @@ mod tests {
         let related = &run["results"][0]["relatedLocations"][0];
         assert_eq!(related["id"], 1);
         let artifact = &related["physicalLocation"]["artifactLocation"];
-        assert_eq!(artifact["uri"], "openapi.yaml");
-        assert_eq!(artifact["uriBaseId"], "api");
+        assert_eq!(artifact["uri"], "file:///another/api/openapi.yaml");
+        assert!(artifact.get("uriBaseId").is_none());
         assert_eq!(
             run["originalUriBaseIds"]["api"]["uri"],
             "file:///another/api/"
         );
+        let encoded = &run["results"][0]["relatedLocations"][1];
+        assert_eq!(encoded["id"], 2);
+        let physical = &encoded["physicalLocation"];
+        assert_eq!(
+            physical["artifactLocation"]["uri"],
+            "file:///another/api/schema%20%23100%25/caf%C3%A9.yaml"
+        );
+        assert!(physical["artifactLocation"].get("uriBaseId").is_none());
+        assert_eq!(physical["region"]["startLine"], 2);
+        assert_eq!(physical["region"]["endLine"], 4);
+    }
+
+    #[test]
+    fn matching_filenames_in_project_subroots_have_distinct_checkout_paths() {
+        let mut web = finding();
+        web.locations[0].path = RepoPath::new("src/client.ts").unwrap();
+        let mut api = web.clone();
+        let api_name = Name::new("api").unwrap();
+        api.project = Some(api_name.clone());
+        api.locations[0].project = api_name.clone();
+        let roots = BTreeMap::from([
+            (
+                Name::new("web").unwrap(),
+                Url::parse("file:///checkout/apps/web/").unwrap(),
+            ),
+            (
+                api_name,
+                Url::parse("file:///checkout/services/api/").unwrap(),
+            ),
+        ]);
+        let report = to_sarif(&[web, api], "test", &roots).unwrap();
+        let results = report["runs"][0]["results"].as_array().unwrap();
+        let checkout = Url::parse("file:///checkout/").unwrap();
+        let paths: Vec<_> = results
+            .iter()
+            .map(|result| {
+                let artifact = &result["locations"][0]["physicalLocation"]["artifactLocation"];
+                assert!(artifact.get("uriBaseId").is_none());
+                let absolute = Url::parse(artifact["uri"].as_str().unwrap()).unwrap();
+                checkout.make_relative(&absolute).unwrap()
+            })
+            .collect();
+        assert_eq!(
+            paths,
+            ["apps/web/src/client.ts", "services/api/src/client.ts"]
+        );
+    }
+
+    #[test]
+    fn fingerprints_are_stable_when_the_checkout_directory_changes() {
+        let finding = finding();
+        let reports: Vec<_> = [
+            "file:///checkout/apps/web/",
+            "file:///another/checkout/web/",
+        ]
+        .into_iter()
+        .map(|base| {
+            let roots = BTreeMap::from([(Name::new("web").unwrap(), Url::parse(base).unwrap())]);
+            to_sarif(std::slice::from_ref(&finding), "test", &roots).unwrap()
+        })
+        .collect();
+        let first = &reports[0]["runs"][0]["results"][0];
+        let second = &reports[1]["runs"][0]["results"][0];
+        assert_eq!(first["partialFingerprints"], second["partialFingerprints"]);
+        assert_eq!(
+            first["partialFingerprints"][FINGERPRINT_KEY],
+            fingerprint(&finding)
+        );
+        assert_ne!(first["locations"], second["locations"]);
     }
 
     #[test]
@@ -302,6 +388,34 @@ mod tests {
             );
             assert!(!error.to_string().contains("KNOWELL_CANARY"));
         }
+    }
+
+    #[test]
+    fn related_locations_require_known_valid_roots() {
+        let mut finding = finding();
+        finding.locations.push(Location {
+            project: Name::new("api").unwrap(),
+            path: RepoPath::new("openapi.yaml").unwrap(),
+            range: None,
+        });
+        let mut roots = BTreeMap::from([(
+            Name::new("web").unwrap(),
+            Url::parse("file:///checkout/web/").unwrap(),
+        )]);
+        assert_eq!(
+            to_sarif(std::slice::from_ref(&finding), "test", &roots),
+            Err(LinkError::MissingSarifRoot(Name::new("api").unwrap()))
+        );
+        roots.insert(
+            Name::new("api").unwrap(),
+            Url::parse("file:///another/api/?KNOWELL_CANARY_QUERY").unwrap(),
+        );
+        let error = to_sarif(&[finding], "test", &roots).unwrap_err();
+        assert_eq!(
+            error,
+            LinkError::InvalidSarifRoot(Name::new("api").unwrap())
+        );
+        assert!(!error.to_string().contains("KNOWELL_CANARY"));
     }
 
     #[test]

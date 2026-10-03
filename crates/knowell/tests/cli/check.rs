@@ -83,11 +83,17 @@ fn assert_locations(report: &Value, repo: &Path, expected: &[(&str, &str)]) {
             .unwrap();
         let physical = &result["locations"][0]["physicalLocation"];
         let artifact = &physical["artifactLocation"];
-        assert_eq!(artifact["uriBaseId"], *project);
+        assert!(artifact.get("uriBaseId").is_none());
         let base = run["originalUriBaseIds"][project]["uri"].as_str().unwrap();
         let uri = artifact["uri"].as_str().unwrap();
-        let resolved = Url::parse(base).unwrap().join(uri).unwrap();
+        // GitHub maps an absolute URI against its checkout without using URI base IDs.
+        let resolved = Url::parse(uri).unwrap();
+        assert_eq!(resolved.scheme(), "file");
+        assert_eq!(resolved.query(), None);
+        assert_eq!(resolved.fragment(), None);
         let file = std::fs::canonicalize(resolved.to_file_path().unwrap()).unwrap();
+        let project_root = Url::parse(base).unwrap().to_file_path().unwrap();
+        assert!(file.starts_with(std::fs::canonicalize(project_root).unwrap()));
         assert_eq!(file, std::fs::canonicalize(repo.join(path)).unwrap());
         assert_eq!(file.strip_prefix(&repo).unwrap(), Path::new(path));
         assert_eq!(physical["region"]["startLine"], 3);

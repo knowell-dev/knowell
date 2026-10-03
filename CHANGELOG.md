@@ -10,6 +10,8 @@ is released. Nothing has been released yet.
 
 ### Fixed
 
+- Emit absolute source file URIs in SARIF so GitHub places primary and related
+  locations under the checkout correctly, including monorepo project subdirectories.
 - Count Gemini batch entries separately in the request limiter, reject batches
   larger than the configured quota capacity, reserve request and token rates together,
   and bound live evaluation token rates.
