@@ -2,7 +2,8 @@
 //!
 //! Needs `KNOWELL_TEST_DATABASE_URL` (an admin connection URL); each test
 //! creates and drops its own database. Without the variable every test
-//! prints one skip line and passes, like knowell-store's own tests.
+//! prints one skip line and passes, like knowell-store's own tests, unless
+//! `KNOWELL_TEST_STRICT=1` turns the skip into a failure.
 
 use std::str::FromStr;
 use std::time::Duration;
@@ -23,6 +24,16 @@ use crate::webhooks::{github, github_push, secrets};
 
 const ENV: &str = "KNOWELL_TEST_DATABASE_URL";
 
+/// Set to `1` (CI database partitions, the Docker test runner) to make a
+/// missing prerequisite (database URL, `git`) fail the test instead of
+/// printing a skip line, so a suite that never ran cannot pass.
+pub(crate) const STRICT_ENV: &str = "KNOWELL_TEST_STRICT";
+
+/// Whether [`STRICT_ENV`] forbids skipping.
+pub(crate) fn strict() -> bool {
+    std::env::var(STRICT_ENV).is_ok_and(|value| value == "1")
+}
+
 pub(crate) struct TestDb {
     pub(crate) store: Store,
     _guard: DropDatabase,
@@ -31,6 +42,10 @@ pub(crate) struct TestDb {
 impl TestDb {
     pub(crate) async fn create(test: &str) -> Option<Self> {
         let Ok(url) = std::env::var(ENV) else {
+            assert!(
+                !strict(),
+                "{test} cannot run: {ENV} is not set, and {STRICT_ENV}=1 forbids skipping"
+            );
             eprintln!("skipping {test}: {ENV} is not set");
             return None;
         };

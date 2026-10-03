@@ -85,6 +85,11 @@ is released. Nothing has been released yet.
 
 ### Added
 
+- Docker test runner (`scripts/docker_test.py`, `deploy/test/`) for the Linux workspace
+  and panel suites against throwaway PostgreSQL 17 servers with and without pgvector
+  (PostgreSQL 18 on demand), without mounting the host directory.
+- `KNOWELL_TEST_STRICT=1` turns a missing test database URL or `git` into a test failure
+  instead of a silent skip; the CI Linux test partitions and the Docker runner set it.
 - Standalone `know profile list/show` reads tenant-authorized persisted profile metadata
   without a workspace, provider clients, credentials or source/profile registration.
 - Standalone `know memory list/show` and `know task list/show` over persisted Engine

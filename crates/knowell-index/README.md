@@ -364,7 +364,8 @@ them costs a full read of the next build.
 
 Unit tests need nothing. Integration tests need git and a PostgreSQL server with pgvector:
 set `KNOWELL_TEST_DATABASE_URL` as described in the knowell-store README; without it each
-test prints one skip line and passes. Embeddings use a counting wrapper around
+test prints one skip line and passes (it fails under `KNOWELL_TEST_STRICT=1`).
+Embeddings use a counting wrapper around
 `FakeEmbedder` (optionally with simulated latency); no real provider is contacted.
 
 ```sh

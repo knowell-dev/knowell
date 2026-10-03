@@ -184,6 +184,10 @@ fn external_database_end_to_end() {
 #[test]
 fn external_plain_postgres_initializes_core_and_reports_semantic_disabled() {
     let Ok(admin) = std::env::var("KNOWELL_TEST_PLAIN_DATABASE_URL") else {
+        assert!(
+            !crate::common::strict(),
+            "KNOWELL_TEST_PLAIN_DATABASE_URL is not set, and KNOWELL_TEST_STRICT=1 forbids skipping"
+        );
         eprintln!("skipping plain PostgreSQL CLI test: KNOWELL_TEST_PLAIN_DATABASE_URL is not set");
         return;
     };

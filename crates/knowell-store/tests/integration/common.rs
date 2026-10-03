@@ -3,7 +3,8 @@
 //! `KNOWELL_TEST_DATABASE_URL` points to an admin connection of a
 //! PostgreSQL server with pgvector. Each test creates a randomly named
 //! database, migrates it, and drops it (also on panic). Without the
-//! variable, tests print one skip line and pass.
+//! variable, tests print one skip line and pass (they fail under
+//! `KNOWELL_TEST_STRICT=1`).
 //! `KNOWELL_TEST_PLAIN_DATABASE_URL` selects a second, unmodified PostgreSQL
 //! server for tests which require pgvector to be unavailable.
 
@@ -19,6 +20,16 @@ use sqlx::{ConnectOptions, Connection};
 pub(crate) const ENV: &str = "KNOWELL_TEST_DATABASE_URL";
 pub(crate) const PLAIN_ENV: &str = "KNOWELL_TEST_PLAIN_DATABASE_URL";
 
+/// Set to `1` (CI database partitions, the Docker test runner) to make a
+/// missing prerequisite (database URL, `git`) fail the test instead of
+/// printing a skip line, so a suite that never ran cannot pass.
+pub(crate) const STRICT_ENV: &str = "KNOWELL_TEST_STRICT";
+
+/// Whether [`STRICT_ENV`] forbids skipping.
+pub(crate) fn strict() -> bool {
+    std::env::var(STRICT_ENV).is_ok_and(|value| value == "1")
+}
+
 /// The admin connection options, or `None` (with a skip notice) when the
 /// variable is unset. The URL itself is never printed.
 pub(crate) fn admin_options(test: &str) -> Option<PgConnectOptions> {
@@ -27,6 +38,10 @@ pub(crate) fn admin_options(test: &str) -> Option<PgConnectOptions> {
 
 fn admin_options_from(test: &str, variable: &str) -> Option<PgConnectOptions> {
     let Ok(url) = std::env::var(variable) else {
+        assert!(
+            !strict(),
+            "{test} cannot run: {variable} is not set, and {STRICT_ENV}=1 forbids skipping"
+        );
         eprintln!("skipping {test}: {variable} is not set");
         return None;
     };

@@ -21,6 +21,16 @@ fn binary_path() -> std::ffi::OsString {
 /// Admin URL of the throwaway test server (see the knowell-store README).
 pub(crate) const DB_ENV: &str = "KNOWELL_TEST_DATABASE_URL";
 
+/// Set to `1` (CI database partitions, the Docker test runner) to make a
+/// missing prerequisite (database URL, `git`) fail the test instead of
+/// printing a skip line, so a suite that never ran cannot pass.
+pub(crate) const STRICT_ENV: &str = "KNOWELL_TEST_STRICT";
+
+/// Whether [`STRICT_ENV`] forbids skipping.
+pub(crate) fn strict() -> bool {
+    std::env::var(STRICT_ENV).is_ok_and(|value| value == "1")
+}
+
 /// Variables of the developer's shell that must not leak into a sandbox.
 const SCRUBBED: &[&str] = &[
     "KNOWELL_LOG",
@@ -329,6 +339,10 @@ pub(crate) fn admin_url(test: &str) -> Option<String> {
     match std::env::var(DB_ENV) {
         Ok(url) if !url.is_empty() => Some(url),
         _ => {
+            assert!(
+                !strict(),
+                "{test} cannot run: {DB_ENV} is not set, and {STRICT_ENV}=1 forbids skipping"
+            );
             eprintln!("skipping {test}: {DB_ENV} is not set");
             None
         }
@@ -412,10 +426,15 @@ pub(crate) fn block_on<F: std::future::Future>(future: F) -> F::Output {
 
 /// Whether `git` can be run (the fixture generator needs it).
 pub(crate) fn git_available() -> bool {
-    Command::new("git")
+    let available = Command::new("git")
         .arg("--version")
         .output()
-        .is_ok_and(|o| o.status.success())
+        .is_ok_and(|o| o.status.success());
+    assert!(
+        available || !strict(),
+        "git is not available, and {STRICT_ENV}=1 forbids skipping"
+    );
+    available
 }
 
 /// Generates the synthetic multi-project fixture (one git repository per

@@ -6,11 +6,18 @@
 
 use knowell_eval::{FixtureManifest, FixtureSpec, Scale, WriteOptions, generate};
 
+/// Whether `git` can be run. `KNOWELL_TEST_STRICT=1` (CI, the Docker test
+/// runner) turns a missing `git` into a failure instead of a silent pass.
 fn git_available() -> bool {
-    std::process::Command::new("git")
+    let available = std::process::Command::new("git")
         .arg("--version")
         .output()
-        .is_ok_and(|output| output.status.success())
+        .is_ok_and(|output| output.status.success());
+    assert!(
+        available || !std::env::var("KNOWELL_TEST_STRICT").is_ok_and(|value| value == "1"),
+        "git is not available, and KNOWELL_TEST_STRICT=1 forbids skipping"
+    );
+    available
 }
 
 fn commits(manifest: &FixtureManifest) -> Vec<(String, String)> {

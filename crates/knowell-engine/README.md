@@ -257,7 +257,8 @@ python scripts/buildlock.py cargo test -p knowell-engine
 Unit tests run anywhere. `tests/engine/` indexes the acme-goods fixture (seed 42, Small,
 written with git) with `FakeEmbedder` against `KNOWELL_TEST_DATABASE_URL` (see the
 knowell-store README) and drives every tool, the REST engine and the `hybrid` retriever;
-without the variable it prints one skip line and passes.
+without the variable it prints one skip line and passes (it fails under
+`KNOWELL_TEST_STRICT=1`; see the knowell-store README).
 
 `KNOWELL_TEST_PLAIN_DATABASE_URL` enables the separate unmodified-PostgreSQL test:
 the same fixture serves lexical search, symbol references, graph and sourced memory

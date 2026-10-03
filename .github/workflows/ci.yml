@@ -237,6 +237,8 @@ jobs:
     env:
       KNOWELL_TEST_DATABASE_URL: postgres://postgres:knowell-test@localhost:5432/postgres
       KNOWELL_TEST_PLAIN_DATABASE_URL: postgres://postgres:knowell-test@localhost:5433/postgres
+      # Both servers and git are present: a skipped database test here is a failure.
+      KNOWELL_TEST_STRICT: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

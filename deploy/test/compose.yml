@@ -1,0 +1,97 @@
+# Linux test environment: the Rust workspace and the panel against throwaway PostgreSQL
+# servers, with every test prerequisite required (KNOWELL_TEST_STRICT=1). Use it through
+# scripts/docker_test.py, which first copies the source into the `source` volume, and run
+# that through the machine-wide build lock:
+#
+#   python scripts/buildlock.py python scripts/docker_test.py
+#   python scripts/buildlock.py python scripts/docker_test.py cargo test -p knowell-store --locked
+#   python scripts/buildlock.py python scripts/docker_test.py --panel
+#   python scripts/docker_test.py --down    # stop the databases (nothing in them is kept)
+#
+# Only synthetic data is involved: the database password is a fixed test value, no host
+# environment file or provider key is passed in, and the host directory is never mounted.
+# Build output lives in named volumes, never in the host's target/ or panel/.
+name: knowell-test
+
+x-postgres: &postgres
+  environment:
+    POSTGRES_PASSWORD: knowell-test
+  # Each test creates and drops its own database; nothing needs to survive `down`.
+  tmpfs:
+    - /var/lib/postgresql
+  shm_size: 256mb
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U postgres"]
+    interval: 2s
+    timeout: 5s
+    retries: 30
+
+services:
+  # Same images and digests as the CI Linux lane (.github/workflows/ci.yml).
+  pg:
+    <<: *postgres
+    image: pgvector/pgvector:0.8.7-pg17@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
+
+  pg-plain:
+    <<: *postgres
+    image: postgres:17@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f
+
+  # PostgreSQL 18, on demand: `--profile pg18` and point KNOWELL_TEST_DATABASE_URL at it.
+  pg18:
+    <<: *postgres
+    image: pgvector/pgvector:0.8.7-pg18@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+    profiles: [pg18]
+
+  # Receives the source as a tar stream on stdin (scripts/docker_test.py).
+  sync:
+    build: .
+    image: knowell-test-rust
+    profiles: [tools]
+    command: ["sh", "-c", "find /src -mindepth 1 -delete && tar -xf - -C /src"]
+    volumes:
+      - source:/src
+
+  rust:
+    build: .
+    image: knowell-test-rust
+    depends_on:
+      pg:
+        condition: service_healthy
+      pg-plain:
+        condition: service_healthy
+    environment:
+      KNOWELL_TEST_DATABASE_URL: postgres://postgres:knowell-test@pg:5432/postgres
+      KNOWELL_TEST_PLAIN_DATABASE_URL: postgres://postgres:knowell-test@pg-plain:5432/postgres
+      KNOWELL_TEST_STRICT: "1"
+      # The build lock exports CARGO_BUILD_JOBS=4 to this command; keep tests at four
+      # threads too, as in the local gates (some latency assertions are load-sensitive).
+      CARGO_BUILD_JOBS: ${CARGO_BUILD_JOBS:-4}
+      RUST_TEST_THREADS: ${RUST_TEST_THREADS:-4}
+    volumes:
+      - source:/src:ro
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - cargo-target:/cargo-target
+    mem_limit: ${KNOWELL_TEST_MEMORY:-10g}
+
+  panel:
+    image: node:24-bookworm-slim@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6
+    working_dir: /work
+    # Works on a writable copy of the read-only source; node_modules is installed fresh
+    # for Linux (git ignores the host's copy, so it is never synced).
+    entrypoint: ["/bin/sh", "-c", "cp -a /src/panel/. /work/ && exec \"$$@\"", "panel"]
+    command:
+      - sh
+      - -c
+      - npm ci --no-audit --no-fund && npm run check && npm run lint && npm test && npm run build
+    volumes:
+      - source:/src:ro
+      - npm-cache:/root/.npm
+    mem_limit: ${KNOWELL_TEST_PANEL_MEMORY:-4g}
+
+volumes:
+  source:
+  cargo-registry:
+  cargo-git:
+  cargo-target:
+  npm-cache:

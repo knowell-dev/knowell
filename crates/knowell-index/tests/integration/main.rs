@@ -3,7 +3,7 @@
 //!
 //! Set `KNOWELL_TEST_DATABASE_URL` to an admin connection URL (see the
 //! knowell-store README); without it every test prints one skip line and
-//! passes. Embeddings use a counting wrapper around `FakeEmbedder`; no real
+//! passes (a failure under `KNOWELL_TEST_STRICT=1`). Embeddings use a counting wrapper around `FakeEmbedder`; no real
 //! provider is ever contacted.
 
 // Test helpers outside `#[test]` functions may panic and print.

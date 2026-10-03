@@ -12,6 +12,9 @@ Unit tests need nothing. Integration tests need a PostgreSQL server with pgvecto
 randomly named database (`knowell_test_<uuid>`), runs the migrations, and drops the
 database afterwards, also when the test panics. Without the variable, each integration
 test prints one `skipping …` line and passes (CI provides a service container).
+Set `KNOWELL_TEST_STRICT=1` to make every such skip (a missing database URL or `git`)
+fail instead, so a suite that never ran cannot pass; CI's database partitions and the
+Docker test runner (`deploy/test/`) set it.
 
 ```sh
 # Throwaway local server (the password is a test-only default, not a secret):

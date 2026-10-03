@@ -25,11 +25,25 @@ use sqlx::{ConnectOptions, Connection};
 
 pub(crate) const ENV: &str = "KNOWELL_TEST_DATABASE_URL";
 
+/// Set to `1` (CI database partitions, the Docker test runner) to make a
+/// missing prerequisite (database URL, `git`) fail the test instead of
+/// printing a skip line, so a suite that never ran cannot pass.
+pub(crate) const STRICT_ENV: &str = "KNOWELL_TEST_STRICT";
+
+/// Whether [`STRICT_ENV`] forbids skipping.
+pub(crate) fn strict() -> bool {
+    std::env::var(STRICT_ENV).is_ok_and(|value| value == "1")
+}
+
 /// Generous bound for anything asynchronous (watchers, workers).
 pub(crate) const PATIENCE: Duration = Duration::from_secs(90);
 
 pub(crate) fn admin_options(test: &str) -> Option<PgConnectOptions> {
     let Ok(url) = std::env::var(ENV) else {
+        assert!(
+            !strict(),
+            "{test} cannot run: {ENV} is not set, and {STRICT_ENV}=1 forbids skipping"
+        );
         eprintln!("skipping {test}: {ENV} is not set");
         return None;
     };
@@ -242,10 +256,15 @@ impl Workspace {
 }
 
 pub(crate) fn git_available() -> bool {
-    Command::new("git")
+    let available = Command::new("git")
         .arg("--version")
         .output()
-        .is_ok_and(|o| o.status.success())
+        .is_ok_and(|o| o.status.success());
+    assert!(
+        available || !strict(),
+        "git is not available, and {STRICT_ENV}=1 forbids skipping"
+    );
+    available
 }
 
 /// The Small fixture (seed 42) as git repositories, resolved; restricted to
