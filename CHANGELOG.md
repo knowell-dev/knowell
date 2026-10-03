@@ -10,6 +10,9 @@ is released. Nothing has been released yet.
 
 ### Fixed
 
+- Refuse degraded hybrid evaluations and expose the real engine through
+  `know eval run --retriever hybrid`, using isolated scratch databases and
+  deterministic local embeddings for the CI relevance baseline.
 - Resolve hub MCP identities against current tenant grants and preserve token scopes
   across the HTTP-to-engine boundary, including reuse of cached contexts.
 - Verify login against authenticated hub health, rejecting malformed responses,

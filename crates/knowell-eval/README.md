@@ -23,6 +23,38 @@ let report = run(&corpus, &queries, &[&grep], 10)?;
 println!("{}", report.to_markdown());
 ```
 
+## Measuring the engine from the CLI
+
+`know eval run --retriever grep --retriever bm25 --retriever hybrid
+--database-url env:KNOWELL_EVAL_DATABASE_URL` runs all three retrievers over the
+same generated fixture and graded query set. The URL must be a secret reference
+to a PostgreSQL 17/18 server with pgvector 0.8 or newer and a role with `CREATEDB`.
+The command creates a uniquely named `knowell_eval_*` database, indexes all ten
+projects with the real engine, then removes that database on success or error.
+It never migrates or indexes into the database named in the supplied URL.
+A killed process can leave its generated scratch database for manual cleanup.
+
+Hybrid currently uses the deterministic, local `FakeEmbedder` at 64 dimensions,
+with default engine chunking, intent weights and quotas. It makes no provider
+requests. Indexing is serial to keep approximate vector index insertion stable;
+the baseline measures relevance, not indexing speed or latency. Incomplete
+embedding coverage and degraded searches fail the evaluation instead of being
+reported as a successful hybrid measurement. `--bm25-coordination` is refused
+alongside hybrid because it only configures the standalone BM25 retriever.
+
+`eval/baselines/synthetic-small-hybrid.json` records seed 42, Small, depth 10
+with grep, BM25 and hybrid. CI compares all three against this baseline. The
+original lexical-only baseline is retained for the database-free CLI regression.
+These deterministic embeddings test ranking integration; they do not establish
+Gemini retrieval quality. Live 768/1536/3072 measurements remain pending.
+
+Measured on Windows with PostgreSQL 17 and pgvector 0.8.7, 249 allowed documents
+and 67 queries (61 ranked, 6 absent): hybrid Recall@10 is 0.4238, MRR@10 0.4923,
+nDCG@10 0.3822; BM25 Recall@10 is 0.5992 and grep 0.5805. Hybrid answered all six
+absent queries with results (abstention 0). This is a measured limitation of the
+current deterministic pipeline, not a quality improvement claim. No weights,
+quotas or chunk sizes were tuned to this evaluation set.
+
 ## Why a synthetic fixture
 
 Retrieval quality depends heavily on the code it runs on, and the only code

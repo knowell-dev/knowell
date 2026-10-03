@@ -26,6 +26,9 @@ pub const HYBRID_RETRIEVER: &str = "hybrid";
 /// The engine's hybrid search (exact + BM25 + vectors, fused) as an
 /// evaluation retriever. Graph expansion is off: expanded items are not
 /// ranked results.
+///
+/// A degraded search returns an evaluation error. Measuring a partial
+/// pipeline under the `hybrid` name would hide unavailable components.
 pub struct HybridRetriever {
     engine: Engine,
     pinned: Arc<Pinned>,
@@ -90,6 +93,9 @@ impl HybridRetriever {
             )
             .await
             .map_err(|e| e.to_string())?;
+        if !run.response.degraded.is_empty() {
+            return Err("hybrid evaluation requires every requested search component to succeed; inspect index and provider health".to_owned());
+        }
         let mut seen = BTreeSet::new();
         let mut out = Vec::new();
         for result in &run.response.results {

@@ -1258,7 +1258,30 @@ async fn engine_serves_every_tool_over_the_indexed_fixture() {
     let hybrid = HybridRetriever::new(&engine, &access, &name("acme-goods"))
         .await
         .unwrap();
-    // The fixture changed (one commit); measure on the original files.
+    // Earlier in this test a local-only project deliberately named a cloud
+    // provider. Evaluation must report that incomplete semantic coverage.
+    let error = hybrid
+        .search("how do we cancel a subscription", 10)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("every requested search component"),
+        "{error}"
+    );
+
+    // Preserve the positive evaluation coverage on a fully indexed fixture.
+    let complete_ws = fixture_workspace();
+    let complete_db = require_db!();
+    let complete_engine = indexed_engine(
+        &complete_db,
+        &complete_ws,
+        &complete_ws.dir.path().join("eval-data"),
+    )
+    .await;
+    let hybrid = HybridRetriever::new(&complete_engine, &access, &name("acme-goods"))
+        .await
+        .unwrap();
     let measured_root = tempfile::tempdir().unwrap();
     let original_root = measured_root.path().join("ws");
     ws.fixture
@@ -1273,4 +1296,22 @@ async fn engine_serves_every_tool_over_the_indexed_fixture() {
     eprintln!("{}", report.to_markdown());
     let hybrid_report = report.retriever("hybrid").unwrap();
     assert!(hybrid_report.overall.recall_at_10.unwrap_or(0.0) > 0.0);
+
+    // A vector-store outage must not turn the evaluation into an apparently
+    // successful lexical-only run. This database belongs only to this test.
+    let mut conn = complete_db.store.acquire().await.unwrap();
+    sqlx::query("ALTER TABLE embedding RENAME TO unavailable_embedding")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
+    let error = hybrid
+        .search("how do we cancel a subscription", 10)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("every requested search component"),
+        "{error}"
+    );
 }

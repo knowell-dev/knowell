@@ -40,7 +40,7 @@ pub(crate) enum EvalCommand {
         /// Workspace size.
         #[arg(long, value_enum, default_value_t = ScaleArg::Small)]
         scale: ScaleArg,
-        /// Retrievers to measure (repeatable). Default: all available.
+        /// Retrievers to measure (repeatable). Default: grep and bm25.
         #[arg(long = "retriever", value_enum)]
         retrievers: Vec<RetrieverArg>,
         /// Results requested per query.
@@ -66,6 +66,10 @@ pub(crate) enum EvalCommand {
         /// Override the BM25 coordination exponent (tuning experiments).
         #[arg(long, value_name = "EXPONENT")]
         bm25_coordination: Option<f32>,
+        /// Admin PostgreSQL URL reference (env:NAME or file:/path). Hybrid
+        /// creates and drops its own scratch database; pgvector is required.
+        #[arg(long, value_name = "SECRET_REF")]
+        database_url: Option<String>,
     },
 }
 
@@ -95,6 +99,8 @@ pub(crate) enum RetrieverArg {
     Grep,
     /// Knowell's code-aware BM25 index.
     Bm25,
+    /// The real engine with deterministic local embeddings (64 dimensions).
+    Hybrid,
 }
 
 pub(crate) fn run(cmd: EvalCommand, out: &mut Output) -> anyhow::Result<ExitCode> {
@@ -137,6 +143,7 @@ pub(crate) fn run(cmd: EvalCommand, out: &mut Output) -> anyhow::Result<ExitCode
             tolerance,
             keep,
             bm25_coordination,
+            database_url,
         } => {
             let opts = RunOptions {
                 bm25_coordination,
@@ -151,6 +158,7 @@ pub(crate) fn run(cmd: EvalCommand, out: &mut Output) -> anyhow::Result<ExitCode
                 baseline,
                 tolerance,
                 keep,
+                database_url,
             };
             run_eval(opts, out)
         }
@@ -158,6 +166,7 @@ pub(crate) fn run(cmd: EvalCommand, out: &mut Output) -> anyhow::Result<ExitCode
 }
 
 struct RunOptions {
+    database_url: Option<String>,
     bm25_coordination: Option<f32>,
     spec: FixtureSpec,
     retrievers: Vec<RetrieverArg>,
@@ -170,6 +179,21 @@ struct RunOptions {
 }
 
 fn run_eval(opts: RunOptions, out: &mut Output) -> anyhow::Result<ExitCode> {
+    let hybrid = opts.retrievers.contains(&RetrieverArg::Hybrid);
+    if hybrid && opts.database_url.is_none() {
+        bail!("hybrid requires --database-url with an env:NAME or file:/path reference");
+    }
+    if !hybrid && opts.database_url.is_some() {
+        bail!("--database-url requires --retriever hybrid");
+    }
+    if hybrid && opts.bm25_coordination.is_some() {
+        bail!(
+            "--bm25-coordination does not configure the hybrid engine; run this experiment separately"
+        );
+    }
+    if opts.depth < knowell_eval::RANK_CUTOFF {
+        bail!("evaluation depth must be at least 10");
+    }
     let fixture = generate(&opts.spec);
     let queries = QuerySet::builtin()?;
     queries.validate_against(&fixture)?;
@@ -185,7 +209,7 @@ fn run_eval(opts: RunOptions, out: &mut Output) -> anyhow::Result<ExitCode> {
         }
     };
     fixture
-        .write_to(root, &WriteOptions { git: false })
+        .write_to(root, &WriteOptions { git: hybrid })
         .with_context(|| format!("cannot write the fixture to {}", root.display()))?;
     let walked = walk_fixture(root, &fixture)?;
     tracing::info!(
@@ -195,7 +219,12 @@ fn run_eval(opts: RunOptions, out: &mut Output) -> anyhow::Result<ExitCode> {
         walked.redactions.len()
     );
 
-    let report = measure(&fixture, &walked.corpus, &queries, &opts)?;
+    let report = match &opts.database_url {
+        Some(reference) => crate::eval_hybrid::measure(root, &fixture, reference, |hybrid| {
+            measure(&fixture, &walked.corpus, &queries, &opts, Some(hybrid))
+        })?,
+        None => measure(&fixture, &walked.corpus, &queries, &opts, None)?,
+    };
     let mut markdown = report.to_markdown();
     let mut regressed = false;
     if let Some(path) = &opts.baseline {
@@ -235,6 +264,7 @@ fn measure(
     corpus: &knowell_eval::Corpus,
     queries: &QuerySet,
     opts: &RunOptions,
+    hybrid: Option<&dyn Retriever>,
 ) -> anyhow::Result<Report> {
     let mut wanted = if opts.retrievers.is_empty() {
         vec![RetrieverArg::Grep, RetrieverArg::Bm25]
@@ -255,9 +285,13 @@ fn measure(
                 }
                 owned.push(Box::new(Bm25Retriever::with_options(corpus, options)?));
             }
+            RetrieverArg::Hybrid => {}
         }
     }
-    let refs: Vec<&dyn Retriever> = owned.iter().map(AsRef::as_ref).collect();
+    let mut refs: Vec<&dyn Retriever> = owned.iter().map(AsRef::as_ref).collect();
+    if let Some(hybrid) = hybrid {
+        refs.push(hybrid);
+    }
     if refs.is_empty() {
         bail!("no retriever selected");
     }

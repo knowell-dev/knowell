@@ -1,0 +1,4349 @@
+{
+  "format_version": 1,
+  "fixture": {
+    "name": "acme-goods",
+    "seed": 42,
+    "scale": "small",
+    "tree_hash": "d6ea3857f12680c854a946e62cff25db18eb629645e1e485bc36eddfe989b2fc"
+  },
+  "query_set": {
+    "fixture": "acme-goods",
+    "hash": "f880ddefe6ed7d38a697f9f8c92fb62710598ed443202d064d71a8030fb776db",
+    "queries": 67,
+    "ranked": 61,
+    "absent": 6
+  },
+  "corpus_docs": 249,
+  "corpus_hash": "4f6182026a64a1c2fe3d1811436b79ed9f4851d9d1649c28dc11e3bb3dc268e9",
+  "depth": 10,
+  "judged_docs_missing_from_corpus": [],
+  "retrievers": [
+    {
+      "name": "grep",
+      "overall": {
+        "ranked_queries": 61,
+        "absent_queries": 6,
+        "recall_at_1": 0.1963,
+        "recall_at_5": 0.4798,
+        "recall_at_10": 0.5805,
+        "mrr_at_10": 0.594,
+        "ndcg_at_10": 0.5025,
+        "abstain_rate": 0.3333
+      },
+      "by_kind": {
+        "absent": {
+          "ranked_queries": 0,
+          "absent_queries": 6,
+          "recall_at_1": null,
+          "recall_at_5": null,
+          "recall_at_10": null,
+          "mrr_at_10": null,
+          "ndcg_at_10": null,
+          "abstain_rate": 0.3333
+        },
+        "behavior": {
+          "ranked_queries": 14,
+          "absent_queries": 0,
+          "recall_at_1": 0.1274,
+          "recall_at_5": 0.2964,
+          "recall_at_10": 0.3345,
+          "mrr_at_10": 0.3571,
+          "ndcg_at_10": 0.3335,
+          "abstain_rate": null
+        },
+        "config": {
+          "ranked_queries": 7,
+          "absent_queries": 0,
+          "recall_at_1": 0.2738,
+          "recall_at_5": 0.5476,
+          "recall_at_10": 0.6012,
+          "mrr_at_10": 0.6786,
+          "ndcg_at_10": 0.5306,
+          "abstain_rate": null
+        },
+        "contract": {
+          "ranked_queries": 9,
+          "absent_queries": 0,
+          "recall_at_1": 0.1204,
+          "recall_at_5": 0.5602,
+          "recall_at_10": 0.7639,
+          "mrr_at_10": 0.6944,
+          "ndcg_at_10": 0.6321,
+          "abstain_rate": null
+        },
+        "cross_project": {
+          "ranked_queries": 7,
+          "absent_queries": 0,
+          "recall_at_1": 0.0464,
+          "recall_at_5": 0.1536,
+          "recall_at_10": 0.3179,
+          "mrr_at_10": 0.4333,
+          "ndcg_at_10": 0.2902,
+          "abstain_rate": null
+        },
+        "history_doc": {
+          "ranked_queries": 7,
+          "absent_queries": 0,
+          "recall_at_1": 0.1667,
+          "recall_at_5": 0.3571,
+          "recall_at_10": 0.4524,
+          "mrr_at_10": 0.5,
+          "ndcg_at_10": 0.4291,
+          "abstain_rate": null
+        },
+        "i18n": {
+          "ranked_queries": 7,
+          "absent_queries": 0,
+          "recall_at_1": 0.0952,
+          "recall_at_5": 0.4524,
+          "recall_at_10": 0.6071,
+          "mrr_at_10": 0.5286,
+          "ndcg_at_10": 0.4901,
+          "abstain_rate": null
+        },
+        "symbol": {
+          "ranked_queries": 10,
+          "absent_queries": 0,
+          "recall_at_1": 0.5033,
+          "recall_at_5": 0.95,
+          "recall_at_10": 1.0,
+          "mrr_at_10": 1.0,
+          "ndcg_at_10": 0.8114,
+          "abstain_rate": null
+        }
+      },
+      "by_lang": {
+        "en": {
+          "ranked_queries": 37,
+          "absent_queries": 3,
+          "recall_at_1": 0.2223,
+          "recall_at_5": 0.5601,
+          "recall_at_10": 0.6856,
+          "mrr_at_10": 0.7266,
+          "ndcg_at_10": 0.5958,
+          "abstain_rate": 0.0
+        },
+        "tr": {
+          "ranked_queries": 24,
+          "absent_queries": 3,
+          "recall_at_1": 0.1563,
+          "recall_at_5": 0.3559,
+          "recall_at_10": 0.4184,
+          "mrr_at_10": 0.3896,
+          "ndcg_at_10": 0.3586,
+          "abstain_rate": 0.6667
+        }
+      },
+      "queries": [
+        {
+          "id": "sym-subscription-service-cancel",
+          "kind": "symbol",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "billing-api/src/subscriptions/subscriptions.controller.ts",
+            "billing-api/src/subscriptions/subscription.service.ts",
+            "storefront-web/src/components/CancelSubscriptionDialog.tsx",
+            "contracts/openapi/billing-api.yaml",
+            "storefront-web/src/pages/account/subscription.tsx"
+          ],
+          "metrics": {
+            "recall_at_1": 0.5,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.7098,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "sym-cancel-subscription-web",
+          "kind": "symbol",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "storefront-web/src/api/subscriptions.ts",
+            "storefront-web/README.md",
+            "storefront-web/src/api/client.ts",
+            "storefront-web/src/api/orders.ts",
+            "storefront-web/src/components/CancelSubscriptionDialog.tsx"
+          ],
+          "metrics": {
+            "recall_at_1": 0.5,
+            "recall_at_5": 0.5,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.961,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "sym-tr-cancel-subscription-mobile",
+          "kind": "symbol",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "mobile-app/lib/screens/subscription_screen.dart",
+            "mobile-app/lib/api/subscription_api.dart",
+            "mobile-app/lib/l10n/app_en.arb",
+            "mobile-app/lib/l10n/app_tr.arb",
+            "storefront-web/src/components/CancelSubscriptionDialog.tsx"
+          ],
+          "metrics": {
+            "recall_at_1": 0.5,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.7098,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "sym-idempotency-store",
+          "kind": "symbol",
+          "lang": "en",
+          "returned": 2,
+          "top": [
+            "ledger-service/ledger/payments/capture.py",
+            "ledger-service/ledger/payments/idempotency.py"
+          ],
+          "metrics": {
+            "recall_at_1": 0.5,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.834,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "sym-cancel-pending-for-subscription",
+          "kind": "symbol",
+          "lang": "en",
+          "returned": 2,
+          "top": [
+            "orders-service/internal/store/postgres.go",
+            "orders-service/internal/events/subscription_consumer.go"
+          ],
+          "metrics": {
+            "recall_at_1": 0.5,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 1.0,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "sym-smtp-mailer",
+          "kind": "symbol",
+          "lang": "en",
+          "returned": 5,
+          "top": [
+            "notification-worker/src/consumer.rs",
+            "notification-worker/src/handlers/payment_receipt.rs",
+            "notification-worker/src/handlers/subscription_cancelled.rs",
+            "notification-worker/src/mailer.rs",
+            "notification-worker/src/main.rs"
+          ],
+          "metrics": {
+            "recall_at_1": 0.2,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.6183,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "sym-jwt-auth-guard",
+          "kind": "symbol",
+          "lang": "en",
+          "returned": 5,
+          "top": [
+            "billing-api/src/checkout/checkout.controller.ts",
+            "billing-api/src/subscriptions/subscriptions.controller.ts",
+            "billing-api/src/auth/current-customer.decorator.ts",
+            "billing-api/src/auth/jwt-auth.guard.ts",
+            "billing-api/src/auth/subscription-owner.guard.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.3333,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.5714,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "sym-tr-capture-payment",
+          "kind": "symbol",
+          "lang": "tr",
+          "returned": 2,
+          "top": [
+            "ledger-service/ledger/api/payments.py",
+            "ledger-service/ledger/payments/capture.py"
+          ],
+          "metrics": {
+            "recall_at_1": 0.5,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.7098,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "sym-tr-subscription-screen",
+          "kind": "symbol",
+          "lang": "tr",
+          "returned": 4,
+          "top": [
+            "mobile-app/lib/screens/subscription_screen.dart",
+            "mobile-app/lib/main.dart",
+            "mobile-app/lib/screens/order_history_screen.dart",
+            "mobile-app/lib/features/suppliers/widgets/purchase_order_repository.dart"
+          ],
+          "metrics": {
+            "recall_at_1": 0.5,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 1.0,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "sym-prorated-amount",
+          "kind": "symbol",
+          "lang": "en",
+          "returned": 1,
+          "top": [
+            "ledger-service/ledger/payments/refunds.py"
+          ],
+          "metrics": {
+            "recall_at_1": 1.0,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 1.0,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "beh-prevent-double-charge",
+          "kind": "behavior",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "billing-api/src/subscriptions/subscription.service.ts",
+            "orders-service/internal/store/postgres.go",
+            "orders-service/internal/orders/model.go",
+            "contracts/openapi/ledger-api.yaml",
+            "handbook/adr/0004-idempotency-keys-for-payment-capture.md"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.1667,
+            "recall_at_10": 0.1667,
+            "reciprocal_rank": 0.2,
+            "ndcg_at_10": 0.0275,
+            "first_relevant_rank": 5
+          }
+        },
+        {
+          "id": "beh-tr-prevent-double-charge",
+          "kind": "behavior",
+          "lang": "tr",
+          "returned": 3,
+          "top": [
+            "handbook/adr/0006-bildirim-iscisi-rust.md",
+            "notification-worker/templates/subscription_cancelled.tr.txt",
+            "storefront-web/src/i18n/locales/tr.json"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "beh-email-retry",
+          "kind": "behavior",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "billing-api/src/auth/jwt-auth.guard.ts",
+            "handbook/adr/0004-idempotency-keys-for-payment-capture.md",
+            "billing-api/src/modules/addresses/partners/address.repository.ts",
+            "ledger-service/ledger/payments/capture.py",
+            "storefront-web/src/api/checkout.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.3333,
+            "reciprocal_rank": 0.1,
+            "ndcg_at_10": 0.2154,
+            "first_relevant_rank": 10
+          }
+        },
+        {
+          "id": "beh-billing-authentication",
+          "kind": "behavior",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "billing-api/src/subscriptions/subscriptions.controller.ts",
+            "billing-api/src/checkout/checkout.controller.ts",
+            "billing-api/src/subscriptions/subscription.service.ts",
+            "infra/docker-compose.yml",
+            "infra/k8s/billing-api.yaml"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "beh-refund-early-stop",
+          "kind": "behavior",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "ledger-service/ledger/payments/refunds.py",
+            "storefront-web/README.md",
+            "storefront-web/src/api/subscriptions.ts",
+            "handbook/adr/0005-cancel-at-period-end.md",
+            "handbook/glossary.md"
+          ],
+          "metrics": {
+            "recall_at_1": 0.2,
+            "recall_at_5": 0.4,
+            "recall_at_10": 0.6,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.835,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "beh-tr-refund-early-stop",
+          "kind": "behavior",
+          "lang": "tr",
+          "returned": 1,
+          "top": [
+            "handbook/adr/0006-bildirim-iscisi-rust.md"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "beh-order-marked-paid",
+          "kind": "behavior",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "orders-service/README.md",
+            "orders-service/internal/events/payment_consumer.go",
+            "handbook/adr/0005-cancel-at-period-end.md",
+            "orders-service/internal/store/postgres.go",
+            "billing-api/src/checkout/checkout.service.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.6667,
+            "recall_at_10": 0.6667,
+            "reciprocal_rank": 0.5,
+            "ndcg_at_10": 0.6078,
+            "first_relevant_rank": 2
+          }
+        },
+        {
+          "id": "beh-access-after-cancel",
+          "kind": "behavior",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "billing-api/src/subscriptions/subscription.service.ts",
+            "handbook/adr/0005-cancel-at-period-end.md",
+            "mobile-app/lib/l10n/app_en.arb",
+            "storefront-web/src/api/subscriptions.ts",
+            "storefront-web/src/i18n/locales/en.json"
+          ],
+          "metrics": {
+            "recall_at_1": 0.3333,
+            "recall_at_5": 0.6667,
+            "recall_at_10": 0.6667,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.9468,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "beh-tr-mobile-cancel-confirmation",
+          "kind": "behavior",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "mobile-app/lib/screens/subscription_screen.dart",
+            "mobile-app/lib/l10n/app_tr.arb",
+            "handbook/adr/0006-bildirim-iscisi-rust.md",
+            "notification-worker/templates/subscription_cancelled.tr.txt",
+            "mobile-app/pubspec.yaml"
+          ],
+          "metrics": {
+            "recall_at_1": 1.0,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 1.0,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "beh-tr-session-token-header",
+          "kind": "behavior",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "mobile-app/pubspec.yaml",
+            "mobile-app/README.md",
+            "db-migrations/migrations/0009_add_cancel_reason_to_subscriptions.sql",
+            "handbook/adr/0004-idempotency-keys-for-payment-capture.md",
+            "mobile-app/lib/api/api_client.dart"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.5,
+            "recall_at_10": 0.5,
+            "reciprocal_rank": 0.2,
+            "ndcg_at_10": 0.3045,
+            "first_relevant_rank": 5
+          }
+        },
+        {
+          "id": "beh-psp-timeout",
+          "kind": "behavior",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "billing-api/src/subscriptions/subscription.service.ts",
+            "storefront-web/src/features/suppliers/internal/PurchaseOrderCard.tsx",
+            "handbook/glossary.md",
+            "billing-api/src/auth/subscription-owner.guard.ts",
+            "mobile-app/lib/features/seo/presentation/sitemap_repository.dart"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "beh-idempotency-ttl",
+          "kind": "behavior",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "ledger-service/ledger/payments/idempotency.py",
+            "db-migrations/migrations/0006_create_idempotency_keys.sql",
+            "handbook/adr/0004-idempotency-keys-for-payment-capture.md",
+            "handbook/README.md",
+            "handbook/runbooks/payment-capture-incidents.md"
+          ],
+          "metrics": {
+            "recall_at_1": 0.25,
+            "recall_at_5": 0.75,
+            "recall_at_10": 0.75,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.7314,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "beh-tr-order-history-paging",
+          "kind": "behavior",
+          "lang": "tr",
+          "returned": 3,
+          "top": [
+            "storefront-web/src/i18n/locales/tr.json",
+            "mobile-app/lib/l10n/app_tr.arb",
+            "notification-worker/templates/subscription_cancelled.tr.txt"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "beh-foreign-subscription-access",
+          "kind": "behavior",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "orders-service/internal/store/postgres.go",
+            "ledger-service/ledger/payments/refunds.py",
+            "orders-service/internal/orders/model.go",
+            "storefront-web/src/i18n/locales/en.json",
+            "ledger-service/ledger/api/refunds.py"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "xp-cancel-end-to-end",
+          "kind": "cross_project",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "orders-service/internal/store/postgres.go",
+            "orders-service/README.md",
+            "billing-api/src/subscriptions/subscription.service.ts",
+            "ledger-service/ledger/payments/refunds.py",
+            "orders-service/internal/orders/model.go"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.25,
+            "recall_at_10": 0.625,
+            "reciprocal_rank": 0.3333,
+            "ndcg_at_10": 0.5028,
+            "first_relevant_rank": 3
+          }
+        },
+        {
+          "id": "xp-tr-cancel-triggers",
+          "kind": "cross_project",
+          "lang": "tr",
+          "returned": 6,
+          "top": [
+            "mobile-app/lib/l10n/app_tr.arb",
+            "storefront-web/src/i18n/locales/tr.json",
+            "handbook/adr/0006-bildirim-iscisi-rust.md",
+            "mobile-app/lib/screens/subscription_screen.dart",
+            "notification-worker/src/handlers/subscription_cancelled.rs"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.1667,
+            "recall_at_10": 0.1667,
+            "reciprocal_rank": 0.2,
+            "ndcg_at_10": 0.1811,
+            "first_relevant_rank": 5
+          }
+        },
+        {
+          "id": "xp-checkout-to-capture",
+          "kind": "cross_project",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "storefront-web/src/pages/checkout.tsx",
+            "storefront-web/src/features/inventory/mobile-web/LocationCard.tsx",
+            "handbook/adr/0004-idempotency-keys-for-payment-capture.md",
+            "orders-service/README.md",
+            "storefront-web/src/i18n/locales/en.json"
+          ],
+          "metrics": {
+            "recall_at_1": 0.125,
+            "recall_at_5": 0.125,
+            "recall_at_10": 0.5,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.4191,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "xp-tr-payment-to-order-status",
+          "kind": "cross_project",
+          "lang": "tr",
+          "returned": 2,
+          "top": [
+            "storefront-web/src/i18n/locales/tr.json",
+            "mobile-app/lib/l10n/app_tr.arb"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "xp-cancel-email-from-mobile",
+          "kind": "cross_project",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "mobile-app/lib/screens/subscription_screen.dart",
+            "billing-api/src/subscriptions/subscription.service.ts",
+            "mobile-app/lib/l10n/app_en.arb",
+            "mobile-app/lib/l10n/app_tr.arb",
+            "mobile-app/lib/api/subscription_api.dart"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.3333,
+            "recall_at_10": 0.3333,
+            "reciprocal_rank": 0.5,
+            "ndcg_at_10": 0.2457,
+            "first_relevant_rank": 2
+          }
+        },
+        {
+          "id": "xp-order-history-sources",
+          "kind": "cross_project",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "orders-service/internal/httpapi/handlers.go",
+            "orders-service/README.md",
+            "storefront-web/src/i18n/locales/en.json",
+            "storefront-web/README.md",
+            "infra/k8s/billing-api.yaml"
+          ],
+          "metrics": {
+            "recall_at_1": 0.2,
+            "recall_at_5": 0.2,
+            "recall_at_10": 0.6,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.6828,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "xp-tr-checkout-order-creation",
+          "kind": "cross_project",
+          "lang": "tr",
+          "returned": 3,
+          "top": [
+            "storefront-web/src/i18n/locales/tr.json",
+            "handbook/adr/0006-bildirim-iscisi-rust.md",
+            "mobile-app/lib/l10n/app_tr.arb"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "ct-cancel-endpoint-callers",
+          "kind": "contract",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "billing-api/src/subscriptions/subscriptions.controller.ts",
+            "storefront-web/src/api/subscriptions.ts",
+            "contracts/openapi/billing-api.yaml",
+            "billing-api/README.md",
+            "billing-api/src/subscriptions/dto/cancel-subscription.dto.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.25,
+            "recall_at_5": 0.75,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.803,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "ct-tr-cancelled-event-consumers",
+          "kind": "contract",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "billing-api/src/subscriptions/subscription.service.ts",
+            "orders-service/internal/events/subscription_consumer.go",
+            "mobile-app/lib/screens/subscription_screen.dart",
+            "storefront-web/src/api/subscriptions.ts",
+            "contracts/openapi/billing-api.yaml"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.25,
+            "recall_at_10": 0.5,
+            "reciprocal_rank": 0.5,
+            "ndcg_at_10": 0.4025,
+            "first_relevant_rank": 2
+          }
+        },
+        {
+          "id": "ct-cancelled-event-producer",
+          "kind": "contract",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "billing-api/README.md",
+            "billing-api/src/subscriptions/subscription.service.ts",
+            "orders-service/internal/events/subscription_consumer.go",
+            "billing-api/src/events/subscription-events.ts",
+            "notification-worker/src/handlers/subscription_cancelled.rs"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.5,
+            "recall_at_10": 0.75,
+            "reciprocal_rank": 0.5,
+            "ndcg_at_10": 0.5603,
+            "first_relevant_rank": 2
+          }
+        },
+        {
+          "id": "ct-get-payment-status",
+          "kind": "contract",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "ledger-service/ledger/grpc_server.py",
+            "orders-service/internal/ledger/client.go",
+            "contracts/proto/ledger/v1/ledger.proto",
+            "ledger-service/README.md",
+            "billing-api/src/orders/orders.client.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.25,
+            "recall_at_5": 0.75,
+            "recall_at_10": 0.75,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.9677,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "ct-tr-idempotency-header-senders",
+          "kind": "contract",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "ledger-service/ledger/payments/idempotency.py",
+            "ledger-service/ledger/psp/gateway.py",
+            "handbook/adr/0004-idempotency-keys-for-payment-capture.md",
+            "ledger-service/ledger/payments/capture.py",
+            "db-migrations/migrations/0006_create_idempotency_keys.sql"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.125,
+            "recall_at_10": 0.625,
+            "reciprocal_rank": 0.5,
+            "ndcg_at_10": 0.3984,
+            "first_relevant_rank": 2
+          }
+        },
+        {
+          "id": "ct-payment-captured-payload",
+          "kind": "contract",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "orders-service/internal/events/payment_consumer.go",
+            "ledger-service/ledger/events.py",
+            "notification-worker/src/handlers/payment_receipt.rs",
+            "handbook/adr/0002-domain-events-on-kafka.md",
+            "contracts/README.md"
+          ],
+          "metrics": {
+            "recall_at_1": 0.25,
+            "recall_at_5": 0.75,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.7138,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "ct-cancel-reason-column",
+          "kind": "contract",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "billing-api/src/subscriptions/subscription.entity.ts",
+            "db-migrations/migrations/0009_add_cancel_reason_to_subscriptions.sql",
+            "ledger-service/ledger/db/models.py",
+            "db-migrations/README.md",
+            "db-migrations/migrations/0008_add_cancelled_at_to_subscriptions.sql"
+          ],
+          "metrics": {
+            "recall_at_1": 0.3333,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 1.0,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "ct-resume-endpoint-in-spec",
+          "kind": "contract",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "billing-api/README.md",
+            "billing-api/src/subscriptions/subscription.service.ts",
+            "storefront-web/src/hooks/useSubscription.ts",
+            "storefront-web/src/api/subscriptions.ts",
+            "billing-api/src/subscriptions/subscriptions.controller.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.6667,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 0.25,
+            "ndcg_at_10": 0.4349,
+            "first_relevant_rank": 4
+          }
+        },
+        {
+          "id": "ct-tr-orders-table-writer",
+          "kind": "contract",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "orders-service/internal/httpapi/handlers.go",
+            "orders-service/internal/store/postgres.go",
+            "storefront-web/src/pages/orders/index.tsx",
+            "mobile-app/lib/api/orders_api.dart",
+            "mobile-app/lib/main.dart"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.25,
+            "recall_at_10": 0.25,
+            "reciprocal_rank": 0.5,
+            "ndcg_at_10": 0.408,
+            "first_relevant_rank": 2
+          }
+        },
+        {
+          "id": "cfg-smtp-host",
+          "kind": "config",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "notification-worker/src/config.rs",
+            "notification-worker/src/mailer.rs",
+            "infra/k8s/notification-worker.yaml",
+            "infra/docker-compose.yml",
+            "notification-worker/README.md"
+          ],
+          "metrics": {
+            "recall_at_1": 0.25,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.9404,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "cfg-tr-mail-server-address",
+          "kind": "config",
+          "lang": "tr",
+          "returned": 5,
+          "top": [
+            "storefront-web/src/features/addresses/experiments/PostalCodeList.tsx",
+            "ledger-service/ledger/addresses/services/postal_code_repository.py",
+            "handbook/adr/0006-bildirim-iscisi-rust.md",
+            "billing-api/src/modules/addresses/partners/address.repository.ts",
+            "contracts/proto/addresses/v2/address_service.proto"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "cfg-database-url-readers",
+          "kind": "config",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "handbook/adr/0003-shared-postgres-table-ownership.md",
+            "infra/docker-compose.yml",
+            "contracts/README.md",
+            "ledger-service/ledger/grpc_server.py",
+            "db-migrations/README.md"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.25,
+            "recall_at_10": 0.375,
+            "reciprocal_rank": 0.5,
+            "ndcg_at_10": 0.2492,
+            "first_relevant_rank": 2
+          }
+        },
+        {
+          "id": "cfg-tr-web-billing-api-url",
+          "kind": "config",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "storefront-web/src/api/client.ts",
+            "storefront-web/README.md",
+            "storefront-web/src/api/subscriptions.ts",
+            "mobile-app/lib/api/subscription_api.dart",
+            "storefront-web/src/api/orders.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.5,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 1.0,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "cfg-kafka-connection",
+          "kind": "config",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "orders-service/cmd/orders/main.go",
+            "orders-service/internal/events/payment_consumer.go",
+            "ledger-service/ledger/settings.py",
+            "ledger-service/ledger/api/payments.py",
+            "orders-service/internal/events/subscription_consumer.go"
+          ],
+          "metrics": {
+            "recall_at_1": 0.1667,
+            "recall_at_5": 0.3333,
+            "recall_at_10": 0.3333,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.3409,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "cfg-tr-psp-api-key",
+          "kind": "config",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "mobile-app/lib/main.dart",
+            "storefront-web/src/api/client.ts",
+            "infra/k8s/billing-api.yaml",
+            "infra/docker-compose.yml",
+            "mobile-app/lib/screens/subscription_screen.dart"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.25,
+            "recall_at_10": 0.5,
+            "reciprocal_rank": 0.25,
+            "ndcg_at_10": 0.1839,
+            "first_relevant_rank": 4
+          }
+        },
+        {
+          "id": "cfg-notification-worker-replicas",
+          "kind": "config",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "infra/k8s/notification-worker.yaml",
+            "notification-worker/src/consumer.rs",
+            "notification-worker/src/main.rs",
+            "orders-service/internal/bundles/v2/bundle_worker.go",
+            "orders-service/internal/reports/core/kpi_worker.go"
+          ],
+          "metrics": {
+            "recall_at_1": 1.0,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 1.0,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "i18n-tr-cancel-button-text",
+          "kind": "i18n",
+          "lang": "tr",
+          "returned": 6,
+          "top": [
+            "mobile-app/lib/l10n/app_tr.arb",
+            "storefront-web/src/i18n/locales/tr.json",
+            "handbook/adr/0006-bildirim-iscisi-rust.md",
+            "mobile-app/lib/screens/subscription_screen.dart",
+            "notification-worker/src/handlers/subscription_cancelled.rs"
+          ],
+          "metrics": {
+            "recall_at_1": 0.25,
+            "recall_at_5": 0.5,
+            "recall_at_10": 0.5,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.9246,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "i18n-cancel-dialog-title",
+          "kind": "i18n",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "storefront-web/src/components/CancelSubscriptionDialog.tsx",
+            "storefront-web/src/pages/account/subscription.tsx",
+            "mobile-app/lib/screens/subscription_screen.dart",
+            "mobile-app/lib/l10n/app_en.arb",
+            "mobile-app/lib/l10n/app_tr.arb"
+          ],
+          "metrics": {
+            "recall_at_1": 0.1667,
+            "recall_at_5": 0.6667,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.7018,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "i18n-tr-cancellation-email-template",
+          "kind": "i18n",
+          "lang": "tr",
+          "returned": 6,
+          "top": [
+            "mobile-app/lib/l10n/app_tr.arb",
+            "storefront-web/src/i18n/locales/tr.json",
+            "handbook/adr/0006-bildirim-iscisi-rust.md",
+            "mobile-app/lib/screens/subscription_screen.dart",
+            "notification-worker/src/handlers/subscription_cancelled.rs"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.5,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 0.2,
+            "ndcg_at_10": 0.4109,
+            "first_relevant_rank": 5
+          }
+        },
+        {
+          "id": "i18n-tr-price-formatting",
+          "kind": "i18n",
+          "lang": "tr",
+          "returned": 3,
+          "top": [
+            "billing-api/src/modules/warehouse/partners/wave.policy.ts",
+            "notification-worker/templates/subscription_cancelled.tr.txt",
+            "storefront-web/src/i18n/locales/tr.json"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "i18n-locale-choice",
+          "kind": "i18n",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "storefront-web/README.md",
+            "storefront-web/src/i18n/index.ts",
+            "handbook/adr/0004-idempotency-keys-for-payment-capture.md",
+            "handbook/adr/0005-cancel-at-period-end.md",
+            "mobile-app/lib/api/subscription_api.dart"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 0.5,
+            "ndcg_at_10": 0.6309,
+            "first_relevant_rank": 2
+          }
+        },
+        {
+          "id": "i18n-tr-missing-translation-fallback",
+          "kind": "i18n",
+          "lang": "tr",
+          "returned": 0,
+          "top": [],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": -0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "i18n-mobile-languages",
+          "kind": "i18n",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "mobile-app/lib/main.dart",
+            "handbook/adr/0004-idempotency-keys-for-payment-capture.md",
+            "infra/k8s/overlays/staging/support/ticket-deployment.yaml",
+            "mobile-app/lib/screens/subscription_screen.dart",
+            "mobile-app/README.md"
+          ],
+          "metrics": {
+            "recall_at_1": 0.25,
+            "recall_at_5": 0.5,
+            "recall_at_10": 0.75,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.7626,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "doc-why-idempotency-keys",
+          "kind": "history_doc",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "ledger-service/ledger/payments/idempotency.py",
+            "handbook/adr/0004-idempotency-keys-for-payment-capture.md",
+            "handbook/runbooks/payment-capture-incidents.md",
+            "handbook/README.md",
+            "ledger-service/ledger/db/models.py"
+          ],
+          "metrics": {
+            "recall_at_1": 0.3333,
+            "recall_at_5": 0.6667,
+            "recall_at_10": 0.6667,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.6662,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "doc-tr-why-rust-worker",
+          "kind": "history_doc",
+          "lang": "tr",
+          "returned": 4,
+          "top": [
+            "handbook/adr/0006-bildirim-iscisi-rust.md",
+            "handbook/README.md",
+            "notification-worker/Cargo.toml",
+            "notification-worker/README.md"
+          ],
+          "metrics": {
+            "recall_at_1": 0.5,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.9738,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "doc-event-naming",
+          "kind": "history_doc",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "contracts/README.md",
+            "storefront-web/src/features/analytics/account/TrackingEventEditor.tsx",
+            "billing-api/src/subscriptions/subscription.service.ts",
+            "notification-worker/src/handlers/payment_receipt.rs",
+            "orders-service/internal/events/payment_consumer.go"
+          ],
+          "metrics": {
+            "recall_at_1": 0.3333,
+            "recall_at_5": 0.3333,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.7852,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "doc-tr-shared-database-ownership",
+          "kind": "history_doc",
+          "lang": "tr",
+          "returned": 0,
+          "top": [],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": -0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "doc-why-period-end",
+          "kind": "history_doc",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "storefront-web/src/i18n/locales/en.json",
+            "orders-service/internal/reports/jobs/export_job_repo.go",
+            "orders-service/internal/bundles/v2/bundle_worker.go",
+            "orders-service/internal/suppliers/core/delivery_slot.go",
+            "orders-service/internal/suppliers/core/delivery_slot_repo.go"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "doc-tr-adr-process",
+          "kind": "history_doc",
+          "lang": "tr",
+          "returned": 1,
+          "top": [
+            "notification-worker/src/jobs/recommendations/adhoc/similarity_digest.rs"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "doc-stuck-pending-orders-runbook",
+          "kind": "history_doc",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "orders-service/README.md",
+            "handbook/runbooks/payment-capture-incidents.md",
+            "db-migrations/migrations/0004_create_orders.sql",
+            "storefront-web/src/i18n/locales/en.json",
+            "orders-service/internal/store/postgres.go"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.5,
+            "recall_at_10": 0.5,
+            "reciprocal_rank": 0.5,
+            "ndcg_at_10": 0.5788,
+            "first_relevant_rank": 2
+          }
+        },
+        {
+          "id": "abs-invoice-pdf-export",
+          "kind": "absent",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "orders-service/internal/reports/jobs/export_job_repo.go",
+            "orders-service/internal/export/s3_export.go",
+            "storefront-web/src/api/subscriptions.ts",
+            "storefront-web/src/features/reports/legacy/useExportJobDraft.ts",
+            "storefront-web/src/features/shipping/mobile-web/LabelDrawer.tsx"
+          ],
+          "metrics": null
+        },
+        {
+          "id": "abs-tr-sms-notifications",
+          "kind": "absent",
+          "lang": "tr",
+          "returned": 0,
+          "top": [],
+          "metrics": null
+        },
+        {
+          "id": "abs-admin-two-factor",
+          "kind": "absent",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "contracts/proto/seo/v3/meta_tag_admin.proto",
+            "ledger-service/ledger/seo/views/sitemap_rules.py",
+            "mobile-app/lib/features/bundles/domain/bundle_component_service.dart",
+            "mobile-app/lib/features/seo/presentation/redirect_service.dart",
+            "mobile-app/lib/features/seo/presentation/sitemap_repository.dart"
+          ],
+          "metrics": null
+        },
+        {
+          "id": "abs-tr-loyalty-points",
+          "kind": "absent",
+          "lang": "tr",
+          "returned": 0,
+          "top": [],
+          "metrics": null
+        },
+        {
+          "id": "abs-crypto-payments",
+          "kind": "absent",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "handbook/adr/0004-idempotency-keys-for-payment-capture.md",
+            "contracts/proto/ledger/v1/ledger.proto",
+            "ledger-service/ledger/grpc_server.py",
+            "orders-service/internal/ledger/client.go",
+            "ledger-service/ledger/api/payments.py"
+          ],
+          "metrics": null
+        },
+        {
+          "id": "abs-tr-gift-card-balance",
+          "kind": "absent",
+          "lang": "tr",
+          "returned": 1,
+          "top": [
+            "storefront-web/src/i18n/locales/tr.json"
+          ],
+          "metrics": null
+        }
+      ]
+    },
+    {
+      "name": "bm25",
+      "overall": {
+        "ranked_queries": 61,
+        "absent_queries": 6,
+        "recall_at_1": 0.1664,
+        "recall_at_5": 0.4874,
+        "recall_at_10": 0.5992,
+        "mrr_at_10": 0.5453,
+        "ndcg_at_10": 0.4816,
+        "abstain_rate": 0.5
+      },
+      "by_kind": {
+        "absent": {
+          "ranked_queries": 0,
+          "absent_queries": 6,
+          "recall_at_1": null,
+          "recall_at_5": null,
+          "recall_at_10": null,
+          "mrr_at_10": null,
+          "ndcg_at_10": null,
+          "abstain_rate": 0.5
+        },
+        "behavior": {
+          "ranked_queries": 14,
+          "absent_queries": 0,
+          "recall_at_1": 0.056,
+          "recall_at_5": 0.2583,
+          "recall_at_10": 0.3321,
+          "mrr_at_10": 0.3276,
+          "ndcg_at_10": 0.2589,
+          "abstain_rate": null
+        },
+        "config": {
+          "ranked_queries": 7,
+          "absent_queries": 0,
+          "recall_at_1": 0.2917,
+          "recall_at_5": 0.5238,
+          "recall_at_10": 0.5774,
+          "mrr_at_10": 0.7143,
+          "ndcg_at_10": 0.4886,
+          "abstain_rate": null
+        },
+        "contract": {
+          "ranked_queries": 9,
+          "absent_queries": 0,
+          "recall_at_1": 0.1204,
+          "recall_at_5": 0.5278,
+          "recall_at_10": 0.8472,
+          "mrr_at_10": 0.6343,
+          "ndcg_at_10": 0.6249,
+          "abstain_rate": null
+        },
+        "cross_project": {
+          "ranked_queries": 7,
+          "absent_queries": 0,
+          "recall_at_1": 0.0179,
+          "recall_at_5": 0.1476,
+          "recall_at_10": 0.2714,
+          "mrr_at_10": 0.2952,
+          "ndcg_at_10": 0.2153,
+          "abstain_rate": null
+        },
+        "history_doc": {
+          "ranked_queries": 7,
+          "absent_queries": 0,
+          "recall_at_1": 0.1667,
+          "recall_at_5": 0.4286,
+          "recall_at_10": 0.5476,
+          "mrr_at_10": 0.5048,
+          "ndcg_at_10": 0.43,
+          "abstain_rate": null
+        },
+        "i18n": {
+          "ranked_queries": 7,
+          "absent_queries": 0,
+          "recall_at_1": 0.0595,
+          "recall_at_5": 0.5238,
+          "recall_at_10": 0.6429,
+          "mrr_at_10": 0.4095,
+          "ndcg_at_10": 0.4368,
+          "abstain_rate": null
+        },
+        "symbol": {
+          "ranked_queries": 10,
+          "absent_queries": 0,
+          "recall_at_1": 0.4533,
+          "recall_at_5": 1.0,
+          "recall_at_10": 1.0,
+          "mrr_at_10": 0.95,
+          "ndcg_at_10": 0.9132,
+          "abstain_rate": null
+        }
+      },
+      "by_lang": {
+        "en": {
+          "ranked_queries": 37,
+          "absent_queries": 3,
+          "recall_at_1": 0.2068,
+          "recall_at_5": 0.5761,
+          "recall_at_10": 0.7367,
+          "mrr_at_10": 0.6852,
+          "ndcg_at_10": 0.5839,
+          "abstain_rate": 0.0
+        },
+        "tr": {
+          "ranked_queries": 24,
+          "absent_queries": 3,
+          "recall_at_1": 0.1042,
+          "recall_at_5": 0.3507,
+          "recall_at_10": 0.3872,
+          "mrr_at_10": 0.3295,
+          "ndcg_at_10": 0.3237,
+          "abstain_rate": 1.0
+        }
+      },
+      "queries": [
+        {
+          "id": "sym-subscription-service-cancel",
+          "kind": "symbol",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "billing-api/src/subscriptions/subscriptions.controller.ts",
+            "billing-api/src/subscriptions/subscription.service.ts",
+            "storefront-web/src/hooks/useSubscription.ts",
+            "mobile-app/lib/api/subscription_api.dart",
+            "mobile-app/lib/screens/subscription_screen.dart"
+          ],
+          "metrics": {
+            "recall_at_1": 0.5,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.7098,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "sym-cancel-subscription-web",
+          "kind": "symbol",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "storefront-web/src/api/subscriptions.ts",
+            "storefront-web/src/hooks/useSubscription.ts",
+            "storefront-web/src/components/CancelSubscriptionDialog.tsx",
+            "storefront-web/src/api/client.ts",
+            "storefront-web/src/pages/account/subscription.tsx"
+          ],
+          "metrics": {
+            "recall_at_1": 0.5,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 1.0,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "sym-tr-cancel-subscription-mobile",
+          "kind": "symbol",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "storefront-web/src/hooks/useSubscription.ts",
+            "mobile-app/lib/api/subscription_api.dart",
+            "mobile-app/lib/screens/subscription_screen.dart",
+            "billing-api/src/subscriptions/subscription.service.ts",
+            "storefront-web/src/components/CancelSubscriptionDialog.tsx"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 0.5,
+            "ndcg_at_10": 0.6443,
+            "first_relevant_rank": 2
+          }
+        },
+        {
+          "id": "sym-idempotency-store",
+          "kind": "symbol",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "ledger-service/ledger/payments/idempotency.py",
+            "ledger-service/ledger/payments/capture.py",
+            "ledger-service/ledger/settings.py",
+            "db-migrations/migrations/0006_create_idempotency_keys.sql",
+            "handbook/adr/0004-idempotency-keys-for-payment-capture.md"
+          ],
+          "metrics": {
+            "recall_at_1": 0.5,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 1.0,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "sym-cancel-pending-for-subscription",
+          "kind": "symbol",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "orders-service/internal/events/subscription_consumer.go",
+            "orders-service/internal/store/postgres.go",
+            "storefront-web/src/components/CancelSubscriptionDialog.tsx",
+            "billing-api/src/subscriptions/dto/cancel-subscription.dto.ts",
+            "storefront-web/src/i18n/locales/en.json"
+          ],
+          "metrics": {
+            "recall_at_1": 0.5,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.834,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "sym-smtp-mailer",
+          "kind": "symbol",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "notification-worker/src/mailer.rs",
+            "notification-worker/src/main.rs",
+            "notification-worker/src/handlers/payment_receipt.rs",
+            "notification-worker/src/consumer.rs",
+            "notification-worker/src/handlers/subscription_cancelled.rs"
+          ],
+          "metrics": {
+            "recall_at_1": 0.2,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 1.0,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "sym-jwt-auth-guard",
+          "kind": "symbol",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "billing-api/src/auth/jwt-auth.guard.ts",
+            "billing-api/src/auth/subscription-owner.guard.ts",
+            "billing-api/src/auth/current-customer.decorator.ts",
+            "billing-api/src/checkout/checkout.controller.ts",
+            "billing-api/src/subscriptions/subscriptions.controller.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.3333,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.9615,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "sym-tr-capture-payment",
+          "kind": "symbol",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "ledger-service/ledger/payments/capture.py",
+            "handbook/runbooks/payment-capture-incidents.md",
+            "ledger-service/ledger/api/payments.py",
+            "handbook/adr/0004-idempotency-keys-for-payment-capture.md",
+            "contracts/events/payment.captured.v1.json"
+          ],
+          "metrics": {
+            "recall_at_1": 0.5,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.9828,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "sym-tr-subscription-screen",
+          "kind": "symbol",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "mobile-app/lib/screens/subscription_screen.dart",
+            "mobile-app/lib/main.dart",
+            "mobile-app/lib/screens/order_history_screen.dart",
+            "billing-api/src/subscriptions/subscription.service.ts",
+            "storefront-web/src/pages/account/subscription.tsx"
+          ],
+          "metrics": {
+            "recall_at_1": 0.5,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 1.0,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "sym-prorated-amount",
+          "kind": "symbol",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "ledger-service/ledger/payments/refunds.py",
+            "ledger-service/ledger/api/refunds.py",
+            "billing-api/src/payments/ledger.client.ts",
+            "contracts/openapi/ledger-api.yaml",
+            "storefront-web/src/components/PriceTag.tsx"
+          ],
+          "metrics": {
+            "recall_at_1": 1.0,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 1.0,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "beh-prevent-double-charge",
+          "kind": "behavior",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "mobile-app/lib/features/suppliers/legacy/purchase_order_service.dart",
+            "mobile-app/lib/features/suppliers/widgets/purchase_order_repository.dart",
+            "storefront-web/src/features/suppliers/internal/PurchaseOrderCard.tsx",
+            "billing-api/src/subscriptions/subscription.service.ts",
+            "billing-api/src/auth/current-customer.decorator.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.1667,
+            "reciprocal_rank": 0.1,
+            "ndcg_at_10": 0.0205,
+            "first_relevant_rank": 10
+          }
+        },
+        {
+          "id": "beh-tr-prevent-double-charge",
+          "kind": "behavior",
+          "lang": "tr",
+          "returned": 1,
+          "top": [
+            "handbook/adr/0006-bildirim-iscisi-rust.md"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "beh-email-retry",
+          "kind": "behavior",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "contracts/events/subscription.cancelled.v1.json",
+            "notification-worker/src/handlers/subscription_cancelled.rs",
+            "billing-api/src/auth/jwt-auth.guard.ts",
+            "storefront-web/src/i18n/locales/en.json",
+            "storefront-web/src/api/checkout.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.3333,
+            "reciprocal_rank": 0.125,
+            "ndcg_at_10": 0.2351,
+            "first_relevant_rank": 8
+          }
+        },
+        {
+          "id": "beh-billing-authentication",
+          "kind": "behavior",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "billing-api/src/subscriptions/subscriptions.controller.ts",
+            "billing-api/src/checkout/checkout.controller.ts",
+            "billing-api/src/subscriptions/subscription.service.ts",
+            "billing-api/src/auth/current-customer.decorator.ts",
+            "infra/k8s/billing-api.yaml"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.3333,
+            "recall_at_10": 0.3333,
+            "reciprocal_rank": 0.25,
+            "ndcg_at_10": 0.053,
+            "first_relevant_rank": 4
+          }
+        },
+        {
+          "id": "beh-refund-early-stop",
+          "kind": "behavior",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "ledger-service/ledger/payments/refunds.py",
+            "contracts/proto/ledger/v1/ledger.proto",
+            "contracts/events/subscription.cancelled.v1.json",
+            "storefront-web/src/api/subscriptions.ts",
+            "ledger-service/ledger/reviews/services/moderation_case_rules.py"
+          ],
+          "metrics": {
+            "recall_at_1": 0.2,
+            "recall_at_5": 0.2,
+            "recall_at_10": 0.4,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.7018,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "beh-tr-refund-early-stop",
+          "kind": "behavior",
+          "lang": "tr",
+          "returned": 0,
+          "top": [],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": -0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "beh-order-marked-paid",
+          "kind": "behavior",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "orders-service/README.md",
+            "orders-service/internal/events/payment_consumer.go",
+            "handbook/adr/0005-cancel-at-period-end.md",
+            "orders-service/internal/store/postgres.go",
+            "orders-service/internal/orders/model.go"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.6667,
+            "recall_at_10": 0.6667,
+            "reciprocal_rank": 0.5,
+            "ndcg_at_10": 0.6078,
+            "first_relevant_rank": 2
+          }
+        },
+        {
+          "id": "beh-access-after-cancel",
+          "kind": "behavior",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "handbook/adr/0005-cancel-at-period-end.md",
+            "mobile-app/lib/l10n/app_en.arb",
+            "handbook/glossary.md",
+            "storefront-web/src/i18n/locales/en.json",
+            "billing-api/src/subscriptions/subscription.service.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.3333,
+            "recall_at_5": 0.6667,
+            "recall_at_10": 0.6667,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.6077,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "beh-tr-mobile-cancel-confirmation",
+          "kind": "behavior",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "notification-worker/templates/subscription_cancelled.tr.txt",
+            "mobile-app/lib/screens/subscription_screen.dart",
+            "mobile-app/lib/l10n/app_tr.arb",
+            "storefront-web/src/i18n/locales/tr.json",
+            "handbook/notes/wishlist/2025-06-26-share-link-retro.md"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 0.5,
+            "ndcg_at_10": 0.6309,
+            "first_relevant_rank": 2
+          }
+        },
+        {
+          "id": "beh-tr-session-token-header",
+          "kind": "behavior",
+          "lang": "tr",
+          "returned": 1,
+          "top": [
+            "storefront-web/src/i18n/locales/tr.json"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "beh-psp-timeout",
+          "kind": "behavior",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "handbook/glossary.md",
+            "handbook/notes/warehouse/2026-08-09-pick-list-planning.md",
+            "storefront-web/src/features/inventory/mobile-web/LocationCard.tsx",
+            "storefront-web/src/features/suppliers/internal/PurchaseOrderCard.tsx",
+            "contracts/openapi/ledger-api.yaml"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.3333,
+            "reciprocal_rank": 0.1111,
+            "ndcg_at_10": 0.1768,
+            "first_relevant_rank": 9
+          }
+        },
+        {
+          "id": "beh-idempotency-ttl",
+          "kind": "behavior",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "db-migrations/migrations/0006_create_idempotency_keys.sql",
+            "handbook/adr/0004-idempotency-keys-for-payment-capture.md",
+            "ledger-service/ledger/payments/idempotency.py",
+            "handbook/README.md",
+            "handbook/runbooks/payment-capture-incidents.md"
+          ],
+          "metrics": {
+            "recall_at_1": 0.25,
+            "recall_at_5": 0.75,
+            "recall_at_10": 0.75,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.5907,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "beh-tr-order-history-paging",
+          "kind": "behavior",
+          "lang": "tr",
+          "returned": 2,
+          "top": [
+            "mobile-app/lib/l10n/app_tr.arb",
+            "storefront-web/src/i18n/locales/tr.json"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "beh-foreign-subscription-access",
+          "kind": "behavior",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "storefront-web/src/i18n/locales/en.json",
+            "billing-api/src/auth/current-customer.decorator.ts",
+            "notification-worker/src/handlers/payment_receipt.rs",
+            "ledger-service/ledger/events.py",
+            "ledger-service/ledger/api/refunds.py"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "xp-cancel-end-to-end",
+          "kind": "cross_project",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "handbook/adr/0005-cancel-at-period-end.md",
+            "contracts/events/subscription.cancelled.v1.json",
+            "ledger-service/ledger/payments/refunds.py",
+            "billing-api/src/payments/ledger.client.ts",
+            "storefront-web/README.md"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.125,
+            "recall_at_10": 0.5,
+            "reciprocal_rank": 0.3333,
+            "ndcg_at_10": 0.3405,
+            "first_relevant_rank": 3
+          }
+        },
+        {
+          "id": "xp-tr-cancel-triggers",
+          "kind": "cross_project",
+          "lang": "tr",
+          "returned": 6,
+          "top": [
+            "mobile-app/lib/l10n/app_tr.arb",
+            "storefront-web/src/i18n/locales/tr.json",
+            "notification-worker/templates/subscription_cancelled.tr.txt",
+            "handbook/adr/0006-bildirim-iscisi-rust.md",
+            "notification-worker/src/handlers/subscription_cancelled.rs"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.1667,
+            "recall_at_10": 0.1667,
+            "reciprocal_rank": 0.2,
+            "ndcg_at_10": 0.1811,
+            "first_relevant_rank": 5
+          }
+        },
+        {
+          "id": "xp-checkout-to-capture",
+          "kind": "cross_project",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "storefront-web/src/pages/checkout.tsx",
+            "storefront-web/src/features/inventory/mobile-web/LocationCard.tsx",
+            "billing-api/src/checkout/checkout.service.ts",
+            "handbook/runbooks/payment-capture-incidents.md",
+            "storefront-web/src/api/checkout.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.125,
+            "recall_at_5": 0.375,
+            "recall_at_10": 0.5,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.4824,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "xp-tr-payment-to-order-status",
+          "kind": "cross_project",
+          "lang": "tr",
+          "returned": 3,
+          "top": [
+            "storefront-web/src/i18n/locales/tr.json",
+            "mobile-app/lib/l10n/app_tr.arb",
+            "handbook/adr/0006-bildirim-iscisi-rust.md"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "xp-cancel-email-from-mobile",
+          "kind": "cross_project",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "mobile-app/README.md",
+            "mobile-app/pubspec.yaml",
+            "mobile-app/lib/features/carts/presentation/cart_line_formatter.dart",
+            "handbook/adr/0004-idempotency-keys-for-payment-capture.md",
+            "billing-api/src/subscriptions/subscription.service.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.1667,
+            "recall_at_10": 0.3333,
+            "reciprocal_rank": 0.2,
+            "ndcg_at_10": 0.1632,
+            "first_relevant_rank": 5
+          }
+        },
+        {
+          "id": "xp-order-history-sources",
+          "kind": "cross_project",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "mobile-app/README.md",
+            "orders-service/README.md",
+            "orders-service/internal/httpapi/handlers.go",
+            "handbook/adr/0002-domain-events-on-kafka.md",
+            "storefront-web/src/i18n/locales/en.json"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.2,
+            "recall_at_10": 0.4,
+            "reciprocal_rank": 0.3333,
+            "ndcg_at_10": 0.34,
+            "first_relevant_rank": 3
+          }
+        },
+        {
+          "id": "xp-tr-checkout-order-creation",
+          "kind": "cross_project",
+          "lang": "tr",
+          "returned": 3,
+          "top": [
+            "storefront-web/src/i18n/locales/tr.json",
+            "mobile-app/lib/l10n/app_tr.arb",
+            "handbook/adr/0006-bildirim-iscisi-rust.md"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "ct-cancel-endpoint-callers",
+          "kind": "contract",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "billing-api/src/subscriptions/dto/cancel-subscription.dto.ts",
+            "billing-api/src/subscriptions/subscriptions.controller.ts",
+            "storefront-web/src/api/subscriptions.ts",
+            "handbook/adr/0005-cancel-at-period-end.md",
+            "billing-api/README.md"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.5,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 0.5,
+            "ndcg_at_10": 0.6254,
+            "first_relevant_rank": 2
+          }
+        },
+        {
+          "id": "ct-tr-cancelled-event-consumers",
+          "kind": "contract",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "contracts/events/subscription.cancelled.v1.json",
+            "notification-worker/src/handlers/subscription_cancelled.rs",
+            "notification-worker/templates/subscription_cancelled.en.txt",
+            "billing-api/src/subscriptions/subscription.service.ts",
+            "billing-api/src/events/subscription-events.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.25,
+            "recall_at_5": 0.5,
+            "recall_at_10": 0.75,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.6114,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "ct-cancelled-event-producer",
+          "kind": "contract",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "notification-worker/src/handlers/subscription_cancelled.rs",
+            "billing-api/src/subscriptions/subscription.service.ts",
+            "billing-api/src/events/subscription-events.ts",
+            "orders-service/internal/events/subscription_consumer.go",
+            "contracts/events/subscription.cancelled.v1.json"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.75,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 0.5,
+            "ndcg_at_10": 0.6748,
+            "first_relevant_rank": 2
+          }
+        },
+        {
+          "id": "ct-get-payment-status",
+          "kind": "contract",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "orders-service/internal/ledger/client.go",
+            "contracts/proto/ledger/v1/ledger.proto",
+            "ledger-service/ledger/grpc_server.py",
+            "ledger-service/README.md",
+            "ledger-service/ledger/api/payments.py"
+          ],
+          "metrics": {
+            "recall_at_1": 0.25,
+            "recall_at_5": 0.75,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.9521,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "ct-tr-idempotency-header-senders",
+          "kind": "contract",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "ledger-service/ledger/payments/idempotency.py",
+            "db-migrations/migrations/0006_create_idempotency_keys.sql",
+            "handbook/adr/0004-idempotency-keys-for-payment-capture.md",
+            "billing-api/src/checkout/checkout.controller.ts",
+            "ledger-service/ledger/psp/gateway.py"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.25,
+            "recall_at_10": 0.625,
+            "reciprocal_rank": 0.25,
+            "ndcg_at_10": 0.3831,
+            "first_relevant_rank": 4
+          }
+        },
+        {
+          "id": "ct-payment-captured-payload",
+          "kind": "contract",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "notification-worker/src/handlers/payment_receipt.rs",
+            "orders-service/internal/events/payment_consumer.go",
+            "ledger-service/ledger/events.py",
+            "contracts/events/payment.captured.v1.json",
+            "handbook/adr/0002-domain-events-on-kafka.md"
+          ],
+          "metrics": {
+            "recall_at_1": 0.25,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.6844,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "ct-cancel-reason-column",
+          "kind": "contract",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "db-migrations/migrations/0009_add_cancel_reason_to_subscriptions.sql",
+            "billing-api/src/subscriptions/subscription.entity.ts",
+            "billing-api/src/subscriptions/subscriptions.controller.ts",
+            "billing-api/src/subscriptions/dto/cancel-subscription.dto.ts",
+            "db-migrations/migrations/0008_add_cancelled_at_to_subscriptions.sql"
+          ],
+          "metrics": {
+            "recall_at_1": 0.3333,
+            "recall_at_5": 0.6667,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.9845,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "ct-resume-endpoint-in-spec",
+          "kind": "contract",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "storefront-web/src/pages/account/subscription.tsx",
+            "billing-api/README.md",
+            "contracts/openapi/billing-api.yaml",
+            "mobile-app/lib/api/subscription_api.dart",
+            "storefront-web/src/components/CancelSubscriptionDialog.tsx"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.3333,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 0.3333,
+            "ndcg_at_10": 0.5043,
+            "first_relevant_rank": 3
+          }
+        },
+        {
+          "id": "ct-tr-orders-table-writer",
+          "kind": "contract",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "handbook/adr/0006-bildirim-iscisi-rust.md",
+            "billing-api/src/orders/orders.client.ts",
+            "orders-service/README.md",
+            "orders-service/cmd/orders/main.go",
+            "orders-service/internal/httpapi/handlers.go"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.25,
+            "reciprocal_rank": 0.125,
+            "ndcg_at_10": 0.204,
+            "first_relevant_rank": 8
+          }
+        },
+        {
+          "id": "cfg-smtp-host",
+          "kind": "config",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "infra/k8s/notification-worker.yaml",
+            "notification-worker/src/config.rs",
+            "notification-worker/README.md",
+            "infra/docker-compose.yml",
+            "notification-worker/src/mailer.rs"
+          ],
+          "metrics": {
+            "recall_at_1": 0.25,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.8508,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "cfg-tr-mail-server-address",
+          "kind": "config",
+          "lang": "tr",
+          "returned": 1,
+          "top": [
+            "handbook/adr/0006-bildirim-iscisi-rust.md"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "cfg-database-url-readers",
+          "kind": "config",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "infra/docker-compose.yml",
+            "db-migrations/README.md",
+            "ledger-service/ledger/settings.py",
+            "orders-service/cmd/orders/main.go",
+            "handbook/adr/0003-shared-postgres-table-ownership.md"
+          ],
+          "metrics": {
+            "recall_at_1": 0.125,
+            "recall_at_5": 0.5,
+            "recall_at_10": 0.875,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.632,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "cfg-tr-web-billing-api-url",
+          "kind": "config",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "storefront-web/README.md",
+            "storefront-web/src/api/client.ts",
+            "storefront-web/src/api/subscriptions.ts",
+            "storefront-web/src/api/orders.ts",
+            "storefront-web/src/api/checkout.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.5,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.7098,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "cfg-kafka-connection",
+          "kind": "config",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "ledger-service/ledger/settings.py",
+            "ledger-service/ledger/api/payments.py",
+            "ledger-service/ledger/payments/capture.py",
+            "orders-service/internal/events/consumer.go",
+            "ledger-service/ledger/main.py"
+          ],
+          "metrics": {
+            "recall_at_1": 0.1667,
+            "recall_at_5": 0.1667,
+            "recall_at_10": 0.1667,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.2272,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "cfg-tr-psp-api-key",
+          "kind": "config",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "storefront-web/src/i18n/locales/tr.json",
+            "mobile-app/lib/api/api_client.dart",
+            "billing-api/README.md",
+            "infra/k8s/billing-api.yaml",
+            "mobile-app/lib/api/subscription_api.dart"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "cfg-notification-worker-replicas",
+          "kind": "config",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "infra/k8s/notification-worker.yaml",
+            "notification-worker/src/consumer.rs",
+            "notification-worker/src/main.rs",
+            "notification-worker/Cargo.toml",
+            "notification-worker/README.md"
+          ],
+          "metrics": {
+            "recall_at_1": 1.0,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 1.0,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "i18n-tr-cancel-button-text",
+          "kind": "i18n",
+          "lang": "tr",
+          "returned": 6,
+          "top": [
+            "mobile-app/lib/l10n/app_tr.arb",
+            "storefront-web/src/i18n/locales/tr.json",
+            "notification-worker/templates/subscription_cancelled.tr.txt",
+            "handbook/adr/0006-bildirim-iscisi-rust.md",
+            "notification-worker/src/handlers/subscription_cancelled.rs"
+          ],
+          "metrics": {
+            "recall_at_1": 0.25,
+            "recall_at_5": 0.5,
+            "recall_at_10": 0.5,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.9246,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "i18n-cancel-dialog-title",
+          "kind": "i18n",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "storefront-web/src/components/CancelSubscriptionDialog.tsx",
+            "mobile-app/lib/l10n/app_tr.arb",
+            "mobile-app/lib/l10n/app_en.arb",
+            "storefront-web/src/pages/account/subscription.tsx",
+            "mobile-app/lib/screens/subscription_screen.dart"
+          ],
+          "metrics": {
+            "recall_at_1": 0.1667,
+            "recall_at_5": 0.6667,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.7618,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "i18n-tr-cancellation-email-template",
+          "kind": "i18n",
+          "lang": "tr",
+          "returned": 6,
+          "top": [
+            "mobile-app/lib/l10n/app_tr.arb",
+            "storefront-web/src/i18n/locales/tr.json",
+            "notification-worker/templates/subscription_cancelled.tr.txt",
+            "handbook/adr/0006-bildirim-iscisi-rust.md",
+            "notification-worker/src/handlers/subscription_cancelled.rs"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 0.3333,
+            "ndcg_at_10": 0.5241,
+            "first_relevant_rank": 3
+          }
+        },
+        {
+          "id": "i18n-tr-price-formatting",
+          "kind": "i18n",
+          "lang": "tr",
+          "returned": 2,
+          "top": [
+            "storefront-web/src/i18n/locales/tr.json",
+            "billing-api/src/modules/warehouse/partners/wave.policy.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "i18n-locale-choice",
+          "kind": "i18n",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "storefront-web/README.md",
+            "notification-worker/README.md",
+            "orders-service/README.md",
+            "handbook/adr/0005-cancel-at-period-end.md",
+            "storefront-web/src/i18n/index.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 0.2,
+            "ndcg_at_10": 0.3869,
+            "first_relevant_rank": 5
+          }
+        },
+        {
+          "id": "i18n-tr-missing-translation-fallback",
+          "kind": "i18n",
+          "lang": "tr",
+          "returned": 0,
+          "top": [],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": -0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "i18n-mobile-languages",
+          "kind": "i18n",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "mobile-app/pubspec.yaml",
+            "infra/k8s/overlays/staging/support/ticket-deployment.yaml",
+            "mobile-app/README.md",
+            "handbook/adr/0004-idempotency-keys-for-payment-capture.md",
+            "mobile-app/lib/main.dart"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.5,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 0.3333,
+            "ndcg_at_10": 0.46,
+            "first_relevant_rank": 3
+          }
+        },
+        {
+          "id": "doc-why-idempotency-keys",
+          "kind": "history_doc",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "handbook/adr/0004-idempotency-keys-for-payment-capture.md",
+            "handbook/runbooks/payment-capture-incidents.md",
+            "ledger-service/ledger/payments/idempotency.py",
+            "db-migrations/migrations/0006_create_idempotency_keys.sql",
+            "handbook/README.md"
+          ],
+          "metrics": {
+            "recall_at_1": 0.3333,
+            "recall_at_5": 0.6667,
+            "recall_at_10": 0.6667,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.9224,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "doc-tr-why-rust-worker",
+          "kind": "history_doc",
+          "lang": "tr",
+          "returned": 4,
+          "top": [
+            "handbook/adr/0006-bildirim-iscisi-rust.md",
+            "handbook/README.md",
+            "storefront-web/src/i18n/locales/tr.json",
+            "notification-worker/README.md"
+          ],
+          "metrics": {
+            "recall_at_1": 0.5,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.9738,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "doc-event-naming",
+          "kind": "history_doc",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "billing-api/src/events/event-publisher.ts",
+            "storefront-web/src/features/analytics/account/TrackingEventEditor.tsx",
+            "notification-worker/src/consumer.rs",
+            "notification-worker/src/handlers/payment_receipt.rs",
+            "ledger-service/ledger/events.py"
+          ],
+          "metrics": {
+            "recall_at_1": 0.3333,
+            "recall_at_5": 0.3333,
+            "recall_at_10": 0.6667,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.2607,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "doc-tr-shared-database-ownership",
+          "kind": "history_doc",
+          "lang": "tr",
+          "returned": 0,
+          "top": [],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": -0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "doc-why-period-end",
+          "kind": "history_doc",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "storefront-web/src/i18n/locales/en.json",
+            "db-migrations/migrations/0009_add_cancel_reason_to_subscriptions.sql",
+            "handbook/adr/0005-cancel-at-period-end.md",
+            "notification-worker/src/jobs/bundles/hourly/bundle_component_batch.rs",
+            "handbook/adr/0001-record-architecture-decisions.md"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.5,
+            "recall_at_10": 0.5,
+            "reciprocal_rank": 0.3333,
+            "ndcg_at_10": 0.4587,
+            "first_relevant_rank": 3
+          }
+        },
+        {
+          "id": "doc-tr-adr-process",
+          "kind": "history_doc",
+          "lang": "tr",
+          "returned": 1,
+          "top": [
+            "notification-worker/src/jobs/recommendations/adhoc/similarity_digest.rs"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "doc-stuck-pending-orders-runbook",
+          "kind": "history_doc",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "db-migrations/migrations/0004_create_orders.sql",
+            "orders-service/internal/store/postgres.go",
+            "orders-service/internal/orders/model.go",
+            "orders-service/README.md",
+            "handbook/runbooks/payment-capture-incidents.md"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.5,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 0.2,
+            "ndcg_at_10": 0.3943,
+            "first_relevant_rank": 5
+          }
+        },
+        {
+          "id": "abs-invoice-pdf-export",
+          "kind": "absent",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "orders-service/internal/export/s3_export.go",
+            "orders-service/internal/reports/jobs/export_job_repo.go",
+            "storefront-web/src/features/reports/legacy/useExportJobDraft.ts",
+            "storefront-web/src/api/orders.ts",
+            "storefront-web/src/api/subscriptions.ts"
+          ],
+          "metrics": null
+        },
+        {
+          "id": "abs-tr-sms-notifications",
+          "kind": "absent",
+          "lang": "tr",
+          "returned": 0,
+          "top": [],
+          "metrics": null
+        },
+        {
+          "id": "abs-admin-two-factor",
+          "kind": "absent",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "contracts/proto/seo/v3/meta_tag_admin.proto",
+            "orders-service/internal/audit/admin/audit_entry_sync.go",
+            "orders-service/internal/tax/admin/tax_rate_repo.go",
+            "mobile-app/lib/session/token_storage.dart",
+            "mobile-app/README.md"
+          ],
+          "metrics": null
+        },
+        {
+          "id": "abs-tr-loyalty-points",
+          "kind": "absent",
+          "lang": "tr",
+          "returned": 0,
+          "top": [],
+          "metrics": null
+        },
+        {
+          "id": "abs-crypto-payments",
+          "kind": "absent",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "db-migrations/migrations/0005_create_payments.sql",
+            "ledger-service/ledger/api/payments.py",
+            "ledger-service/ledger/payments/capture.py",
+            "billing-api/src/payments/ledger.client.ts",
+            "ledger-service/ledger/payments/idempotency.py"
+          ],
+          "metrics": null
+        },
+        {
+          "id": "abs-tr-gift-card-balance",
+          "kind": "absent",
+          "lang": "tr",
+          "returned": 0,
+          "top": [],
+          "metrics": null
+        }
+      ]
+    },
+    {
+      "name": "hybrid",
+      "overall": {
+        "ranked_queries": 61,
+        "absent_queries": 6,
+        "recall_at_1": 0.1548,
+        "recall_at_5": 0.3407,
+        "recall_at_10": 0.4238,
+        "mrr_at_10": 0.4923,
+        "ndcg_at_10": 0.3822,
+        "abstain_rate": 0.0
+      },
+      "by_kind": {
+        "absent": {
+          "ranked_queries": 0,
+          "absent_queries": 6,
+          "recall_at_1": null,
+          "recall_at_5": null,
+          "recall_at_10": null,
+          "mrr_at_10": null,
+          "ndcg_at_10": null,
+          "abstain_rate": 0.0
+        },
+        "behavior": {
+          "ranked_queries": 14,
+          "absent_queries": 0,
+          "recall_at_1": 0.0179,
+          "recall_at_5": 0.0774,
+          "recall_at_10": 0.0952,
+          "mrr_at_10": 0.1786,
+          "ndcg_at_10": 0.0764,
+          "abstain_rate": null
+        },
+        "config": {
+          "ranked_queries": 7,
+          "absent_queries": 0,
+          "recall_at_1": 0.256,
+          "recall_at_5": 0.3631,
+          "recall_at_10": 0.3988,
+          "mrr_at_10": 0.6429,
+          "ndcg_at_10": 0.3924,
+          "abstain_rate": null
+        },
+        "contract": {
+          "ranked_queries": 9,
+          "absent_queries": 0,
+          "recall_at_1": 0.1574,
+          "recall_at_5": 0.5556,
+          "recall_at_10": 0.6944,
+          "mrr_at_10": 0.7593,
+          "ndcg_at_10": 0.6206,
+          "abstain_rate": null
+        },
+        "cross_project": {
+          "ranked_queries": 7,
+          "absent_queries": 0,
+          "recall_at_1": 0.0286,
+          "recall_at_5": 0.075,
+          "recall_at_10": 0.1393,
+          "mrr_at_10": 0.1714,
+          "ndcg_at_10": 0.1093,
+          "abstain_rate": null
+        },
+        "history_doc": {
+          "ranked_queries": 7,
+          "absent_queries": 0,
+          "recall_at_1": 0.119,
+          "recall_at_5": 0.3571,
+          "recall_at_10": 0.4762,
+          "mrr_at_10": 0.3929,
+          "ndcg_at_10": 0.4017,
+          "abstain_rate": null
+        },
+        "i18n": {
+          "ranked_queries": 7,
+          "absent_queries": 0,
+          "recall_at_1": 0.0595,
+          "recall_at_5": 0.1667,
+          "recall_at_10": 0.1667,
+          "mrr_at_10": 0.3929,
+          "ndcg_at_10": 0.1421,
+          "abstain_rate": null
+        },
+        "symbol": {
+          "ranked_queries": 10,
+          "absent_queries": 0,
+          "recall_at_1": 0.4533,
+          "recall_at_5": 0.7967,
+          "recall_at_10": 1.0,
+          "mrr_at_10": 0.95,
+          "ndcg_at_10": 0.9342,
+          "abstain_rate": null
+        }
+      },
+      "by_lang": {
+        "en": {
+          "ranked_queries": 37,
+          "absent_queries": 3,
+          "recall_at_1": 0.2011,
+          "recall_at_5": 0.4063,
+          "recall_at_10": 0.4959,
+          "mrr_at_10": 0.6293,
+          "ndcg_at_10": 0.4781,
+          "abstain_rate": 0.0
+        },
+        "tr": {
+          "ranked_queries": 24,
+          "absent_queries": 3,
+          "recall_at_1": 0.0833,
+          "recall_at_5": 0.2396,
+          "recall_at_10": 0.3125,
+          "mrr_at_10": 0.2813,
+          "ndcg_at_10": 0.2344,
+          "abstain_rate": 0.0
+        }
+      },
+      "queries": [
+        {
+          "id": "sym-subscription-service-cancel",
+          "kind": "symbol",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "billing-api/src/subscriptions/subscription.service.ts",
+            "storefront-web/src/hooks/useSubscription.ts",
+            "billing-api/src/subscriptions/subscriptions.controller.ts",
+            "storefront-web/src/api/subscriptions.ts",
+            "mobile-app/lib/api/subscription_api.dart"
+          ],
+          "metrics": {
+            "recall_at_1": 0.5,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.9828,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "sym-cancel-subscription-web",
+          "kind": "symbol",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "storefront-web/src/api/subscriptions.ts",
+            "mobile-app/lib/api/subscription_api.dart",
+            "billing-api/src/subscriptions/subscription.service.ts",
+            "storefront-web/src/hooks/useSubscription.ts",
+            "storefront-web/README.md"
+          ],
+          "metrics": {
+            "recall_at_1": 0.5,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.9738,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "sym-tr-cancel-subscription-mobile",
+          "kind": "symbol",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "storefront-web/src/api/subscriptions.ts",
+            "mobile-app/lib/api/subscription_api.dart",
+            "billing-api/src/subscriptions/subscription.service.ts",
+            "storefront-web/src/hooks/useSubscription.ts",
+            "contracts/openapi/billing-api.yaml"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.5,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 0.5,
+            "ndcg_at_10": 0.6182,
+            "first_relevant_rank": 2
+          }
+        },
+        {
+          "id": "sym-idempotency-store",
+          "kind": "symbol",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "ledger-service/ledger/payments/idempotency.py",
+            "billing-api/src/checkout/checkout.controller.ts",
+            "handbook/adr/0004-idempotency-keys-for-payment-capture.md",
+            "ledger-service/ledger/api/payments.py",
+            "billing-api/src/payments/ledger.client.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.5,
+            "recall_at_5": 0.5,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.8847,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "sym-cancel-pending-for-subscription",
+          "kind": "symbol",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "orders-service/internal/store/postgres.go",
+            "orders-service/internal/events/subscription_consumer.go",
+            "storefront-web/src/hooks/useSubscription.ts",
+            "billing-api/src/subscriptions/subscription.service.ts",
+            "mobile-app/lib/api/subscription_api.dart"
+          ],
+          "metrics": {
+            "recall_at_1": 0.5,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 1.0,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "sym-smtp-mailer",
+          "kind": "symbol",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "notification-worker/src/mailer.rs",
+            "notification-worker/src/main.rs",
+            "notification-worker/src/handlers/payment_receipt.rs",
+            "notification-worker/src/consumer.rs",
+            "notification-worker/README.md"
+          ],
+          "metrics": {
+            "recall_at_1": 0.2,
+            "recall_at_5": 0.8,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.994,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "sym-jwt-auth-guard",
+          "kind": "symbol",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "billing-api/src/auth/jwt-auth.guard.ts",
+            "billing-api/src/auth/subscription-owner.guard.ts",
+            "contracts/openapi/billing-api.yaml",
+            "billing-api/src/checkout/checkout.controller.ts",
+            "billing-api/src/subscriptions/subscription.service.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.3333,
+            "recall_at_5": 0.6667,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.9577,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "sym-tr-capture-payment",
+          "kind": "symbol",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "ledger-service/ledger/payments/capture.py",
+            "handbook/runbooks/payment-capture-incidents.md",
+            "handbook/adr/0004-idempotency-keys-for-payment-capture.md",
+            "ledger-service/ledger/api/payments.py",
+            "contracts/events/payment.captured.v1.json"
+          ],
+          "metrics": {
+            "recall_at_1": 0.5,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.9738,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "sym-tr-subscription-screen",
+          "kind": "symbol",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "mobile-app/lib/screens/subscription_screen.dart",
+            "storefront-web/src/hooks/useSubscription.ts",
+            "storefront-web/src/pages/account/subscription.tsx",
+            "billing-api/src/subscriptions/subscription.service.ts",
+            "storefront-web/src/components/CancelSubscriptionDialog.tsx"
+          ],
+          "metrics": {
+            "recall_at_1": 0.5,
+            "recall_at_5": 0.5,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.9568,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "sym-prorated-amount",
+          "kind": "symbol",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "ledger-service/ledger/payments/refunds.py",
+            "notification-worker/src/handlers/payment_receipt.rs",
+            "db-migrations/migrations/0005_create_payments.sql",
+            "contracts/openapi/ledger-api.yaml",
+            "db-migrations/migrations/0007_create_refunds.sql"
+          ],
+          "metrics": {
+            "recall_at_1": 1.0,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 1.0,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "beh-prevent-double-charge",
+          "kind": "behavior",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "handbook/glossary.md",
+            "handbook/adr/0004-idempotency-keys-for-payment-capture.md",
+            "notification-worker/src/handlers/payment_receipt.rs",
+            "billing-api/src/checkout/checkout.service.ts",
+            "mobile-app/lib/api/subscription_api.dart"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.1667,
+            "recall_at_10": 0.1667,
+            "reciprocal_rank": 0.5,
+            "ndcg_at_10": 0.0448,
+            "first_relevant_rank": 2
+          }
+        },
+        {
+          "id": "beh-tr-prevent-double-charge",
+          "kind": "behavior",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "contracts/openapi/ledger-api.yaml",
+            "infra/k8s/notification-worker.yaml",
+            "infra/docker-compose.yml",
+            "billing-api/src/modules/warehouse/partners/wave.policy.ts",
+            "billing-api/src/auth/current-customer.decorator.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "beh-email-retry",
+          "kind": "behavior",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "billing-api/src/modules/returns/admin/return-label.policy.ts",
+            "notification-worker/src/mailer.rs",
+            "billing-api/src/modules/inventory/legacy/stock-level.policy.ts",
+            "handbook/glossary.md",
+            "billing-api/src/auth/jwt-auth.guard.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.3333,
+            "recall_at_10": 0.3333,
+            "reciprocal_rank": 0.5,
+            "ndcg_at_10": 0.4702,
+            "first_relevant_rank": 2
+          }
+        },
+        {
+          "id": "beh-billing-authentication",
+          "kind": "behavior",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "infra/k8s/billing-api.yaml",
+            "orders-service/README.md",
+            "billing-api/README.md",
+            "db-migrations/README.md",
+            "infra/k8s/ledger-service.yaml"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "beh-refund-early-stop",
+          "kind": "behavior",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "contracts/README.md",
+            "orders-service/internal/bundles/v2/bundle_worker.go",
+            "handbook/glossary.md",
+            "billing-api/src/app.module.ts",
+            "orders-service/internal/reports/core/kpi_worker.go"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "beh-tr-refund-early-stop",
+          "kind": "behavior",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "notification-worker/src/jobs/content/hourly/snippet_cleanup.rs",
+            "notification-worker/src/jobs/feature_flags/backfill/segment_cleanup.rs",
+            "notification-worker/src/jobs/bundles/hourly/bundle_component_batch.rs",
+            "notification-worker/src/jobs/warehouse/nightly/pick_list_schedule.rs",
+            "notification-worker/src/jobs/seo/hourly/redirect_cleanup.rs"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "beh-order-marked-paid",
+          "kind": "behavior",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "orders-service/README.md",
+            "storefront-web/src/pages/orders/index.tsx",
+            "storefront-web/src/api/orders.ts",
+            "handbook/adr/0005-cancel-at-period-end.md",
+            "billing-api/src/checkout/checkout.service.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "beh-access-after-cancel",
+          "kind": "behavior",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "handbook/glossary.md",
+            "handbook/adr/0005-cancel-at-period-end.md",
+            "contracts/openapi/billing-api.yaml",
+            "storefront-web/src/i18n/locales/en.json",
+            "ledger-service/ledger/payments/refunds.py"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.3333,
+            "recall_at_10": 0.3333,
+            "reciprocal_rank": 0.5,
+            "ndcg_at_10": 0.2015,
+            "first_relevant_rank": 2
+          }
+        },
+        {
+          "id": "beh-tr-mobile-cancel-confirmation",
+          "kind": "behavior",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "notification-worker/templates/subscription_cancelled.tr.txt",
+            "ledger-service/ledger/coupons/schemas/promotion_rules.py",
+            "storefront-web/src/features/inventory/mobile-web/LocationCard.tsx",
+            "storefront-web/src/components/CancelSubscriptionDialog.tsx",
+            "handbook/adr/0001-record-architecture-decisions.md"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "beh-tr-session-token-header",
+          "kind": "behavior",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "storefront-web/src/i18n/locales/tr.json",
+            "infra/k8s/ledger-service.yaml",
+            "storefront-web/package.json",
+            "billing-api/package.json",
+            "storefront-web/src/i18n/locales/en.json"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "beh-psp-timeout",
+          "kind": "behavior",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "notification-worker/templates/subscription_cancelled.en.txt",
+            "handbook/notes/catalog/2026-03-12-category-kickoff.md",
+            "handbook/glossary.md",
+            "handbook/notes/warehouse/2026-08-09-pick-list-planning.md",
+            "orders-service/internal/audit/admin/audit_entry_sync.go"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "beh-idempotency-ttl",
+          "kind": "behavior",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "db-migrations/migrations/0006_create_idempotency_keys.sql",
+            "billing-api/src/checkout/checkout.controller.ts",
+            "contracts/openapi/ledger-api.yaml",
+            "storefront-web/src/i18n/index.ts",
+            "contracts/openapi/billing-api.yaml"
+          ],
+          "metrics": {
+            "recall_at_1": 0.25,
+            "recall_at_5": 0.25,
+            "recall_at_10": 0.5,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.3536,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "beh-tr-order-history-paging",
+          "kind": "behavior",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "storefront-web/src/i18n/locales/tr.json",
+            "mobile-app/lib/l10n/app_tr.arb",
+            "billing-api/package.json",
+            "orders-service/internal/ledger/client.go",
+            "storefront-web/package.json"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "beh-foreign-subscription-access",
+          "kind": "behavior",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "orders-service/internal/orders/model.go",
+            "storefront-web/src/features/pricing/legacy/PriceListBadge.tsx",
+            "handbook/glossary.md",
+            "orders-service/internal/support/legacy/satisfaction_survey_handler.go",
+            "orders-service/internal/export/s3_export.go"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "xp-cancel-end-to-end",
+          "kind": "cross_project",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "contracts/openapi/ledger-api.yaml",
+            "orders-service/internal/bundles/v2/bundle_worker.go",
+            "handbook/glossary.md",
+            "storefront-web/README.md",
+            "contracts/openapi/billing-api.yaml"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "xp-tr-cancel-triggers",
+          "kind": "cross_project",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "mobile-app/lib/l10n/app_tr.arb",
+            "orders-service/internal/httpapi/handlers.go",
+            "orders-service/internal/bundles/v2/bundle_worker.go",
+            "orders-service/internal/bundles/sync/bundle_component_worker.go",
+            "orders-service/internal/suppliers/core/delivery_slot.go"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "xp-checkout-to-capture",
+          "kind": "cross_project",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "handbook/runbooks/payment-capture-incidents.md",
+            "storefront-web/README.md",
+            "handbook/adr/0004-idempotency-keys-for-payment-capture.md",
+            "orders-service/README.md",
+            "billing-api/src/checkout/checkout.service.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.125,
+            "recall_at_10": 0.375,
+            "reciprocal_rank": 0.2,
+            "ndcg_at_10": 0.2691,
+            "first_relevant_rank": 5
+          }
+        },
+        {
+          "id": "xp-tr-payment-to-order-status",
+          "kind": "cross_project",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "storefront-web/src/i18n/locales/tr.json",
+            "billing-api/src/modules/warehouse/partners/wave.policy.ts",
+            "ledger-service/ledger/psp/gateway.py",
+            "infra/docker-compose.yml",
+            "billing-api/package.json"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "xp-cancel-email-from-mobile",
+          "kind": "cross_project",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "orders-service/README.md",
+            "mobile-app/README.md",
+            "handbook/notes/warehouse/2026-08-09-pick-list-planning.md",
+            "handbook/adr/0004-idempotency-keys-for-payment-capture.md",
+            "billing-api/src/auth/current-customer.decorator.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "xp-order-history-sources",
+          "kind": "cross_project",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "storefront-web/src/pages/orders/index.tsx",
+            "billing-api/src/orders/orders.client.ts",
+            "orders-service/internal/orders/model.go",
+            "storefront-web/src/api/checkout.ts",
+            "mobile-app/lib/api/orders_api.dart"
+          ],
+          "metrics": {
+            "recall_at_1": 0.2,
+            "recall_at_5": 0.4,
+            "recall_at_10": 0.6,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.4958,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "xp-tr-checkout-order-creation",
+          "kind": "cross_project",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "handbook/adr/0006-bildirim-iscisi-rust.md",
+            "storefront-web/src/i18n/locales/tr.json",
+            "mobile-app/lib/l10n/app_tr.arb",
+            "mobile-app/lib/features/seo/presentation/redirect_service.dart",
+            "contracts/events/payment.captured.v1.json"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "ct-cancel-endpoint-callers",
+          "kind": "contract",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "billing-api/src/subscriptions/subscriptions.controller.ts",
+            "billing-api/src/subscriptions/dto/cancel-subscription.dto.ts",
+            "billing-api/README.md",
+            "db-migrations/migrations/0009_add_cancel_reason_to_subscriptions.sql",
+            "billing-api/src/orders/orders.client.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.25,
+            "recall_at_5": 0.25,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.6053,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "ct-tr-cancelled-event-consumers",
+          "kind": "contract",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "billing-api/src/subscriptions/subscription.service.ts",
+            "orders-service/internal/events/subscription_consumer.go",
+            "notification-worker/src/consumer.rs",
+            "contracts/events/subscription.cancelled.v1.json",
+            "storefront-web/src/pages/account/subscription.tsx"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.75,
+            "recall_at_10": 0.75,
+            "reciprocal_rank": 0.5,
+            "ndcg_at_10": 0.5681,
+            "first_relevant_rank": 2
+          }
+        },
+        {
+          "id": "ct-cancelled-event-producer",
+          "kind": "contract",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "orders-service/internal/events/subscription_consumer.go",
+            "billing-api/src/subscriptions/subscription.service.ts",
+            "contracts/events/subscription.cancelled.v1.json",
+            "contracts/README.md",
+            "billing-api/src/events/subscription-events.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.75,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 0.5,
+            "ndcg_at_10": 0.6602,
+            "first_relevant_rank": 2
+          }
+        },
+        {
+          "id": "ct-get-payment-status",
+          "kind": "contract",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "contracts/proto/ledger/v1/ledger.proto",
+            "ledger-service/ledger/payments/refunds.py",
+            "ledger-service/ledger/grpc_server.py",
+            "ledger-service/ledger/banners/legacy/placement_service.py",
+            "billing-api/src/subscriptions/subscription.service.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.25,
+            "recall_at_5": 0.5,
+            "recall_at_10": 0.5,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.487,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "ct-tr-idempotency-header-senders",
+          "kind": "contract",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "handbook/adr/0004-idempotency-keys-for-payment-capture.md",
+            "contracts/openapi/ledger-api.yaml",
+            "ledger-service/ledger/psp/gateway.py",
+            "ledger-service/ledger/payments/capture.py",
+            "ledger-service/ledger/payments/refunds.py"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.25,
+            "recall_at_10": 0.5,
+            "reciprocal_rank": 0.5,
+            "ndcg_at_10": 0.2983,
+            "first_relevant_rank": 2
+          }
+        },
+        {
+          "id": "ct-payment-captured-payload",
+          "kind": "contract",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "ledger-service/ledger/events.py",
+            "contracts/events/payment.captured.v1.json",
+            "handbook/runbooks/payment-capture-incidents.md",
+            "notification-worker/src/handlers/payment_receipt.rs",
+            "orders-service/internal/events/payment_consumer.go"
+          ],
+          "metrics": {
+            "recall_at_1": 0.25,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.8322,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "ct-cancel-reason-column",
+          "kind": "contract",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "db-migrations/migrations/0009_add_cancel_reason_to_subscriptions.sql",
+            "billing-api/src/subscriptions/subscription.entity.ts",
+            "billing-api/src/subscriptions/dto/cancel-subscription.dto.ts",
+            "storefront-web/src/api/subscriptions.ts",
+            "mobile-app/lib/api/subscription_api.dart"
+          ],
+          "metrics": {
+            "recall_at_1": 0.3333,
+            "recall_at_5": 0.6667,
+            "recall_at_10": 0.6667,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.958,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "ct-resume-endpoint-in-spec",
+          "kind": "contract",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "contracts/openapi/billing-api.yaml",
+            "contracts/openapi/ledger-api.yaml",
+            "mobile-app/lib/api/subscription_api.dart",
+            "storefront-web/src/pages/account/subscription.tsx",
+            "contracts/events/subscription.cancelled.v1.json"
+          ],
+          "metrics": {
+            "recall_at_1": 0.3333,
+            "recall_at_5": 0.3333,
+            "recall_at_10": 0.3333,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.7453,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "ct-tr-orders-table-writer",
+          "kind": "contract",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "billing-api/src/orders/orders.client.ts",
+            "storefront-web/src/pages/orders/index.tsx",
+            "orders-service/internal/store/postgres.go",
+            "mobile-app/lib/main.dart",
+            "db-migrations/migrations/0004_create_orders.sql"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.5,
+            "recall_at_10": 0.5,
+            "reciprocal_rank": 0.3333,
+            "ndcg_at_10": 0.4306,
+            "first_relevant_rank": 3
+          }
+        },
+        {
+          "id": "cfg-smtp-host",
+          "kind": "config",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "notification-worker/src/mailer.rs",
+            "notification-worker/src/config.rs",
+            "infra/README.md",
+            "notification-worker/src/main.rs",
+            "billing-api/src/modules/feature-flags/reporting/segment.repository.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.25,
+            "recall_at_10": 0.25,
+            "reciprocal_rank": 0.5,
+            "ndcg_at_10": 0.408,
+            "first_relevant_rank": 2
+          }
+        },
+        {
+          "id": "cfg-tr-mail-server-address",
+          "kind": "config",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "storefront-web/src/features/banners/experiments/usePlacementDraft.ts",
+            "billing-api/src/orders/orders.client.ts",
+            "mobile-app/lib/api/orders_api.dart",
+            "storefront-web/src/features/seo/admin/MetaTagList.tsx",
+            "mobile-app/lib/api/subscription_api.dart"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "cfg-database-url-readers",
+          "kind": "config",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "billing-api/src/app.module.ts",
+            "ledger-service/ledger/settings.py",
+            "orders-service/cmd/orders/main.go",
+            "infra/docker-compose.yml",
+            "infra/k8s/billing-api.yaml"
+          ],
+          "metrics": {
+            "recall_at_1": 0.125,
+            "recall_at_5": 0.625,
+            "recall_at_10": 0.875,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.9802,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "cfg-tr-web-billing-api-url",
+          "kind": "config",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "storefront-web/README.md",
+            "mobile-app/lib/api/subscription_api.dart",
+            "storefront-web/src/api/orders.ts",
+            "mobile-app/lib/api/api_client.dart",
+            "storefront-web/src/api/subscriptions.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.5,
+            "recall_at_5": 0.5,
+            "recall_at_10": 0.5,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.131,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "cfg-kafka-connection",
+          "kind": "config",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "ledger-service/ledger/settings.py",
+            "ledger-service/ledger/analytics/views/funnel_service.py",
+            "ledger-service/tests/addresses/test_geo_point_service.py",
+            "billing-api/src/modules/catalog/core/variant.service.ts",
+            "ledger-service/ledger/banners/legacy/placement_service.py"
+          ],
+          "metrics": {
+            "recall_at_1": 0.1667,
+            "recall_at_5": 0.1667,
+            "recall_at_10": 0.1667,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.2272,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "cfg-tr-psp-api-key",
+          "kind": "config",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "mobile-app/lib/api/api_client.dart",
+            "billing-api/src/events/subscription-events.ts",
+            "billing-api/README.md",
+            "ledger-service/ledger/db/models.py",
+            "storefront-web/src/api/subscriptions.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "cfg-notification-worker-replicas",
+          "kind": "config",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "infra/k8s/notification-worker.yaml",
+            "db-migrations/README.md",
+            "notification-worker/src/config.rs",
+            "billing-api/README.md",
+            "billing-api/src/modules/reports/v2/kpi.policy.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 1.0,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 1.0,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "i18n-tr-cancel-button-text",
+          "kind": "i18n",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "notification-worker/src/handlers/subscription_cancelled.rs",
+            "orders-service/internal/export/s3_export.go",
+            "storefront-web/src/features/carts/storefront/SavedCartTable.tsx",
+            "mobile-app/lib/l10n/app_tr.arb",
+            "storefront-web/src/features/recommendations/internal/useSimilaritySelection.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.25,
+            "recall_at_10": 0.25,
+            "reciprocal_rank": 0.25,
+            "ndcg_at_10": 0.2442,
+            "first_relevant_rank": 4
+          }
+        },
+        {
+          "id": "i18n-cancel-dialog-title",
+          "kind": "i18n",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "mobile-app/lib/l10n/app_en.arb",
+            "db-migrations/migrations/0009_add_cancel_reason_to_subscriptions.sql",
+            "billing-api/src/subscriptions/dto/cancel-subscription.dto.ts",
+            "orders-service/internal/warehouse/legacy/pick_list_handler.go",
+            "handbook/adr/0005-cancel-at-period-end.md"
+          ],
+          "metrics": {
+            "recall_at_1": 0.1667,
+            "recall_at_5": 0.1667,
+            "recall_at_10": 0.1667,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.4451,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "i18n-tr-cancellation-email-template",
+          "kind": "i18n",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "mobile-app/lib/screens/subscription_screen.dart",
+            "notification-worker/src/handlers/subscription_cancelled.rs",
+            "orders-service/internal/export/s3_export.go",
+            "orders-service/internal/bundles/v2/bundle_worker.go",
+            "orders-service/internal/orders/model.go"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.5,
+            "recall_at_10": 0.5,
+            "reciprocal_rank": 0.5,
+            "ndcg_at_10": 0.2128,
+            "first_relevant_rank": 2
+          }
+        },
+        {
+          "id": "i18n-tr-price-formatting",
+          "kind": "i18n",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "billing-api/src/modules/warehouse/partners/wave.policy.ts",
+            "storefront-web/src/i18n/locales/tr.json",
+            "notification-worker/src/jobs/content/hourly/snippet_cleanup.rs",
+            "notification-worker/src/jobs/media/nightly/upload_cleanup.rs",
+            "notification-worker/src/jobs/bundles/hourly/bundle_component_batch.rs"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "i18n-locale-choice",
+          "kind": "i18n",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "handbook/adr/0004-idempotency-keys-for-payment-capture.md",
+            "orders-service/README.md",
+            "db-migrations/README.md",
+            "handbook/adr/0003-shared-postgres-table-ownership.md",
+            "billing-api/src/subscriptions/subscription.entity.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "i18n-tr-missing-translation-fallback",
+          "kind": "i18n",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "billing-api/src/modules/feature-flags/reporting/segment.repository.ts",
+            "mobile-app/lib/features/analytics/domain/cohort_view_model.dart",
+            "billing-api/src/modules/content/v2/snippet.policy.ts",
+            "ledger-service/ledger/feature_flags/schemas/segment_policy.py",
+            "billing-api/src/modules/content/legacy/snippet.policy.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "i18n-mobile-languages",
+          "kind": "i18n",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "mobile-app/README.md",
+            "handbook/notes/warehouse/2026-08-09-pick-list-planning.md",
+            "infra/k8s/overlays/staging/support/ticket-deployment.yaml",
+            "handbook/adr/0004-idempotency-keys-for-payment-capture.md",
+            "mobile-app/lib/features/shipping/experiments/rate_view_model.dart"
+          ],
+          "metrics": {
+            "recall_at_1": 0.25,
+            "recall_at_5": 0.25,
+            "recall_at_10": 0.25,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.0924,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "doc-why-idempotency-keys",
+          "kind": "history_doc",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "handbook/adr/0004-idempotency-keys-for-payment-capture.md",
+            "ledger-service/ledger/payments/capture.py",
+            "handbook/README.md",
+            "ledger-service/ledger/api/payments.py",
+            "handbook/runbooks/payment-capture-incidents.md"
+          ],
+          "metrics": {
+            "recall_at_1": 0.3333,
+            "recall_at_5": 0.3333,
+            "recall_at_10": 0.6667,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.8979,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "doc-tr-why-rust-worker",
+          "kind": "history_doc",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "handbook/adr/0006-bildirim-iscisi-rust.md",
+            "handbook/README.md",
+            "mobile-app/lib/screens/order_history_screen.dart",
+            "notification-worker/README.md",
+            "storefront-web/src/api/subscriptions.ts"
+          ],
+          "metrics": {
+            "recall_at_1": 0.5,
+            "recall_at_5": 1.0,
+            "recall_at_10": 1.0,
+            "reciprocal_rank": 1.0,
+            "ndcg_at_10": 0.9738,
+            "first_relevant_rank": 1
+          }
+        },
+        {
+          "id": "doc-event-naming",
+          "kind": "history_doc",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "orders-service/internal/events/subscription_consumer.go",
+            "orders-service/internal/events/payment_consumer.go",
+            "orders-service/internal/events/consumer.go",
+            "billing-api/src/events/event-publisher.ts",
+            "contracts/README.md"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.6667,
+            "recall_at_10": 0.6667,
+            "reciprocal_rank": 0.25,
+            "ndcg_at_10": 0.2634,
+            "first_relevant_rank": 4
+          }
+        },
+        {
+          "id": "doc-tr-shared-database-ownership",
+          "kind": "history_doc",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "ledger-service/ledger/bundles/repositories/bundle_repository.py",
+            "handbook/notes/bundles/2024-05-14-bundle-component-kickoff.md",
+            "ledger-service/ledger/bundles/jobs/bundle_repository.py",
+            "ledger-service/ledger/coupons/schemas/promotion_rules.py",
+            "notification-worker/src/jobs/bundles/hourly/bundle_component_batch.rs"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.5,
+            "reciprocal_rank": 0.1667,
+            "ndcg_at_10": 0.2184,
+            "first_relevant_rank": 6
+          }
+        },
+        {
+          "id": "doc-why-period-end",
+          "kind": "history_doc",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "storefront-web/src/features/recommendations/internal/useSimilaritySelection.ts",
+            "handbook/adr/0002-domain-events-on-kafka.md",
+            "handbook/adr/0005-cancel-at-period-end.md",
+            "storefront-web/src/features/audit/partners/useRetentionPolicySelection.ts",
+            "notification-worker/src/jobs/content/hourly/snippet_cleanup.rs"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.5,
+            "recall_at_10": 0.5,
+            "reciprocal_rank": 0.3333,
+            "ndcg_at_10": 0.4587,
+            "first_relevant_rank": 3
+          }
+        },
+        {
+          "id": "doc-tr-adr-process",
+          "kind": "history_doc",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "billing-api/src/modules/feature-flags/admin/flag.scheduler.ts",
+            "db-migrations/migrations/0007_create_refunds.sql",
+            "storefront-web/src/components/PriceTag.tsx",
+            "ledger-service/ledger/feature_flags/schemas/segment_policy.py",
+            "notification-worker/src/handlers/payment_receipt.rs"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "doc-stuck-pending-orders-runbook",
+          "kind": "history_doc",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "storefront-web/src/i18n/locales/tr.json",
+            "storefront-web/src/i18n/locales/en.json",
+            "billing-api/src/orders/orders.client.ts",
+            "handbook/adr/0005-cancel-at-period-end.md",
+            "mobile-app/lib/api/orders_api.dart"
+          ],
+          "metrics": {
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
+            "reciprocal_rank": 0.0,
+            "ndcg_at_10": 0.0,
+            "first_relevant_rank": null
+          }
+        },
+        {
+          "id": "abs-invoice-pdf-export",
+          "kind": "absent",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "storefront-web/src/hooks/useSubscription.ts",
+            "storefront-web/src/features/inventory/mobile-web/LocationCard.tsx",
+            "mobile-app/lib/features/shipping/experiments/rate_view_model.dart",
+            "billing-api/src/subscriptions/plans.controller.ts",
+            "handbook/notes/suppliers/2025-12-20-supplier-sync.md"
+          ],
+          "metrics": null
+        },
+        {
+          "id": "abs-tr-sms-notifications",
+          "kind": "absent",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "contracts/openapi/ledger-api.yaml",
+            "billing-api/src/checkout/checkout.service.ts",
+            "storefront-web/src/features/banners/experiments/usePlacementDraft.ts",
+            "mobile-app/lib/screens/order_history_screen.dart",
+            "notification-worker/src/mailer.rs"
+          ],
+          "metrics": null
+        },
+        {
+          "id": "abs-admin-two-factor",
+          "kind": "absent",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "orders-service/internal/tax/admin/tax_rate_repo.go",
+            "orders-service/internal/audit/admin/audit_entry_sync.go",
+            "mobile-app/README.md",
+            "mobile-app/lib/session/token_storage.dart",
+            "mobile-app/lib/features/shipping/experiments/rate_view_model.dart"
+          ],
+          "metrics": null
+        },
+        {
+          "id": "abs-tr-loyalty-points",
+          "kind": "absent",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "ledger-service/ledger/payments/refunds.py",
+            "notification-worker/src/jobs/pricing/adhoc/price_list_digest.rs",
+            "notification-worker/src/jobs/recommendations/adhoc/similarity_digest.rs",
+            "notification-worker/src/jobs/content/hourly/snippet_cleanup.rs",
+            "ledger-service/ledger/content/repositories/snippet_rules.py"
+          ],
+          "metrics": null
+        },
+        {
+          "id": "abs-crypto-payments",
+          "kind": "absent",
+          "lang": "en",
+          "returned": 10,
+          "top": [
+            "billing-api/src/checkout/checkout.service.ts",
+            "billing-api/src/app.module.ts",
+            "notification-worker/src/consumer.rs",
+            "orders-service/README.md",
+            "billing-api/src/modules/analytics/legacy/cohort.mapper.ts"
+          ],
+          "metrics": null
+        },
+        {
+          "id": "abs-tr-gift-card-balance",
+          "kind": "absent",
+          "lang": "tr",
+          "returned": 10,
+          "top": [
+            "orders-service/internal/tax/admin/tax_rate_repo.go",
+            "orders-service/internal/suppliers/core/delivery_slot_repo.go",
+            "storefront-web/src/features/content/experiments/useArticleSelection.ts",
+            "ledger-service/ledger/content/repositories/snippet_rules.py",
+            "billing-api/src/modules/seo/internal/redirect.repository.ts"
+          ],
+          "metrics": null
+        }
+      ]
+    }
+  ]
+}

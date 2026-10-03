@@ -18,6 +18,7 @@ mod doctor_cmd;
 mod engine_file;
 mod env;
 mod eval_cmd;
+mod eval_hybrid;
 mod fsutil;
 mod init_cmd;
 mod login_cmd;
