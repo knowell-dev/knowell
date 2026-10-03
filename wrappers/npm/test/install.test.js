@@ -13,23 +13,17 @@ const { ensureBinary, cacheRoot } = require('../lib/install');
 
 const VERSION = '9.8.7';
 const TARGET_DIR = `knowell-${VERSION}-x86_64-unknown-linux-gnu`;
-const hasTar = spawnSync('tar', ['--version']).status === 0;
 
 /** Build a fake release (archive + SHA256SUMS) and serve it from a loopback server. */
 async function fakeRelease({ tamper = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'knowell-rel-'));
-  const stage = path.join(root, 'stage', TARGET_DIR);
-  fs.mkdirSync(stage, { recursive: true });
-  fs.writeFileSync(path.join(stage, 'know'), '#!/bin/sh\necho fake know\n');
   const served = path.join(root, 'srv', `v${VERSION}`);
   fs.mkdirSync(served, { recursive: true });
-  const archive = path.join(served, `${TARGET_DIR}.tar.gz`);
-  // Relative paths and a cwd: GNU tar on Windows reads "C:" in a path as a remote host.
-  const rel = path.relative(path.join(root, 'stage'), archive).split(path.sep).join('/');
-  const made = spawnSync('tar', ['-czf', rel, TARGET_DIR], { cwd: path.join(root, 'stage') });
-  assert.equal(made.status, 0, String(made.stderr));
-  const digest = crypto.createHash('sha256').update(fs.readFileSync(archive)).digest('hex');
-  fs.writeFileSync(path.join(served, 'SHA256SUMS'), `${tamper ? '0'.repeat(64) : digest}  ${TARGET_DIR}.tar.gz\n`);
+  const bytes = '#!/bin/sh\necho fake know\n';
+  const digest = tamper ? '0'.repeat(64) : crypto.createHash('sha256').update(bytes).digest('hex');
+  const asset = `${digest}.${TARGET_DIR}-engine`;
+  fs.writeFileSync(path.join(served, asset), bytes);
+  fs.writeFileSync(path.join(served, 'SHA256SUMS'), `${digest}  ${asset}\n`);
 
   const server = http.createServer((req, res) => {
     const file = path.join(root, 'srv', decodeURIComponent(req.url));
@@ -53,7 +47,7 @@ async function fakeRelease({ tamper = false } = {}) {
 
 const linux = { platform: 'linux', arch: 'x64', glibc: () => true };
 
-test('downloads, verifies, unpacks and caches the binary', { skip: !hasTar }, async () => {
+test('downloads, verifies and caches the pinned raw binary', async () => {
   const release = await fakeRelease();
   const logs = [];
   try {
@@ -74,7 +68,7 @@ test('downloads, verifies, unpacks and caches the binary', { skip: !hasTar }, as
   }
 });
 
-test('a checksum mismatch installs nothing', { skip: !hasTar }, async () => {
+test('a checksum mismatch installs nothing', async () => {
   const release = await fakeRelease({ tamper: true });
   try {
     const env = { KNOWELL_DOWNLOAD_BASE: release.base, KNOWELL_CACHE_DIR: release.cache };
@@ -86,7 +80,7 @@ test('a checksum mismatch installs nothing', { skip: !hasTar }, async () => {
   }
 });
 
-test('a missing release is reported, not retried silently', { skip: !hasTar }, async () => {
+test('a missing release is reported, not retried silently', async () => {
   const release = await fakeRelease();
   try {
     const env = { KNOWELL_DOWNLOAD_BASE: release.base, KNOWELL_CACHE_DIR: release.cache };
@@ -99,8 +93,10 @@ test('a missing release is reported, not retried silently', { skip: !hasTar }, a
 test('refuses plain http to a non-loopback host and bad versions', async () => {
   const env = { KNOWELL_DOWNLOAD_BASE: 'http://example.invalid', KNOWELL_CACHE_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'knowell-c-')) };
   try {
-    await assert.rejects(ensureBinary({ version: VERSION, env, log: () => {}, ...linux }), /refusing to download over http:/);
-    await assert.rejects(ensureBinary({ version: '1.0; rm -rf', env, log: () => {}, ...linux }), /invalid version/);
+    await assert.rejects(ensureBinary({ version: VERSION, env, log: () => {}, ...linux }), /refusing an insecure download URL/);
+    for (const version of ['1.0; rm -rf', '1.1.0-rc.01', '18446744073709551616.1.0', '01.1.0', '1.1.0+build']) {
+      await assert.rejects(ensureBinary({ version, env, log: () => {}, ...linux }), /invalid version/);
+    }
   } finally {
     fs.rmSync(env.KNOWELL_CACHE_DIR, { recursive: true, force: true });
   }
@@ -134,4 +130,59 @@ test('launcher without a binary or a released version explains itself on stderr'
   assert.equal(result.status, 1);
   assert.equal(result.stdout, '');
   assert.match(result.stderr, /unreleased development copy/);
+});
+
+test('tampered cached bytes and malformed receipts never run or redownload silently', async () => {
+  const release = await fakeRelease();
+  try {
+    const env = { KNOWELL_DOWNLOAD_BASE: release.base, KNOWELL_CACHE_DIR: release.cache };
+    const exe = await ensureBinary({ version: VERSION, env, log: () => {}, ...linux });
+    const original = fs.readFileSync(exe);
+    fs.writeFileSync(exe, 'KNOWELL_CANARY_TAMPERED');
+    await assert.rejects(ensureBinary({ version: VERSION, env, log: () => {}, ...linux }), /checksum mismatch/);
+    fs.writeFileSync(exe, original);
+    const receipt = path.join(path.dirname(exe), 'receipt.json');
+    fs.writeFileSync(receipt, '{"owner":');
+    await assert.rejects(ensureBinary({ version: VERSION, env, log: () => {}, ...linux }), /receipt is malformed/);
+  } finally { release.close(); }
+});
+
+test('concurrent downloads validate the winning cache receipt', async () => {
+  const release = await fakeRelease();
+  try {
+    const env = { KNOWELL_DOWNLOAD_BASE: release.base, KNOWELL_CACHE_DIR: release.cache };
+    const paths = await Promise.all(Array.from({ length: 3 }, () => ensureBinary({ version: VERSION, env, log: () => {}, ...linux })));
+    assert.equal(new Set(paths).size, 1);
+    assert.match(fs.readFileSync(paths[0], 'utf8'), /fake know/);
+  } finally { release.close(); }
+});
+
+test('a poisoned concurrent winner is rejected instead of accepted by existence', async () => {
+  const release = await fakeRelease();
+  try {
+    const env = { KNOWELL_DOWNLOAD_BASE: release.base, KNOWELL_CACHE_DIR: release.cache };
+    const final = path.join(release.cache, VERSION, 'x86_64-unknown-linux-gnu');
+    const log = () => {
+      fs.mkdirSync(final, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(path.join(final, 'know'), 'KNOWELL_CANARY_POISONED');
+      const receipt = { format_version: 1, owner: 'npm', version: VERSION, target: linux.arch === 'x64' ? 'x86_64-unknown-linux-gnu' : '', sha256: '0'.repeat(64), size: 22 };
+      fs.writeFileSync(path.join(final, 'receipt.json'), `${JSON.stringify(receipt)}\n`);
+    };
+    await assert.rejects(ensureBinary({ version: VERSION, env, log, ...linux }), /checksum mismatch/);
+  } finally { release.close(); }
+});
+
+test('incomplete cache and wrong owner receipt fail closed', async () => {
+  const release = await fakeRelease();
+  try {
+    const env = { KNOWELL_DOWNLOAD_BASE: release.base, KNOWELL_CACHE_DIR: release.cache };
+    const exe = await ensureBinary({ version: VERSION, env, log: () => {}, ...linux });
+    const receipt = path.join(path.dirname(exe), 'receipt.json');
+    const value = JSON.parse(fs.readFileSync(receipt, 'utf8'));
+    value.owner = 'direct';
+    fs.writeFileSync(receipt, `${JSON.stringify(value)}\n`);
+    await assert.rejects(ensureBinary({ version: VERSION, env, log: () => {}, ...linux }), /does not match/);
+    fs.unlinkSync(receipt);
+    await assert.rejects(ensureBinary({ version: VERSION, env, log: () => {}, ...linux }), /incomplete/);
+  } finally { release.close(); }
 });

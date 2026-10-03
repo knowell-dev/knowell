@@ -34,5 +34,5 @@ install -D -m 0755 "$binary" "target/$target/release/know"
 mkdir -p "$out"
 # --no-strip: the release binary is already stripped, and a foreign-arch binary cannot be
 # stripped by the host's tools anyway.
-cargo deb --no-build --no-strip --target "$target" -p knowell -o "$out/"
-cargo generate-rpm -p crates/knowell --target "$target" -o "$out/"
+python scripts/buildlock.py cargo deb --no-build --no-strip --target "$target" -p knowell -o "$out/"
+python scripts/buildlock.py cargo generate-rpm -p crates/knowell --target "$target" -o "$out/"

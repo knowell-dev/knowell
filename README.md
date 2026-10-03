@@ -162,6 +162,8 @@ is always returned as untrusted data.
 | `know connect codex\|claude\|cursor`, `know ci init` | Integrations |
 | `know login`, `know backup`, `know restore`, `know doctor`, `know eval` | Operations |
 | `know token create\|list\|revoke` | Local database administration of scoped hub credentials; values go only to new private files |
+| `know update --status\|--plan\|--prepare\|--apply` | Explicit verified software updates for direct installer-owned installations |
+| `know maintain --status\|--operation UUID` | Inspect or explicitly finish database maintenance, for every installation method |
 
 Local `index`, `search`, `trace`, `impact` and `status` require an engine configuration with role
 `standalone` and a selected `knowell.toml` (use the global `--config` and `--workspace`
@@ -172,6 +174,69 @@ required tier remains incomplete; idle jobs alone do not prove completion. Use
 configured providers may charge for that work. Search and status register metadata but
 do not refresh or index sources. Search exits with 1 for a missing ref or index, and
 reports reduced semantic coverage as a gap. Operational errors exit with 2.
+
+### Updating an installation
+
+Source/Cargo, npm, Homebrew, Scoop, winget, system packages, and container images remain
+owned by their original installation method. `know update` reports that ownership and
+does not replace their executable. Direct bootstrap installers create a dedicated
+software root containing a stable launcher and immutable engine version directories;
+user data remains under `KNOWELL_HOME`.
+
+Native updates are explicit. There is no startup/background update network traffic or
+MCP update banner. The production TUF trust root and metadata host must be provisioned
+before release; development builds do not infer a public root. Provision an independently
+trusted public root and repository once, then choose an exact version:
+
+```sh
+know update --configure-source --trust-root /trusted/root.json \
+  --metadata-url https://updates.example.invalid/metadata/ \
+  --targets-url https://releases.example.invalid/download/
+know update --plan --version 1.1.0
+know update --prepare --version 1.1.0
+# Close all engine/MCP sessions, then activate the prepared version.
+know update --apply
+```
+
+`--prepare` verifies complete raw engine and launcher artifacts while current sessions
+keep working. `--apply` refuses active local engines and coordinates a persistent
+database maintenance operation with participating remote engines. Remote processes must
+be stopped by their operator; Knowell does not terminate active MCP sessions for updates.
+External databases additionally require `--session-gates-confirmed`: the operator must
+use direct or session-preserving connections and stop clients without runtime admission.
+Transaction/statement poolers are unsupported for this protocol.
+
+Schema-changing apply requires `--allow-migration` and a fresh managed `--backup FILE`,
+or `--external-backup-confirmed` for an external backup/restore-test attestation. The
+verified candidate runs its own embedded migrations under exclusive database admission.
+The backup contains indexed code and memory; it is a database dump, not a backup of
+PostgreSQL roles, global configuration, or every Knowell home. A schema update applies
+only to the selected configuration/home; other homes must be explicitly maintained.
+Choose a private backup directory: unsafe parent permissions and existing destinations
+are refused, and the new dump is protected before it is published.
+Ordinary engine startup validates exact schema history and never migrates it.
+
+Inspect an interruption with `know update --status`. Select recovery explicitly with
+`--recover old` or `--recover new`; `--rollback` revalidates the retained previous release
+against current trusted metadata and persisted formats. Neither restores a database or
+discards later writes. Valid interrupted trust-state generations can be resumed with
+`--recover-metadata`; corrupt trust history is refused, never deleted/reset automatically.
+Pre-migration backups retain the maintenance UUID. After a deliberate database restore,
+use a schema-compatible engine and explicitly recover that UUID before reopening runtime
+admission; keep the software journal and backup together.
+Local offline repositories require `--offline` and two `file:///` directory URLs; signature,
+expiry, and replay checks still apply.
+
+To correct repository URLs, repeat `--configure-source` with the exact original public
+bootstrap root. Previously accepted root and metadata versions remain enforced; a new
+bootstrap root cannot replace the installation's trust history.
+
+Launcher replacement is independent: invoke the active **raw engine** in its version
+directory with `update --launcher` and the source options, after every launcher exits.
+A pending launcher repair blocks ordinary launch until the explicit repair completes.
+Package-managed users can inspect interrupted database maintenance with `know maintain
+--status` and recover its recorded UUID with `know maintain --operation UUID`; migrations
+add `--migrate` and the same backup/session preconditions. Maintenance never expires by TTL.
 
 `trace` and `impact` query existing generations without indexing or making provider
 requests. Graph reports preserve source commits, hashes, line ranges, freshness,

@@ -193,7 +193,9 @@ jobs:
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-nextest
-      - run: cargo nextest archive --workspace --locked --archive-file nextest-archive.tar.zst
+      - name: Build the stable launcher for process tests and the test archive
+        run: python scripts/buildlock.py cargo build --locked -p knowell-launcher
+      - run: python scripts/buildlock.py cargo nextest archive --workspace --locked --archive-file nextest-archive.tar.zst
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nextest-archive
@@ -256,7 +258,7 @@ jobs:
         env:
           PARTITION: ${{ matrix.partition }}
         run: >
-          cargo nextest run
+          python scripts/buildlock.py cargo nextest run
           --archive-file nextest-archive.tar.zst
           --workspace-remap .
           --partition "count:${PARTITION}/3"
@@ -281,7 +283,7 @@ jobs:
         with:
           tool: cargo-nextest
       # Path- and OS-sensitive crates only; the full matrix runs in the merge queue.
-      - run: cargo nextest run --locked -p knowell-core -p knowell-secrets -p knowell-source -p knowell-config
+      - run: python scripts/buildlock.py cargo nextest run --locked -p knowell-core -p knowell-secrets -p knowell-source -p knowell-config -p knowell-update -p knowell-launcher
 
   eval:
     name: eval
@@ -373,7 +375,9 @@ jobs:
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-nextest
-      - run: cargo nextest run --workspace --locked
+      - name: Build the stable launcher for process tests
+        run: python scripts/buildlock.py cargo build --locked -p knowell-launcher
+      - run: python scripts/buildlock.py cargo nextest run --workspace --locked
 
   storage-pg18:
     name: storage-pg18

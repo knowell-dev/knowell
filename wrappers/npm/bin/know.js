@@ -34,11 +34,14 @@ async function main() {
     }
   }
 
-  const child = spawn(binary, process.argv.slice(2), { stdio: 'inherit', windowsHide: true });
+  const child = spawn(binary, process.argv.slice(2), {
+    stdio: 'inherit', windowsHide: true,
+    env: { ...process.env, KNOWELL_INSTALL_OWNER: 'npm' },
+  });
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
     process.on(signal, () => child.kill(signal));
   }
-  child.on('error', (error) => fail(`could not start ${binary}: ${error.message}`));
+  child.on('error', () => fail('could not start the configured binary'));
   child.on('exit', (code, signal) => {
     if (signal) {
       process.removeAllListeners(signal);

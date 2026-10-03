@@ -314,7 +314,7 @@ fn add(
     let outcome = rt.block_on(async {
         let store = db::connect(env, &engine, Duration::from_secs(15), 2).await?;
         store
-            .migrate()
+            .validate_schema()
             .await
             .context("cannot apply the database migrations")?;
         let result = register(&store, organization, &resolved).await;

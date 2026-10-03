@@ -30,17 +30,25 @@ class PackageError(Exception):
     """Bad input; the message says what to fix."""
 
 
-def build(version: str, target: str, binary: Path, out: Path, root: Path = Path(".")) -> Path:
+def build(version: str, target: str, binary: Path, out: Path, root: Path = Path("."),
+          launcher: Path | None = None) -> Path:
     if not VERSION_RE.match(version):
         raise PackageError(f"invalid version: {version}")
     if not TARGET_RE.match(target):
         raise PackageError(f"invalid target: {target}")
-    if not binary.is_file():
+    if not binary.is_file() or binary.is_symlink():
         raise PackageError(f"binary not found: {binary}")
     windows = "windows" in target
     exe_name = "know.exe" if windows else "know"
     top = f"knowell-{version}-{target}"
     entries: list[tuple[str, Path, int]] = [(f"{top}/{exe_name}", binary, 0o755)]
+    # Package managers continue to install `know`; direct bootstrap installs this
+    # distinct launcher as `know` and retains the engine in its immutable version dir.
+    if launcher is not None:
+        if not launcher.is_file() or launcher.is_symlink():
+            raise PackageError("launcher must be a regular file")
+        launcher_name = "know-launcher.exe" if windows else "know-launcher"
+        entries.append((f"{top}/{launcher_name}", launcher, 0o755))
     for name in EXTRA_FILES:
         path = root / name
         if not path.is_file():
@@ -78,11 +86,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--version", required=True)
     parser.add_argument("--target", required=True)
     parser.add_argument("--binary", required=True, type=Path)
+    parser.add_argument("--launcher", type=Path, help="optional direct-install bootstrap launcher")
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--root", type=Path, default=Path("."), help="repository root holding LICENSE files and README.md")
     args = parser.parse_args(argv)
     try:
-        print(build(args.version, args.target, args.binary, args.out, args.root))
+        print(build(args.version, args.target, args.binary, args.out, args.root, args.launcher))
     except (PackageError, OSError) as err:
         print(f"error: {err}", file=sys.stderr)
         return 2
