@@ -13,6 +13,8 @@ is released. Nothing has been released yet.
 - Count Gemini batch entries separately in the request limiter, reject batches
   larger than the configured quota capacity, reserve request and token rates together,
   and bound live evaluation token rates.
+- Verify real Knowell SARIF upload and GitHub processing with a main-only manual
+  workflow that checks expected rules and committed source locations before upload.
 - Add an explicit synthetic-only Gemini evaluation command and an opt-in,
   main-only nightly matrix for 768/1536/3072 dimensions with shared token budgets
   and reproducible measurement conditions. Live validation awaits owner setup.
