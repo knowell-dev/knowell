@@ -148,13 +148,36 @@ is always returned as untrusted data.
 | `know workspace import\|add\|list`, `know project add` | Define workspaces and projects |
 | `know serve [--role standalone\|hub\|worker\|edge]` | Run the engine, panel and MCP endpoint |
 | `know mcp` | MCP server over stdio for local agents |
-| `know search`, `know trace`, `know impact`, `know context` | Query from the terminal |
+| `know index [--rebuild] [--json]` | Index the selected standalone workspace and report incomplete targets |
+| `know search QUERY [--project NAME] [--no-snippets] [--json]` | Search the standalone index with versioned evidence and explicit coverage gaps |
+| `know status [--project NAME] [--json]` | Read standalone index freshness, tier states and embedding coverage |
+| `know trace`, `know impact` | Planned terminal graph queries |
+| `know context` | Repository session hook; engine-backed context remains planned |
 | `know check` | Deterministic contract and rule checks (SARIF for CI) |
-| `know task`, `know memory` | Tasks, checkpoints and team knowledge |
-| `know status`, `know profile` | Index freshness; embedding profiles and blue-green switches |
+| `know task`, `know memory` | Planned terminal task and memory administration; MCP tools exist |
+| `know profile` | Planned embedding profile administration |
 | `know connect codex\|claude\|cursor`, `know ci init` | Integrations |
 | `know login`, `know backup`, `know restore`, `know doctor`, `know eval` | Operations |
 | `know token create\|list\|revoke` | Local database administration of scoped hub credentials; values go only to new private files |
+
+Local `index`, `search` and `status` require an engine configuration with role
+`standalone` and a selected `knowell.toml` (use the global `--config` and `--workspace`
+options to choose them). `index` processes only that workspace's registered views,
+including their expired leases. It exits with 1 when the observed source target or a
+required tier remains incomplete; idle jobs alone do not prove completion. Use
+`index --rebuild` after changing an embedding profile to rebuild an unchanged target;
+configured providers may charge for that work. Search and status register metadata but
+do not refresh or index sources. Search exits with 1 for a missing ref or index, and
+reports reduced semantic coverage as a gap. Operational errors exit with 2.
+Content-policy changes trigger full reconciliation even when the source commit is
+unchanged; missing policy manifests are rebuilt conservatively before reporting success.
+
+These commands currently use the local database. Hub transport remains planned.
+Directory sources can be indexed and inspected, but source search cannot yet return
+their hits because the MCP evidence schema requires a Git commit; it reports the gap.
+Local provider construction currently uses each embedding library's batch and rate
+defaults; CLI rate and spending caps remain planned. Provider quota failures stay
+explicit and can leave the index incomplete.
 
 ## Embeddings and models
 

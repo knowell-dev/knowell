@@ -80,7 +80,9 @@ impl Engine {
         access: Access,
         input: SearchInput,
     ) -> Result<SearchOutput, ToolError> {
-        let pinned = self.resolve_target(&access, &input.target).await?;
+        let pinned = self
+            .resolve_target_for_projects(&access, &input.target, &input.projects)
+            .await?;
         let limit = usize::try_from(input.limit.unwrap_or(10)).unwrap_or(10);
         let wants = |kind: SearchKind| input.kinds.is_empty() || input.kinds.contains(&kind);
         let languages = if input.languages.is_empty() {
@@ -199,7 +201,7 @@ impl Engine {
             }
         }
         let memory_hits = if wants(SearchKind::Memory) {
-            self.memory_hits(&access, &pinned, &input.query, limit)
+            self.memory_hits(&access, &pinned, &input.projects, &input.query, limit)
                 .await?
         } else {
             Vec::new()

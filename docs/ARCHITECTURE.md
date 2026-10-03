@@ -592,6 +592,30 @@ list and revoke expose identifiers and metadata. Creation and revocation are aud
 the same transaction. Login verifies authenticated hub health before saving references;
 remote connections require HTTPS, and redirects are refused.
 
+Implemented local `index`, `search` and `status` commands construct the same engine
+with the standalone caller and selected workspace. Configuration, project selection
+and provider profiles are validated before opening the database. A configured provider
+cannot silently become an unconfigured lexical-only profile. Registration issues,
+generation state and embedding coverage stay explicit in JSON and terminal output.
+Search and status register metadata without scheduling source indexing or starting
+watchers. A fresh Git search resolves the exact authorized target before using its
+saved generation; existing contexts retain their original pins. Explicit project
+filters narrow source probes before unrelated source failures can affect the query.
+If a Git target has advanced since indexing, fresh results retain the indexed commit
+and report its stale or catching-up state from the observed target without queuing work.
+
+`index` refreshes each selected workspace view, then drains and recovers leases only
+within its frozen registered view scope. Its completion report checks the observed
+commit or directory tree, required tiers and embedding coverage. Missing or superseded
+targets, retry delays and failures produce exit code 1; operational errors produce 2.
+Changed or unavailable content-policy manifests trigger full reconciliation even on an
+unchanged source target. `index --rebuild` explicitly rebuilds an unchanged target when
+the configured embedding profile changes. Local providers currently use their library
+batch, rate and spending defaults; configurable CLI caps remain open. These local commands
+do not yet implement hub transport. Directory source search remains limited by the
+commit-required MCP evidence schema and reports that missing evidence instead of
+inventing a commit.
+
 ### 12.3 REST
 
 A versioned REST API with an SSE progress stream serves the panel and integrations, under

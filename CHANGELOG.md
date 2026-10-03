@@ -10,6 +10,13 @@ is released. Nothing has been released yet.
 
 ### Fixed
 
+- Reject missing Git targets in fresh engine queries without serving an old active
+  index; observe advanced refs for honest freshness, preserve existing context pins
+  and narrow source access and project-scoped memory before filtered searches.
+- Recover expired indexing leases within an explicit view scope without changing
+  foreign or unscoped jobs.
+- Reconcile changed content policies and unavailable policy manifests before reusing
+  unchanged files, including builds queued before the manifest was lost.
 - Emit absolute source file URIs in SARIF so GitHub places primary and related
   locations under the checkout correctly, including monorepo project subdirectories.
 - Count Gemini batch entries separately in the request limiter, reject batches
@@ -50,6 +57,10 @@ is released. Nothing has been released yet.
 
 ### Added
 
+- Standalone `know index`, `know search` and `know status` commands backed by the real
+  engine, with versioned evidence, tier and embedding coverage reports, JSON output
+  and explicit incomplete outcomes. `index --rebuild` rebuilds an unchanged target
+  after a configured embedding profile change.
 - Local `know token create|list|revoke` administration with a configured pepper reference,
   explicit user bootstrap, private credential files and transactional audit records.
 - Initial Rust workspace, contribution rules, and project documentation.

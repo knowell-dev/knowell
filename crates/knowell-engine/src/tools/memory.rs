@@ -652,6 +652,7 @@ impl Engine {
         &self,
         access: &Access,
         pinned: &Pinned,
+        projects: &[Name],
         query: &str,
         limit: usize,
     ) -> Result<Vec<MemoryHit>, ToolError> {
@@ -665,7 +666,17 @@ impl Engine {
         if words.is_empty() {
             return Ok(Vec::new());
         }
-        let scopes = self.readable_scopes(access, pinned);
+        // Narrow before retrieval and its per-word limit, so unrelated
+        // project records cannot crowd out the selected project's memory.
+        // Wider scopes and unindexed selected projects remain reachable.
+        let scopes: Vec<Scope> = self
+            .readable_scopes(access, pinned)
+            .into_iter()
+            .filter(|scope| match scope {
+                Scope::Project { project, .. } => projects.is_empty() || projects.contains(project),
+                _ => true,
+            })
+            .collect();
         let mut by_id: BTreeMap<RecordId, (usize, KnowledgeRecord)> = BTreeMap::new();
         for word in &words {
             for row in self

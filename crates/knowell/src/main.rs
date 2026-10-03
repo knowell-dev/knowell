@@ -20,14 +20,18 @@ mod env;
 mod eval_cmd;
 mod eval_hybrid;
 mod fsutil;
+mod index_cmd;
 mod init_cmd;
+mod local_engine;
 mod login_cmd;
 mod mcp_cmd;
 mod output;
 mod project_cmd;
 mod registry;
+mod search_cmd;
 mod secrets_cmd;
 mod serve_cmd;
+mod status_cmd;
 mod token_cmd;
 mod tools;
 mod workspace_cmd;
@@ -96,6 +100,12 @@ enum Command {
     /// Check contracts and rules across all projects (no API key needed);
     /// text, JSON or SARIF output for CI.
     Check(check_cmd::CheckArgs),
+    /// Index the selected local workspace and report completion of every tier.
+    Index(index_cmd::IndexArgs),
+    /// Search the selected local workspace's existing index with versioned evidence.
+    Search(search_cmd::SearchArgs),
+    /// Report local index freshness, tier states and embedding coverage.
+    Status(status_cmd::StatusArgs),
     /// Back up the managed database.
     Backup(backup_cmd::BackupArgs),
     /// Restore a backup into the managed PostgreSQL.
@@ -144,6 +154,9 @@ fn main() -> ExitCode {
         Command::Serve(args) => serve_cmd::run(args, &env, &mut out),
         Command::Mcp(args) => mcp_cmd::run(args, &env),
         Command::Check(args) => check_cmd::run(args, &env, &mut out),
+        Command::Index(args) => index_cmd::run(args, &env, &mut out),
+        Command::Search(args) => search_cmd::run(args, &env, &mut out),
+        Command::Status(args) => status_cmd::run(args, &env, &mut out),
         Command::Backup(args) => backup_cmd::backup(args, &env, &mut out),
         Command::Restore(args) => backup_cmd::restore(args, &env, &mut out),
         Command::Login(args) => login_cmd::run(args, &env, &mut out),

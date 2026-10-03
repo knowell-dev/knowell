@@ -1065,15 +1065,46 @@ impl<E: Embedder + 'static> Indexer<E> {
     /// # Errors
     /// Store errors while claiming.
     pub async fn run_until_idle_with(&self, concurrency: usize) -> Result<RunSummary, IndexError> {
+        self.run_until_idle_matching(concurrency, None).await
+    }
+
+    /// Like [`Indexer::run_until_idle_with`], restricted to the views registered
+    /// when this call starts. Neither claims unscoped legacy jobs nor reclaims
+    /// expired leases outside those views. Concurrent registration does not
+    /// expand this run's scope. `concurrency` is a job count (at least one).
+    ///
+    /// # Errors
+    /// Store errors while recovering leases or claiming jobs.
+    pub async fn run_until_idle_scoped_with(
+        &self,
+        concurrency: usize,
+    ) -> Result<RunSummary, IndexError> {
+        let mut scope = self.inner.claim_scope();
+        scope.include_unscoped = false;
+        self.run_until_idle_matching(concurrency, Some(scope)).await
+    }
+
+    async fn run_until_idle_matching(
+        &self,
+        concurrency: usize,
+        scope: Option<ClaimScope>,
+    ) -> Result<RunSummary, IndexError> {
         let mut summary = RunSummary::default();
         {
             let mut conn = self.inner.store.acquire().await?;
-            jobs::reclaim_expired_leases(&mut conn).await?;
+            match scope.as_ref() {
+                Some(scope) => jobs::reclaim_expired_leases_scoped(&mut conn, scope).await?,
+                None => jobs::reclaim_expired_leases(&mut conn).await?,
+            };
         }
         let mut running: tokio::task::JoinSet<bool> = tokio::task::JoinSet::new();
         loop {
             while running.len() < concurrency.max(1) {
-                let Some(job) = self.claim_next().await? else {
+                let claimed = match scope.as_ref() {
+                    Some(scope) => self.claim_in_scope(scope).await?,
+                    None => self.claim_next().await?,
+                };
+                let Some(job) = claimed else {
                     break;
                 };
                 summary.jobs += 1;
@@ -1112,13 +1143,17 @@ impl<E: Embedder + 'static> Indexer<E> {
 
     async fn claim_next(&self) -> Result<Option<Job>, IndexError> {
         let scope = self.inner.claim_scope();
+        self.claim_in_scope(&scope).await
+    }
+
+    async fn claim_in_scope(&self, scope: &ClaimScope) -> Result<Option<Job>, IndexError> {
         let mut conn = self.inner.store.acquire().await?;
         Ok(jobs::claim_scoped(
             &mut conn,
             &self.inner.worker_id,
             &JOB_KINDS,
             self.inner.config.jobs.lease,
-            &scope,
+            scope,
         )
         .await?)
     }

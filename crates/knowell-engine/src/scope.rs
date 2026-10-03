@@ -14,12 +14,12 @@ use std::time::{Duration, Instant};
 
 use knowell_auth::{Action, Resource, UserId};
 use knowell_core::{Name, TrackTarget};
-use knowell_index::{Overlay, TierState, TierStates};
+use knowell_index::{GitConfigMode, Overlay, TierState, TierStates};
 use knowell_mcp::{
     CommitId, ContextId, FreshnessTier, Gap, GapReason, IndexState, ProjectView, Target, ToolError,
     ViewLayer, ViewPin,
 };
-use knowell_source::git::GitRepo;
+use knowell_source::git::{GitError, GitRepo};
 use knowell_store::views::{self, GenerationPin};
 use knowell_store::{SourceKind, ViewId};
 use time::OffsetDateTime;
@@ -198,6 +198,43 @@ impl Pinned {
         }
         out
     }
+
+    /// A copy restricted to an explicit project selection, without changing
+    /// the generations, commits or profiles of an existing context.
+    fn selected(&self, only: &[Name]) -> Pinned {
+        let mut out = self.clone();
+        if only.is_empty() {
+            return out;
+        }
+        out.projects.retain(|name, _| only.contains(name));
+        out.not_indexed.retain(|name| only.contains(name));
+        out.gaps
+            .retain(|gap| gap.project.as_ref().is_none_or(|name| only.contains(name)));
+        if out
+            .current_project
+            .as_ref()
+            .is_some_and(|name| !only.contains(name))
+        {
+            out.current_project = None;
+        }
+        out
+    }
+}
+
+fn require_visible_projects(
+    workspace: &WorkspaceEntry,
+    access: &Access,
+    projects: &[Name],
+) -> Result<(), ToolError> {
+    for project in projects {
+        if workspace.project(project).is_none() || !access.reads_project(&workspace.name, project) {
+            return Err(ToolError::not_found(format!(
+                "project {project} does not exist in workspace {}",
+                workspace.name,
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Live contexts: `context_id` → pinned manifest, bound to the identity that
@@ -310,6 +347,17 @@ impl Engine {
         access: &Access,
         target: &Target,
     ) -> Result<Arc<Pinned>, ToolError> {
+        self.resolve_target_for_projects(access, target, &[]).await
+    }
+
+    /// Resolves only selected projects, so unrelated source failures cannot
+    /// prevent a filtered search. Contexts keep their originally pinned data.
+    pub(crate) async fn resolve_target_for_projects(
+        &self,
+        access: &Access,
+        target: &Target,
+        projects: &[Name],
+    ) -> Result<Arc<Pinned>, ToolError> {
         if let Some(context) = &target.context_id {
             let pinned = {
                 let mut contexts = self
@@ -319,10 +367,11 @@ impl Engine {
                     .unwrap_or_else(PoisonError::into_inner);
                 contexts.get(access.label(), context)?
             };
-            return Ok(Arc::new(pinned.visible_to(access)));
+            require_visible_projects(&pinned.workspace, access, projects)?;
+            return Ok(Arc::new(pinned.visible_to(access).selected(projects)));
         }
         let pinned = self
-            .pin(access, target.workspace.as_ref(), &target.views)
+            .pin_projects(access, target.workspace.as_ref(), &target.views, projects)
             .await?;
         Ok(Arc::new(pinned))
     }
@@ -377,15 +426,29 @@ impl Engine {
     }
 
     /// Pins the active generation of every visible project of a workspace,
-    /// at the tracked ref or at the ref `views` names. A ref without an
-    /// indexed view is reported (`ref_not_found`), never replaced.
+    /// at the tracked ref or at the ref `views` names. A Git target must
+    /// still resolve to a commit before its stored view can be used. A
+    /// missing ref or indexed view is reported (`ref_not_found`), never
+    /// replaced. Existing contexts keep their original version manifest.
     pub(crate) async fn pin(
         &self,
         access: &Access,
         workspace: Option<&Name>,
         views: &[ViewPin],
     ) -> Result<Pinned, ToolError> {
+        self.pin_projects(access, workspace, views, &[]).await
+    }
+
+    /// Pins only the selected visible projects; an empty selection means all.
+    async fn pin_projects(
+        &self,
+        access: &Access,
+        workspace: Option<&Name>,
+        views: &[ViewPin],
+        only: &[Name],
+    ) -> Result<Pinned, ToolError> {
         let ws = self.choose_workspace(access, workspace)?;
+        require_visible_projects(&ws, access, only)?;
         for pin in views {
             if ws.project(&pin.project).is_none() || !access.reads_project(&ws.name, &pin.project) {
                 return Err(ToolError::not_found(format!(
@@ -403,11 +466,56 @@ impl Engine {
         };
         let mut conn = self.inner.store.acquire().await.map_err(store_tool)?;
         for entry in &ws.projects {
-            if !access.reads_project(&ws.name, &entry.name) {
+            if !access.reads_project(&ws.name, &entry.name)
+                || (!only.is_empty() && !only.contains(&entry.name))
+            {
                 continue;
             }
             let requested = views.iter().find(|p| p.project == entry.name);
             let target = requested.map_or_else(|| entry.target.clone(), |p| p.view.clone());
+            let mut observed_commit = None;
+            if entry.source_kind == SourceKind::Git {
+                let path = entry.path.clone();
+                let requested = target.clone();
+                let mode = self.inner.indexer.config().git_config;
+                // Reading refs is blocking local I/O. It must follow the
+                // authorization check and must not refresh or enqueue work.
+                let resolved = tokio::task::spawn_blocking(move || {
+                    let repo = match mode {
+                        GitConfigMode::User => GitRepo::open(&path),
+                        GitConfigMode::Isolated => GitRepo::open_isolated(&path),
+                    }?;
+                    repo.resolve(&requested).map(|resolved| resolved.commit)
+                })
+                .await
+                .map_err(|error| ToolError::internal(format!("source target task: {error}")))?;
+                match resolved {
+                    Ok(commit) => observed_commit = Some(commit),
+                    Err(
+                        error @ (GitError::RefNotFound { .. }
+                        | GitError::CommitNotFound { .. }
+                        | GitError::UnbornHead { .. }
+                        | GitError::NotACommit { .. }
+                        | GitError::InvalidObjectId { .. }),
+                    ) => {
+                        pinned.gaps.push(Gap::for_project(
+                            GapReason::RefNotFound,
+                            entry.name.clone(),
+                            format!(
+                                "{} cannot resolve {target}: {error}; no indexed generation was used in its place",
+                                entry.name,
+                            ),
+                        ));
+                        continue;
+                    }
+                    Err(error) => {
+                        return Err(ToolError::internal(format!(
+                            "cannot resolve source target for project {}: {error}",
+                            entry.name,
+                        )));
+                    }
+                }
+            }
             let view_row = if target == entry.target {
                 views::get_view(&mut conn, entry.view)
                     .await
@@ -449,7 +557,9 @@ impl Engine {
                     view: row.id,
                     generation,
                     commit: row.active_commit.clone(),
-                    latest_seen: row.latest_seen_commit.clone(),
+                    // Fresh requests report what the ref points to now;
+                    // the store's active generation remains the version pin.
+                    latest_seen: observed_commit.or_else(|| row.latest_seen_commit.clone()),
                     building: status.as_ref().and_then(|s| s.building_generation),
                     tiers: status.map(|s| s.tiers),
                     activated_at,

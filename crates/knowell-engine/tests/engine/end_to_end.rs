@@ -1,6 +1,6 @@
 //! The whole engine on the acme-goods fixture: index, then every tool.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use knowell_auth::GrantSet;
@@ -11,10 +11,11 @@ use knowell_mcp::tools::{
     AnalyzeImpactInput, BuildContextInput, ChangeSubject, ContractsInput, FetchInput, HistoryInput,
     IndexStatusInput, InspectSymbolInput, MemoryKind, MemoryScope, MemoryStatus,
     OpenWorkspaceInput, ReadMemoryInput, ResumeTaskInput, SaveCheckpointInput, ScopeLevel,
-    SearchInput, TierState, TraceFlowInput, WriteMemoryInput,
+    SearchInput, SearchKind, TierState, TraceFlowInput, WriteMemoryInput,
 };
 use knowell_mcp::{
-    FileLocator, FreshnessTier, GapReason, KnowellTools, MatchReason, SymbolRef, Target, ViewLayer,
+    FileLocator, FreshnessTier, GapReason, IndexState, KnowellTools, MatchReason, SymbolRef,
+    Target, ViewLayer,
 };
 use knowell_server::{EngineContext, EngineRequest, MemoryAction, MemoryDecision};
 
@@ -25,6 +26,763 @@ use crate::common::{
 
 fn context_target(id: &knowell_mcp::ContextId) -> Target {
     Target::context(id.clone())
+}
+
+fn project_search(project: &str, query: &str, target: Target) -> SearchInput {
+    SearchInput {
+        target,
+        query: query.to_owned(),
+        projects: vec![name(project)],
+        ..SearchInput::default()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn project_search_filters_memory_before_limits_and_keeps_shared_scopes() {
+    if !git_available() {
+        eprintln!("skipping: git is not installed");
+        return;
+    }
+    let db = require_db!();
+    let mut ws = fixture_workspace();
+    ws.resolved
+        .projects
+        .retain(|project| matches!(project.name.as_str(), "billing-api" | "storefront-web"));
+    for project in &mut ws.resolved.projects {
+        project.embedding.provider = None;
+        project.embedding.model = None;
+    }
+    let data = tempfile::tempdir().unwrap();
+    let engine = knowell_engine::Engine::builder(
+        db.store.clone(),
+        crate::common::indexer_config(data.path()),
+    )
+    .workspace(ws.resolved.clone())
+    .access(Arc::new(crate::common::access()))
+    .build()
+    .await
+    .unwrap();
+    let registration = engine.add_workspace(&ws.resolved).await.unwrap();
+    let billing = registration
+        .views
+        .iter()
+        .find(|view| view.project.as_str() == "billing-api")
+        .unwrap()
+        .view;
+    let storefront = registration
+        .views
+        .iter()
+        .find(|view| view.project.as_str() == "storefront-web")
+        .unwrap()
+        .view;
+    engine
+        .indexer()
+        .refresh_view(billing, Priority::Interactive)
+        .await
+        .unwrap();
+    engine.indexer().run_until_idle().await.unwrap();
+    assert!(
+        engine
+            .indexer()
+            .status(billing)
+            .await
+            .unwrap()
+            .active_generation
+            .is_some()
+    );
+    assert!(
+        engine
+            .indexer()
+            .status(storefront)
+            .await
+            .unwrap()
+            .active_generation
+            .is_none()
+    );
+    let caller = alice_caller();
+    let opened = engine
+        .open_workspace(&caller, OpenWorkspaceInput::default())
+        .await
+        .unwrap();
+    let context = context_target(&opened.context_id);
+    let mut records = BTreeMap::new();
+    // Memory ranking gives no project-scope preference. Timestamps have
+    // whole-second precision, so rapid writes can tie and then sort by id.
+    for (label, level, project) in [
+        ("organization", ScopeLevel::Organization, None),
+        ("user", ScopeLevel::User, None),
+        ("workspace", ScopeLevel::Workspace, None),
+        ("billing", ScopeLevel::Project, Some("billing-api")),
+        ("storefront", ScopeLevel::Project, Some("storefront-web")),
+    ] {
+        let written = engine
+            .write_memory(
+                &caller,
+                WriteMemoryInput {
+                    target: context.clone(),
+                    scope: MemoryScope {
+                        level,
+                        project: project.map(name),
+                        task_id: None,
+                    },
+                    kind: MemoryKind::Note,
+                    title: format!("memscopequokka {label} decision"),
+                    body: format!(
+                        "memscopequokka memcrowdingquokka belongs to the synthetic {label} scope."
+                    ),
+                    related_symbols: Vec::new(),
+                    evidence: Vec::new(),
+                    supersedes: None,
+                    idempotency_key: None,
+                },
+            )
+            .await
+            .unwrap();
+        records.insert(label, written.record.id);
+    }
+    // More than the per-word retrieval limit would hide all eligible
+    // records if the project filter ran only after fetching the first page.
+    for ordinal in 0..50 {
+        engine
+            .write_memory(
+                &caller,
+                WriteMemoryInput {
+                    target: context.clone(),
+                    scope: MemoryScope {
+                        level: ScopeLevel::Project,
+                        project: Some(name("storefront-web")),
+                        task_id: None,
+                    },
+                    kind: MemoryKind::Note,
+                    title: format!("memcrowdingquokka unrelated record {ordinal}"),
+                    body: "memcrowdingquokka belongs to the synthetic storefront project."
+                        .to_owned(),
+                    related_symbols: Vec::new(),
+                    evidence: Vec::new(),
+                    supersedes: None,
+                    idempotency_key: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let stats = engine.indexer().stats();
+    let mut crowded_input = project_search("billing-api", "memcrowdingquokka", Target::default());
+    crowded_input.kinds = vec![SearchKind::Memory];
+    let crowded = engine.search(&caller, crowded_input).await.unwrap();
+    let ids: BTreeSet<String> = crowded
+        .memory_hits
+        .iter()
+        .map(|hit| hit.record.id.to_string())
+        .collect();
+    let expected: BTreeSet<String> = ["organization", "user", "workspace", "billing"]
+        .into_iter()
+        .map(|label| records.get(label).unwrap().to_string())
+        .collect();
+    assert_eq!(ids, expected);
+    for target in [Target::default(), context.clone()] {
+        for (selected, own) in [("billing-api", "billing"), ("storefront-web", "storefront")] {
+            let mut input = project_search(selected, "memscopequokka", target.clone());
+            input.kinds = vec![SearchKind::Memory];
+            let found = engine.search(&caller, input.clone()).await.unwrap();
+            let ids: BTreeSet<String> = found
+                .memory_hits
+                .iter()
+                .map(|hit| hit.record.id.to_string())
+                .collect();
+            let expected: BTreeSet<String> = ["organization", "user", "workspace", own]
+                .into_iter()
+                .map(|label| records.get(label).unwrap().to_string())
+                .collect();
+            assert_eq!(ids, expected);
+            if selected == "storefront-web" {
+                assert!(
+                    found
+                        .gaps
+                        .iter()
+                        .any(|gap| gap.reason == GapReason::ProjectNotIndexed)
+                );
+            }
+            // This query matches one word in every eligible record. The
+            // ranking contract then uses newest timestamp and lowest id.
+            let expected_first = found
+                .memory_hits
+                .iter()
+                .min_by_key(|hit| {
+                    (
+                        std::cmp::Reverse(
+                            time::OffsetDateTime::parse(
+                                hit.record.updated_at.as_str(),
+                                &time::format_description::well_known::Rfc3339,
+                            )
+                            .unwrap()
+                            .unix_timestamp(),
+                        ),
+                        hit.record.id.to_string(),
+                    )
+                })
+                .unwrap()
+                .record
+                .id
+                .clone();
+            input.limit = Some(1);
+            let limited = engine.search(&caller, input).await.unwrap();
+            assert_eq!(limited.memory_hits.len(), 1);
+            assert_eq!(limited.memory_hits[0].record.id, expected_first);
+            assert!(
+                limited.memory_hits[0]
+                    .record
+                    .scope
+                    .project
+                    .as_ref()
+                    .is_none_or(|project| project.as_str() == selected)
+            );
+        }
+    }
+    let bob = bob_caller();
+    let bob_context = engine
+        .open_workspace(&bob, OpenWorkspaceInput::default())
+        .await
+        .unwrap();
+    for target in [Target::default(), context_target(&bob_context.context_id)] {
+        let mut input = project_search("billing-api", "memscopequokka", target);
+        input.kinds = vec![SearchKind::Memory];
+        let found = engine.search(&bob, input).await.unwrap();
+        assert_eq!(found.memory_hits.len(), 1);
+        assert_eq!(
+            &found.memory_hits[0].record.id,
+            records.get("billing").unwrap()
+        );
+    }
+    let stolen = engine
+        .search(
+            &bob,
+            project_search("billing-api", "memscopequokka", context.clone()),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(stolen.kind(), "not_found");
+    // General read_memory remains independent of the search project filter.
+    let all = engine
+        .read_memory(
+            &caller,
+            ReadMemoryInput {
+                target: context,
+                query: Some("memscopequokka".to_owned()),
+                ..ReadMemoryInput::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(all.records.len(), 5);
+    assert!(
+        engine
+            .indexer()
+            .status(storefront)
+            .await
+            .unwrap()
+            .active_generation
+            .is_none()
+    );
+    assert_eq!(engine.indexer().stats(), stats);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fresh_search_reports_branch_advancement_without_mutating_the_index() {
+    if !git_available() {
+        eprintln!("skipping: git is not installed");
+        return;
+    }
+    let db = require_db!();
+    let mut ws = fixture_workspace();
+    ws.resolved
+        .projects
+        .retain(|project| project.name.as_str() == "billing-api");
+    let data = tempfile::tempdir().unwrap();
+    let engine = indexed_engine(&db, &ws, data.path()).await;
+    let caller = alice_caller();
+    let opened = engine
+        .open_workspace(&caller, OpenWorkspaceInput::default())
+        .await
+        .unwrap();
+    let old_commit = opened.manifest[0].commit.clone().unwrap();
+    let registration = engine.add_workspace(&ws.resolved).await.unwrap();
+    let view = registration.views[0].view;
+    let before = engine.indexer().status(view).await.unwrap();
+    let stats = engine.indexer().stats();
+    std::fs::write(
+        ws.project_dir("billing-api").join("source-version.txt"),
+        "synthetic branch advancement\n",
+    )
+    .unwrap();
+    let new_commit = ws.commit_all("billing-api", "advance synthetic branch without indexing");
+    assert_ne!(new_commit, old_commit.as_str());
+
+    let found = engine
+        .search(
+            &caller,
+            project_search(
+                "billing-api",
+                "SubscriptionService.cancelSubscription",
+                Target::default(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(!found.hits.is_empty());
+    assert!(
+        found
+            .hits
+            .iter()
+            .all(|hit| hit.evidence.commit == old_commit
+                && hit.evidence.index_state == IndexState::Stale)
+    );
+    let fresh = engine
+        .open_workspace(&caller, OpenWorkspaceInput::default())
+        .await
+        .unwrap();
+    assert_eq!(fresh.manifest[0].commit.as_ref(), Some(&old_commit));
+    assert_eq!(fresh.manifest[0].index_state, IndexState::Stale);
+    let pinned = engine
+        .search(
+            &caller,
+            project_search(
+                "billing-api",
+                "SubscriptionService.cancelSubscription",
+                context_target(&opened.context_id),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(!pinned.hits.is_empty());
+    assert!(
+        pinned
+            .hits
+            .iter()
+            .all(|hit| hit.evidence.commit == old_commit
+                && hit.evidence.index_state == IndexState::Current)
+    );
+    let after = engine.indexer().status(view).await.unwrap();
+    assert_eq!(after.active_generation, before.active_generation);
+    assert_eq!(after.active_commit, before.active_commit);
+    assert_eq!(after.latest_seen_commit, before.latest_seen_commit);
+    assert_eq!(after.building_generation, before.building_generation);
+    assert_eq!(engine.indexer().stats(), stats);
+
+    engine
+        .indexer()
+        .refresh_view(view, Priority::Interactive)
+        .await
+        .unwrap();
+    let run = engine.indexer().run_until_idle().await.unwrap();
+    assert_eq!(run.failed, 0);
+    let updated = engine
+        .search(
+            &caller,
+            project_search(
+                "billing-api",
+                "SubscriptionService.cancelSubscription",
+                Target::default(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(!updated.hits.is_empty());
+    assert!(
+        updated
+            .hits
+            .iter()
+            .all(|hit| hit.evidence.commit.as_str() == new_commit
+                && hit.evidence.index_state == IndexState::Current)
+    );
+    let pinned = engine
+        .search(
+            &caller,
+            project_search(
+                "billing-api",
+                "SubscriptionService.cancelSubscription",
+                context_target(&opened.context_id),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(!pinned.hits.is_empty());
+    assert!(
+        pinned
+            .hits
+            .iter()
+            .all(|hit| hit.evidence.commit == old_commit
+                && hit.evidence.index_state == IndexState::Current)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fresh_search_rejects_missing_refs_and_preserves_existing_contexts() {
+    if !git_available() {
+        eprintln!("skipping: git is not installed");
+        return;
+    }
+    let db = require_db!();
+    let mut ws = fixture_workspace();
+    ws.resolved
+        .projects
+        .retain(|project| matches!(project.name.as_str(), "billing-api" | "storefront-web"));
+    let data = tempfile::tempdir().unwrap();
+    let engine = indexed_engine(&db, &ws, data.path()).await;
+    let caller = alice_caller();
+    let opened = engine
+        .open_workspace(&caller, OpenWorkspaceInput::default())
+        .await
+        .unwrap();
+    let indexed_commit = opened
+        .manifest
+        .iter()
+        .find(|view| view.project.as_str() == "billing-api")
+        .unwrap()
+        .commit
+        .clone()
+        .unwrap();
+    let registration = engine.add_workspace(&ws.resolved).await.unwrap();
+    let view = registration
+        .views
+        .iter()
+        .find(|view| view.project.as_str() == "billing-api")
+        .unwrap()
+        .view;
+    let before = engine.indexer().status(view).await.unwrap();
+    let stats = engine.indexer().stats();
+    let found = engine
+        .search(
+            &caller,
+            project_search(
+                "billing-api",
+                "SubscriptionService.cancelSubscription",
+                Target::default(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(!found.hits.is_empty());
+
+    ws.git("billing-api", &["update-ref", "-d", "refs/heads/main"]);
+    let missing = engine
+        .search(
+            &caller,
+            project_search(
+                "billing-api",
+                "SubscriptionService.cancelSubscription",
+                Target::default(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(
+        missing.hits.is_empty(),
+        "a removed ref must not serve the old active index"
+    );
+    assert!(missing.gaps.iter().any(|gap| {
+        gap.reason == GapReason::RefNotFound && gap.project == Some(name("billing-api"))
+    }));
+
+    let fresh = engine
+        .open_workspace(&caller, OpenWorkspaceInput::default())
+        .await
+        .unwrap();
+    assert!(
+        fresh
+            .manifest
+            .iter()
+            .all(|view| view.project.as_str() != "billing-api")
+    );
+    assert!(fresh.gaps.iter().any(|gap| {
+        gap.reason == GapReason::RefNotFound && gap.project == Some(name("billing-api"))
+    }));
+    for target in [Target::default(), context_target(&fresh.context_id)] {
+        let healthy = engine
+            .search(
+                &caller,
+                project_search("storefront-web", "createCheckout", target),
+            )
+            .await
+            .unwrap();
+        assert!(!healthy.hits.is_empty());
+        assert!(
+            healthy
+                .hits
+                .iter()
+                .all(|hit| hit.evidence.project.as_str() == "storefront-web")
+        );
+        assert!(healthy.gaps.iter().all(|gap| {
+            gap.project
+                .as_ref()
+                .is_none_or(|p| p.as_str() == "storefront-web")
+        }));
+        assert!(
+            !healthy
+                .gaps
+                .iter()
+                .any(|gap| gap.reason == GapReason::RefNotFound)
+        );
+    }
+
+    // A context is an explicit version pin, rather than a new ref lookup.
+    let pinned = engine
+        .search(
+            &caller,
+            project_search(
+                "billing-api",
+                "SubscriptionService.cancelSubscription",
+                context_target(&opened.context_id),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(!pinned.hits.is_empty());
+    assert!(
+        pinned
+            .hits
+            .iter()
+            .all(|hit| hit.evidence.commit == indexed_commit)
+    );
+    assert!(
+        !pinned
+            .gaps
+            .iter()
+            .any(|gap| gap.reason == GapReason::RefNotFound)
+    );
+    let after = engine.indexer().status(view).await.unwrap();
+    assert_eq!(after.active_generation, before.active_generation);
+    assert_eq!(after.active_commit, before.active_commit);
+    assert_eq!(after.latest_seen_commit, before.latest_seen_commit);
+    assert_eq!(after.building_generation, before.building_generation);
+    assert_eq!(
+        engine.indexer().stats(),
+        stats,
+        "search preflight must not index or embed source files"
+    );
+
+    // An unrelated operational source failure must not abort a filtered search.
+    ws.git(
+        "billing-api",
+        &["update-ref", "refs/heads/main", indexed_commit.as_str()],
+    );
+    std::fs::rename(
+        ws.project_dir("storefront-web"),
+        ws.dir.path().join("unavailable-storefront"),
+    )
+    .unwrap();
+    for caller in [alice_caller(), bob_caller()] {
+        let found = engine
+            .search(
+                &caller,
+                project_search(
+                    "billing-api",
+                    "SubscriptionService.cancelSubscription",
+                    Target::default(),
+                ),
+            )
+            .await
+            .unwrap();
+        assert!(!found.hits.is_empty());
+        assert!(found.gaps.iter().all(|gap| {
+            gap.project
+                .as_ref()
+                .is_none_or(|p| p.as_str() == "billing-api")
+        }));
+    }
+
+    // Invisible and nonexistent selections have the same error class and shape.
+    let mut errors = Vec::new();
+    for selected in ["storefront-web", "nonexistent"] {
+        let error = engine
+            .search(
+                &bob_caller(),
+                project_search(selected, "createCheckout", Target::default()),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), "not_found");
+        errors.push(
+            error
+                .client_message("source-ref-test")
+                .replace(selected, "selected"),
+        );
+    }
+    assert_eq!(errors[0], errors[1]);
+    assert_eq!(engine.indexer().stats(), stats);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn requested_commits_must_exist_and_be_commits_even_when_an_index_is_active() {
+    if !git_available() {
+        eprintln!("skipping: git is not installed");
+        return;
+    }
+    let db = require_db!();
+    let mut ws = fixture_workspace();
+    ws.resolved
+        .projects
+        .retain(|project| project.name.as_str() == "billing-api");
+    let commit = ws.git("billing-api", &["rev-parse", "HEAD"]);
+    let tree = ws.git("billing-api", &["rev-parse", "HEAD^{tree}"]);
+    ws.resolved.projects[0].track.value = format!("commit:{commit}").parse().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let engine = indexed_engine(&db, &ws, data.path()).await;
+    let caller = alice_caller();
+    let opened = engine
+        .open_workspace(&caller, OpenWorkspaceInput::default())
+        .await
+        .unwrap();
+    assert_eq!(opened.manifest.len(), 1);
+    let registration = engine.add_workspace(&ws.resolved).await.unwrap();
+    let view = registration.views[0].view;
+    let before = engine.indexer().status(view).await.unwrap();
+    let stats = engine.indexer().stats();
+
+    for (target, diagnostic) in [
+        (
+            format!("commit:{}", "f".repeat(commit.len())),
+            "does not exist",
+        ),
+        (format!("commit:{tree}"), "not a commit"),
+    ] {
+        let requested = Target::workspace(
+            name("acme-goods"),
+            vec![knowell_mcp::ViewPin {
+                project: name("billing-api"),
+                view: target.parse().unwrap(),
+            }],
+        );
+        let search = engine
+            .search(
+                &caller,
+                project_search(
+                    "billing-api",
+                    "SubscriptionService.cancelSubscription",
+                    requested,
+                ),
+            )
+            .await
+            .unwrap();
+        assert!(search.hits.is_empty());
+        assert!(search.gaps.iter().any(|gap| {
+            gap.reason == GapReason::RefNotFound && gap.message.contains(diagnostic)
+        }));
+    }
+    ws.git(
+        "billing-api",
+        &["symbolic-ref", "HEAD", "refs/heads/unborn"],
+    );
+    let worktree = Target::workspace(
+        name("acme-goods"),
+        vec![knowell_mcp::ViewPin {
+            project: name("billing-api"),
+            view: "worktree".parse().unwrap(),
+        }],
+    );
+    let unborn = engine
+        .search(
+            &caller,
+            project_search(
+                "billing-api",
+                "SubscriptionService.cancelSubscription",
+                worktree,
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(unborn.hits.is_empty());
+    assert!(unborn.gaps.iter().any(|gap| {
+        gap.reason == GapReason::RefNotFound && gap.message.contains("has no commits yet")
+    }));
+
+    // The synthetic generator creates loose objects. Removing only this
+    // commit proves that the already indexed commit view cannot be a fallback.
+    let (prefix, suffix) = commit.split_at(2);
+    let object = ws
+        .project_dir("billing-api")
+        .join(".git/objects")
+        .join(prefix)
+        .join(suffix);
+    std::fs::rename(&object, ws.dir.path().join("unavailable-commit-object")).unwrap();
+    let missing = engine
+        .search(
+            &caller,
+            project_search(
+                "billing-api",
+                "SubscriptionService.cancelSubscription",
+                Target::default(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(missing.hits.is_empty());
+    assert!(missing.gaps.iter().any(|gap| {
+        gap.reason == GapReason::RefNotFound && gap.message.contains("does not exist")
+    }));
+    let after = engine.indexer().status(view).await.unwrap();
+    assert_eq!(after.active_generation, before.active_generation);
+    assert_eq!(after.active_commit, before.active_commit);
+    assert_eq!(after.building_generation, before.building_generation);
+    assert_eq!(engine.indexer().stats(), stats);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn directory_source_remains_pinned_without_claiming_commit_evidence() {
+    if !git_available() {
+        eprintln!("skipping: git is not installed");
+        return;
+    }
+    let db = require_db!();
+    let mut ws = fixture_workspace();
+    ws.resolved
+        .projects
+        .retain(|project| project.name.as_str() == "billing-api");
+    std::fs::rename(
+        ws.project_dir("billing-api").join(".git"),
+        ws.dir.path().join("saved-git-directory"),
+    )
+    .unwrap();
+    ws.resolved.projects[0].track.value = "worktree".parse().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let engine = indexed_engine(&db, &ws, data.path()).await;
+    let caller = alice_caller();
+    let opened = engine
+        .open_workspace(&caller, OpenWorkspaceInput::default())
+        .await
+        .unwrap();
+    assert_eq!(opened.manifest.len(), 1);
+    assert!(opened.manifest[0].commit.is_none());
+    assert!(
+        !opened
+            .gaps
+            .iter()
+            .any(|gap| gap.reason == GapReason::RefNotFound)
+    );
+    let search = engine
+        .search(
+            &caller,
+            project_search(
+                "billing-api",
+                "SubscriptionService.cancelSubscription",
+                Target::default(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(search.hits.is_empty());
+    assert!(
+        search
+            .gaps
+            .iter()
+            .any(|gap| gap.reason == GapReason::ExcludedByPolicy)
+    );
+    assert!(
+        !search
+            .gaps
+            .iter()
+            .any(|gap| gap.reason == GapReason::RefNotFound)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

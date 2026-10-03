@@ -40,6 +40,10 @@ dependencies; completion of the whole is defined by the acceptance scenarios at 
   index; embedding profiles (Gemini, Ollama, OpenAI-compatible endpoints); pgvector search;
   hybrid search with explainability; reduced mode when no model is reachable.
 - **Done when:** a metric baseline exists and per-language tier tests pass.
+- **Current surface:** standalone `know index`, `search` and `status` use the real engine
+  and saved index, report versioned evidence and coverage gaps, and keep source targets
+  and job recovery scoped. Hub transport and the other planned terminal commands remain
+  open; this does not complete the milestone.
 
 ### M4: Graph and contracts (planned)
 
