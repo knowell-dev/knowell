@@ -99,6 +99,10 @@ id_type!(
     TaskId
 );
 id_type!(
+    /// Identifies a blue-green embedding profile switch.
+    ProfileSwitchId
+);
+id_type!(
     /// Identifies a checkpoint receipt. Derived by the caller from who saved
     /// the checkpoint and their idempotency key, so a retry names the same id.
     CheckpointReceiptId

@@ -15,6 +15,13 @@
 //! superseded; the newer generation's T2 embeds what is still missing). T2
 //! does not hold the view's stage lock, so the next build's T0..T3 never
 //! wait for slow provider calls; T2 jobs of one view run one at a time.
+//!
+//! T2 builds the profile the view serves and, while the view belongs to a
+//! building profile switch, the switch's target too
+//! ([`crate::switching`]). Each profile's vectors come only from the
+//! configured embedder that produces that profile. The tier state reports
+//! the serving profile; after any profile's vectors activate, the switch
+//! is activated if its target now covers every member view.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -33,6 +40,7 @@ use crate::indexer::{Counters, Inner, JobRun};
 use crate::jobs::StagePayload;
 use crate::pipeline::{JobOutcome, Purpose, Upsert, derive_delta, files_map};
 use crate::status::{Tier, TierSkip, TierState};
+use crate::switching::Producer;
 
 /// Error text of an index generation whose budget ran out (reported as
 /// skipped, not failed).
@@ -114,7 +122,12 @@ impl<E: Embedder + 'static> Inner<E> {
             self.cache().forget((p.view, generation));
             return Ok(JobOutcome::Superseded(reason));
         }
-        self.set_tier(&ctx, generation, &p.target, Tier::T2, TierState::Running);
+        // A switch catching up on one profile does not change the tier state,
+        // which reports the profile the view serves.
+        let catching_up = p.profile.is_some();
+        if !catching_up {
+            self.set_tier(&ctx, generation, &p.target, Tier::T2, TierState::Running);
+        }
         let outcome = match &ctx.embedding {
             EmbeddingDecision::Skip(reason) => {
                 EmbedOutcome::Finished(TierState::Skipped { reason: *reason })
@@ -122,18 +135,18 @@ impl<E: Embedder + 'static> Inner<E> {
             EmbeddingDecision::Unavailable(reason) => EmbedOutcome::Finished(TierState::Failed {
                 reason: reason.clone(),
             }),
-            EmbeddingDecision::Embed { provider, profile } => match self.embedders.get(provider) {
-                Some(embedder) => {
-                    let embedder = Arc::clone(embedder);
-                    self.embed_build(&mut conn, &ctx, generation, &embedder, profile, run)
-                        .await?
-                }
-                None => EmbedOutcome::Finished(TierState::Failed {
-                    reason: format!("no embedder was given for provider `{provider}`"),
-                }),
-            },
+            EmbeddingDecision::Embed { .. } => {
+                self.embed_targets(&mut conn, &ctx, generation, p.profile, run)
+                    .await?
+            }
         };
         self.cache().forget((p.view, generation));
+        if catching_up {
+            return Ok(match outcome {
+                EmbedOutcome::Finished(_) => JobOutcome::Completed,
+                EmbedOutcome::Superseded(reason) => JobOutcome::Superseded(reason),
+            });
+        }
         match outcome {
             EmbedOutcome::Finished(state) => {
                 self.set_tier(&ctx, generation, &p.target, Tier::T2, state);
@@ -152,6 +165,78 @@ impl<E: Embedder + 'static> Inner<E> {
                 Ok(JobOutcome::Superseded(reason))
             }
         }
+    }
+
+    /// Builds every profile the view needs at `generation` (or only `only`,
+    /// if the view still needs it), serving profile first, and returns the
+    /// serving profile's outcome. A failed switch target is logged and seen
+    /// in the switch's progress; it does not fail the serving profile's tier.
+    async fn embed_targets(
+        &self,
+        conn: &mut PgConnection,
+        ctx: &ViewContext,
+        generation: i64,
+        only: Option<knowell_store::ProfileId>,
+        run: &JobRun,
+    ) -> Result<EmbedOutcome, IndexError> {
+        let mut targets = self.embedding_targets(conn, ctx).await?;
+        if let Some(profile) = only {
+            // The switch ended (activated by another job, or cancelled):
+            // nothing is left to catch up on.
+            if !targets.contains(&profile) {
+                return Ok(EmbedOutcome::Finished(TierState::Done));
+            }
+            targets = vec![profile];
+        }
+        let mut serving = None;
+        for profile in targets {
+            let outcome = match self.producer(conn, ctx, profile).await? {
+                Producer::Embed {
+                    embedder, profile, ..
+                } => {
+                    self.embed_build(conn, ctx, generation, &embedder, &profile, run)
+                        .await?
+                }
+                Producer::Skip(reason) => EmbedOutcome::Finished(TierState::Skipped { reason }),
+                Producer::Unavailable(reason) => {
+                    self.fail_unavailable(conn, ctx, generation, profile, &reason)
+                        .await?;
+                    EmbedOutcome::Finished(TierState::Failed { reason })
+                }
+            };
+            let state = match outcome {
+                EmbedOutcome::Superseded(reason) => return Ok(EmbedOutcome::Superseded(reason)),
+                EmbedOutcome::Finished(state) => state,
+            };
+            if state == TierState::Done {
+                self.advance_switch(conn, ctx.view, profile).await?;
+            } else if serving.is_some() {
+                tracing::warn!(project = %ctx.project_name, %profile, ?state, "the target of a profile switch was not built for the active generation");
+            }
+            serving.get_or_insert(state);
+        }
+        Ok(EmbedOutcome::Finished(serving.unwrap_or(TierState::Done)))
+    }
+
+    /// Records on the index generation of `profile` why no embedder may
+    /// build it, so a switch's progress shows the reason.
+    async fn fail_unavailable(
+        &self,
+        conn: &mut PgConnection,
+        ctx: &ViewContext,
+        generation: i64,
+        profile: knowell_store::ProfileId,
+        reason: &str,
+    ) -> Result<(), IndexError> {
+        let pin = GenerationPin {
+            view: ctx.view,
+            generation,
+        };
+        let index_generation = embeddings::begin_index_generation(conn, pin, profile).await?;
+        if index_generation.state == GenerationState::Building {
+            embeddings::fail_index_generation(conn, index_generation.id, reason).await?;
+        }
+        Ok(())
     }
 
     /// The prepared inputs of the given files of a generation (prepared hash

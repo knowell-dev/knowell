@@ -206,7 +206,8 @@ input-format version and UTC registration timestamp. Text/Markdown, JSON and ato
 `--output FILE` are supported. Opening may migrate and set up organization identity;
 it does not register profiles, prepare provider clients, resolve credentials or index
 sources. Empty lists exit with 0, absent profiles with 1 and input/operational failures
-with 2. Activity, locality, budgets, estimates, profile switches and rollback remain open.
+with 2. Activity, locality and budgets remain open there; profile switches and rollback
+are available through the REST API (CLI commands remain planned).
 
 These commands currently use the local database. Hub transport remains planned.
 Directory sources can be indexed and inspected, but source search cannot yet return
@@ -220,7 +221,8 @@ explicit and can leave the index incomplete.
 - **Gemini Embedding 2** is the primary cloud provider, with profiles of 768, 1536 (default)
   or 3072 dimensions; **Ollama** and any **OpenAI-compatible** endpoint run fully local.
 - Profiles are versioned; switching runs blue-green — the old index serves until the new one
-  is complete — and vectors from different profiles are never compared.
+  covers every project, survives restarts and can be rolled back — and vectors from
+  different profiles are never compared.
 - A per-project **data policy** decides which content may reach which provider. Projects are
   `local-only` unless you opt in.
 - Without any embedding provider, exact, lexical, graph and memory search keep working, and

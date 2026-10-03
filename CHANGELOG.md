@@ -10,6 +10,9 @@ is released. Nothing has been released yet.
 
 ### Fixed
 
+- Switch estimates no longer claim that a dimension reduction needs no re-embedding:
+  vectors are not derived from another profile, so chunks the target does not cover
+  are counted. A profile switch no longer reverts when the engine restarts.
 - Match the complete embedding input format before starting a profile switch and
   require re-embedding when that format changes, including dimension reductions.
 - Build managed PostgreSQL pgvector bundles for every supported platform on both
@@ -85,6 +88,14 @@ is released. Nothing has been released yet.
 
 ### Added
 
+- Restart-safe blue-green embedding profile switches (migration 0013). Switches and each
+  view's serving profile are stored; T2 builds the old and the target profile while a
+  switch builds, so semantic search never has a gap; all member views flip in one
+  transaction once covered; open contexts keep their profile; a restarted engine resumes
+  building switches; rollbacks within the retention reuse the old vectors without
+  provider calls. A changed configured profile starts a switch when views are indexed.
+  New REST: `GET /api/v1/profiles/switches`, `POST .../switches/{id}/cancel` and
+  `.../rollback`.
 - Durable MCP tool usage (migration 0012): engines buffer calls per UTC hour, tool and
   agent, add them to the store every few seconds and at shutdown, and report usage and
   integration status from the store, so counters survive restarts. Reports now apply

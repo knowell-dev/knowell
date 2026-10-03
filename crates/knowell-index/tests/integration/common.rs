@@ -350,8 +350,13 @@ pub(crate) struct CountingEmbedder {
 
 impl CountingEmbedder {
     pub(crate) fn new() -> Self {
+        Self::with_dims(DIMS)
+    }
+
+    /// A counting fake producing `dims`-dimensional vectors (another profile).
+    pub(crate) fn with_dims(dims: u32) -> Self {
         Self {
-            inner: FakeEmbedder::new(DIMS).unwrap(),
+            inner: FakeEmbedder::new(dims).unwrap(),
             calls: AtomicU64::new(0),
             inputs: AtomicU64::new(0),
             down: AtomicBool::new(false),

@@ -22,6 +22,7 @@ mod identity;
 mod jobs;
 mod knowledge;
 mod migrations;
+mod switches;
 mod tasks;
 mod usage;
 mod views;

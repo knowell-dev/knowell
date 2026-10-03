@@ -113,6 +113,8 @@ impl<E: Embedder + 'static> Inner<E> {
         for ctx in self.contexts() {
             reports.push(self.reconcile_view(&ctx).await?);
         }
+        // Configuration changes become switches; building switches resume.
+        self.reconcile_profiles(false).await?;
         Ok(reports)
     }
 

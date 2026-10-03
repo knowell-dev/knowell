@@ -969,6 +969,23 @@ pub async fn fail_index_generation(
     Ok(())
 }
 
+/// Makes a failed index generation building again (its error is cleared),
+/// so a later run can complete it; vectors written before stay reused.
+/// Returns whether it was failed.
+pub async fn restart_index_generation(
+    conn: &mut PgConnection,
+    id: IndexGenerationId,
+) -> Result<bool, StoreError> {
+    let done = sqlx::query(
+        "UPDATE index_generation SET state = 'building', error = NULL, finished_at = NULL
+         WHERE id = $1 AND state = 'failed'",
+    )
+    .bind(id)
+    .execute(conn)
+    .await?;
+    Ok(done.rows_affected() == 1)
+}
+
 /// The index generation of one view generation and profile, in whatever
 /// state, if one was started.
 pub async fn index_generation_at(

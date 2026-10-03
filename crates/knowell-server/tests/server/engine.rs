@@ -59,6 +59,9 @@ fn routes() -> Vec<(Method, &'static str, Option<Value>)> {
         (Method::GET, "/api/v1/quality/reports", None),
         (Method::GET, "/api/v1/usage?days=30", None),
         (Method::GET, "/api/v1/integrations", None),
+        (Method::GET, "/api/v1/profiles/switches", None),
+        (Method::POST, "/api/v1/profiles/switches/s-1/cancel", None),
+        (Method::POST, "/api/v1/profiles/switches/s-1/rollback", None),
     ]
 }
 
@@ -100,6 +103,8 @@ async fn answers_pass_through_with_the_callers_context() {
             | EngineRequest::DecideMemory(_)
             | EngineRequest::SwitchEstimate { .. }
             | EngineRequest::StartSwitch(_)
+            | EngineRequest::CancelSwitch { .. }
+            | EngineRequest::RollbackSwitch { .. }
             | EngineRequest::Usage { .. }
             | EngineRequest::Integrations => json!({"ok": true}),
             _ => json!([]),
@@ -133,6 +138,15 @@ async fn answers_pass_through_with_the_callers_context() {
     assert!(matches!(
         calls[16].request,
         EngineRequest::Usage { days: 30 }
+    ));
+    assert!(matches!(calls[18].request, EngineRequest::Switches));
+    assert!(matches!(
+        &calls[19].request,
+        EngineRequest::CancelSwitch { switch_id } if switch_id == "s-1"
+    ));
+    assert!(matches!(
+        &calls[20].request,
+        EngineRequest::RollbackSwitch { switch_id } if switch_id == "s-1"
     ));
 }
 
@@ -261,6 +275,14 @@ async fn permissions_before_the_engine() {
     )
     .await
     .problem(StatusCode::FORBIDDEN, "forbidden");
+    for path in [
+        "/api/v1/profiles/switches/s-1/cancel",
+        "/api/v1/profiles/switches/s-1/rollback",
+    ] {
+        h.send(post(path).bearer(&viewer).build())
+            .await
+            .problem(StatusCode::FORBIDDEN, "forbidden");
+    }
     // Nobody without grants reaches the engine.
     let nobody = h.token(user(3), &[TokenScope::Read]);
     h.send(get("/api/v1/memory").bearer(&nobody).build())
@@ -337,6 +359,11 @@ async fn profiles_require_organization_read_before_delegation() {
 #[tokio::test]
 async fn switch_estimates_require_organization_read_before_delegation() {
     assert_organization_read_before_delegation("/api/v1/profiles/balanced/switch-estimate").await;
+}
+
+#[tokio::test]
+async fn profile_switches_require_organization_read_before_delegation() {
+    assert_organization_read_before_delegation("/api/v1/profiles/switches").await;
 }
 
 #[tokio::test]

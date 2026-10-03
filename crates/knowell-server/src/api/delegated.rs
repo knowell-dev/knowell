@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use crate::engine::{
     ContextRequest, EngineRequest, GraphQuery, ImpactRequest, MemoryDecision, SearchRequest,
-    SwitchRequest, TraceRequest, Validate,
+    SwitchRequest, TraceRequest, Validate, validate_switch_id,
 };
 use crate::error::ApiError;
 use crate::extract::{ApiPath, ApiQuery, Caller, JsonBody};
@@ -296,6 +296,43 @@ pub(super) async fn start_switch(
         Shape::Object,
     )
     .await?;
+    Ok((StatusCode::ACCEPTED, Json(value)).into_response())
+}
+
+/// `GET /api/v1/profiles/switches`: organization-wide readers only.
+pub(super) async fn switches(
+    State(state): State<AppState>,
+    caller: Caller,
+) -> Result<Json<Value>, ApiError> {
+    caller.require(&state, Action::ReadCode, Resource::Organization)?;
+    call(&state, &caller, EngineRequest::Switches, Shape::Array).await
+}
+
+/// `POST /api/v1/profiles/switches/{id}/cancel`: organization
+/// administrators only.
+pub(super) async fn cancel_switch(
+    State(state): State<AppState>,
+    caller: Caller,
+    ApiPath(id): ApiPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    caller.require(&state, Action::ManageProviders, Resource::Organization)?;
+    validate_switch_id(&id)?;
+    let request = EngineRequest::CancelSwitch { switch_id: id };
+    call(&state, &caller, request, Shape::Object).await
+}
+
+/// `POST /api/v1/profiles/switches/{id}/rollback`: organization
+/// administrators only; answers 202 when the engine started the reverse
+/// switch.
+pub(super) async fn rollback_switch(
+    State(state): State<AppState>,
+    caller: Caller,
+    ApiPath(id): ApiPath<String>,
+) -> Result<Response, ApiError> {
+    caller.require(&state, Action::ManageProviders, Resource::Organization)?;
+    validate_switch_id(&id)?;
+    let request = EngineRequest::RollbackSwitch { switch_id: id };
+    let Json(value) = call(&state, &caller, request, Shape::Object).await?;
     Ok((StatusCode::ACCEPTED, Json(value)).into_response())
 }
 

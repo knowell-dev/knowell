@@ -14,6 +14,7 @@ use knowell_embed::{Embedder, ProviderKind as EmbedProviderKind};
 use knowell_secrets::ExclusionPolicy;
 use knowell_store::embeddings::{self, EmbeddingProfile, NewEmbeddingProfile};
 use knowell_store::hierarchy::{self, Organization, Project, Source, Workspace};
+use knowell_store::switches;
 use knowell_store::views::{self, View};
 use knowell_store::{
     OrganizationId, PgConnection, ProfileId, ProjectId, SourceId, SourceKind, StoreError, ViewId,
@@ -109,6 +110,8 @@ pub(crate) struct ViewContext {
     pub(crate) policy: ExclusionPolicy,
     /// Identity of the content policy (patterns, size limit, root).
     pub(crate) policy_key: ContentHash,
+    /// Which providers the project's content may be sent to.
+    pub(crate) data_policy: DataPolicy,
     pub(crate) embedding: EmbeddingDecision,
 }
 
@@ -489,6 +492,15 @@ async fn register_project<E: Embedder>(
         embedders,
     )
     .await?;
+    // Bootstrap only: the first registration makes the configured profile
+    // serve. Later configuration changes become switches when the views are
+    // indexed (`Indexer::index_workspace`, reconciliation), never here, so
+    // registering for a search or a status schedules nothing.
+    let configured = match &embedding {
+        EmbeddingDecision::Embed { profile, .. } => Some(profile.id),
+        _ => None,
+    };
+    switches::record_configured_profile(conn, view.id, configured).await?;
     let context = ViewContext {
         view: view.id,
         organization,
@@ -502,6 +514,7 @@ async fn register_project<E: Embedder>(
         target: project.track.value.clone(),
         policy,
         policy_key,
+        data_policy: project.data_policy.value,
         embedding,
     };
     let registered = RegisteredView {
@@ -592,6 +605,7 @@ mod tests {
             target: p.track.value.clone(),
             policy,
             policy_key,
+            data_policy: DataPolicy::LocalOnly,
             embedding: EmbeddingDecision::Skip(TierSkip::NoProvider),
         };
         let inside = RepoPath::new("packages/contracts/api/openapi.yaml").unwrap();
