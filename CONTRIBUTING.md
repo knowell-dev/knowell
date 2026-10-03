@@ -52,6 +52,19 @@ cargo deny check
 ```
 
 Prefer crate-scoped runs while iterating, for example `cargo test -p knowell-secrets`.
+
+Database tests skip (one printed line) without `KNOWELL_TEST_DATABASE_URL`. To run the
+Linux suite with both PostgreSQL servers and no skips, use Docker:
+
+```sh
+python scripts/buildlock.py python scripts/docker_test.py              # whole workspace
+python scripts/buildlock.py python scripts/docker_test.py cargo test -p knowell-store --locked
+python scripts/buildlock.py python scripts/docker_test.py --panel      # panel checks
+python scripts/docker_test.py --down                                   # stop the databases
+```
+
+It copies the files git sees into a Docker volume (the host directory is not mounted) and
+sets `KNOWELL_TEST_STRICT=1`, which turns a missing database URL or `git` into a failure.
 CI runs the same checks plus gitleaks, workflow linting, and a small synthetic evaluation;
 a single required check named `gate` summarizes them.
 

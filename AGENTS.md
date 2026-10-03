@@ -20,6 +20,13 @@ builds can exhaust a developer machine's memory. Therefore:
   for the lock, run it again.
 - Prefer the narrowest command: `cargo test -p <crate>`, not `--workspace`.
 - Do not use separate target directories or git worktrees (that defeats cargo's own lock).
+- The Linux suite can also run in Docker, still through the lock:
+  `python scripts/buildlock.py python scripts/docker_test.py cargo test -p <crate> --locked`
+  (`--panel` for the panel). It copies the files git sees into a volume, keeps its build
+  output in Docker volumes (not a host target directory), runs four jobs and four test
+  threads, and sets `KNOWELL_TEST_STRICT=1` so a missing database or `git` fails instead
+  of skipping. Building `deploy/Dockerfile` compiles too: run `docker build` through the
+  lock as well. Windows- and macOS-specific behaviour still needs those systems (or CI).
 
 ## 2. Secrets (non-negotiable)
 

@@ -4,7 +4,8 @@
 //! read or written.
 //!
 //! Tests that need PostgreSQL use `KNOWELL_TEST_DATABASE_URL` (an admin URL,
-//! see `crates/knowell-store/README.md`) and print one skip line without it.
+//! see `crates/knowell-store/README.md`) and print one skip line without it
+//! (a failure under `KNOWELL_TEST_STRICT=1`).
 //! The managed-PostgreSQL test downloads PostgreSQL and is `#[ignore]`d.
 
 // Test helpers outside `#[test]` functions may panic and print.

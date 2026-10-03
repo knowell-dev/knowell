@@ -334,6 +334,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn live_measurement_indexes_only_synthetic_content_and_records_conditions() {
         if std::env::var_os("KNOWELL_TEST_DATABASE_URL").is_none() {
+            assert!(
+                !std::env::var("KNOWELL_TEST_STRICT").is_ok_and(|value| value == "1"),
+                "KNOWELL_TEST_DATABASE_URL is not set, and KNOWELL_TEST_STRICT=1 forbids skipping"
+            );
             eprintln!("skipping live mock integration: KNOWELL_TEST_DATABASE_URL is not set");
             return;
         }

@@ -28,7 +28,7 @@ updates:
       npm-minor-patch:
         update-types: [minor, patch]
   - package-ecosystem: docker
-    directory: /deploy
+    directories: [/deploy, /deploy/test]
     schedule:
       interval: weekly
       day: monday

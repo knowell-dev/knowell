@@ -131,6 +131,10 @@ fn hybrid_cli_measures_all_retrievers_reproducibly() {
 #[test]
 fn hybrid_refuses_a_server_without_pgvector() {
     let Ok(admin) = std::env::var("KNOWELL_TEST_PLAIN_DATABASE_URL") else {
+        assert!(
+            !crate::common::strict(),
+            "KNOWELL_TEST_PLAIN_DATABASE_URL is not set, and KNOWELL_TEST_STRICT=1 forbids skipping"
+        );
         eprintln!("skipping eval::hybrid_plain: KNOWELL_TEST_PLAIN_DATABASE_URL is not set");
         return;
     };
