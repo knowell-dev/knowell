@@ -241,3 +241,21 @@ CI (`.github/workflows/action-test.yml`) runs the harness on Linux, macOS and Wi
 `KNOWELL_DOWNLOAD_URL` and `KNOWELL_RELEASES_URL` (test overrides of the release location).
 The shims must retain their executable bits in Git. The harness checks this before running,
 and its curl shim refuses unexpected network requests instead of contacting real services.
+
+Maintainers can dispatch `.github/workflows/sarif-smoke.yml` on the canonical repository's
+`main` branch to verify real code-scanning ingestion:
+
+```sh
+gh workflow run sarif-smoke.yml --repo knowell-dev/knowell --ref main
+```
+
+This builds the real CLI through the build lock and scans the committed synthetic HTTP
+client fixtures. Before upload it verifies `link.endpoint_without_provider` at
+`packs/js-http-client/tests/pos-axios.ts:5`, including the project URI base. After upload,
+an authenticated API check requires completed processing; errors or a polling timeout
+fail the job. The
+`sarif-ingestion-evidence` artifact retains the SARIF, source-location validation and
+completed upload ID for 14 days. Inspect that ID and the analysis commit/category through
+the code-scanning API when checking ingestion. The `knowell-sarif-smoke` category labels
+intentional fixture findings. This check needs no provider key and runs only when manually
+dispatched. PR annotation placement requires a separate PR check.
