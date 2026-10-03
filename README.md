@@ -158,7 +158,7 @@ is always returned as untrusted data.
 | `know check` | Deterministic contract and rule checks (SARIF for CI) |
 | `know memory list\|show` | Read standalone scoped records, their lifecycle states and saved evidence |
 | `know task list\|show` | List readable standalone tasks or resume one with checkpoints, decisions and changes |
-| `know profile` | Planned embedding profile administration |
+| `know profile list\|show` | Read registered embedding profile metadata for the local organization |
 | `know connect codex\|claude\|cursor`, `know ci init` | Integrations |
 | `know login`, `know backup`, `know restore`, `know doctor`, `know eval` | Operations |
 | `know token create\|list\|revoke` | Local database administration of scoped hub credentials; values go only to new private files |
@@ -198,6 +198,15 @@ clients or credentials, make no provider requests and do not schedule indexing.
 Empty lists and source gaps remain informative successes; absent requested IDs exit
 with 1, and malformed input or operational failures exit with 2. Memory/task writes,
 review, pinning, repository write-back and Hub/OIDC transport remain planned.
+
+`profile list` reads the selected organization's registered profiles; `profile show NAME`
+or `profile show --id UUID` reads one. It needs standalone engine configuration but no
+workspace or source. Reports contain the stored id, name, provider, model, dimensions,
+input-format version and UTC registration timestamp. Text/Markdown, JSON and atomic
+`--output FILE` are supported. Opening may migrate and set up organization identity;
+it does not register profiles, prepare provider clients, resolve credentials or index
+sources. Empty lists exit with 0, absent profiles with 1 and input/operational failures
+with 2. Activity, locality, budgets, estimates, profile switches and rollback remain open.
 
 These commands currently use the local database. Hub transport remains planned.
 Directory sources can be indexed and inspected, but source search cannot yet return
