@@ -443,7 +443,9 @@ impl<E: Embedder + 'static> Inner<E> {
         if let Some(state) = Self::configured_t2(ctx) {
             return Ok(state);
         }
-        let EmbeddingDecision::Embed { profile, .. } = &ctx.embedding else {
+        // The profile the view serves (it may differ from the configured one
+        // after a profile switch).
+        let Some(profile) = self.embedding_targets(conn, ctx).await?.first().copied() else {
             return Ok(TierState::Pending);
         };
         let pin = GenerationPin {
@@ -453,7 +455,7 @@ impl<E: Embedder + 'static> Inner<E> {
         let incomplete = || TierState::Failed {
             reason: "embeddings of the active generation are incomplete".to_owned(),
         };
-        let index_generation = embeddings::index_generation_at(conn, pin, profile.id).await?;
+        let index_generation = embeddings::index_generation_at(conn, pin, profile).await?;
         Ok(match index_generation {
             Some(ig) => match ig.state {
                 GenerationState::Active | GenerationState::Retired => TierState::Done,
@@ -565,10 +567,16 @@ impl<E: Embedder + 'static> Inner<E> {
         view: ViewId,
     ) -> Result<Option<EmbeddingCoverage>, IndexError> {
         let ctx = self.context(view)?;
-        let EmbeddingDecision::Embed { profile, .. } = &ctx.embedding else {
+        let mut conn = self.store.acquire().await?;
+        // Coverage of the profile the view serves.
+        let Some(profile) = self
+            .embedding_targets(&mut conn, &ctx)
+            .await?
+            .first()
+            .copied()
+        else {
             return Ok(None);
         };
-        let mut conn = self.store.acquire().await?;
         let row = views::get_view(&mut conn, view)
             .await?
             .ok_or(IndexError::UnknownView(view))?;
@@ -577,14 +585,14 @@ impl<E: Embedder + 'static> Inner<E> {
         };
         let pin = GenerationPin { view, generation };
         let coverage =
-            embeddings::input_coverage(&mut conn, pin, profile.id, &parser_version_tag()).await?;
-        let complete = embeddings::active_index_generation(&mut conn, view, profile.id)
+            embeddings::input_coverage(&mut conn, pin, profile, &parser_version_tag()).await?;
+        let complete = embeddings::active_index_generation(&mut conn, view, profile)
             .await?
             .is_some_and(|ig| ig.view_generation == generation);
         Ok(Some(EmbeddingCoverage {
             view,
             generation,
-            profile: profile.id,
+            profile,
             inputs: coverage.inputs,
             embedded: coverage.embedded,
             complete,
@@ -595,10 +603,17 @@ impl<E: Embedder + 'static> Inner<E> {
     /// nor a live T2 job (a crash right after activation, or a generation
     /// activated by an older version). Returns whether a job was queued.
     pub(crate) async fn ensure_embeddings(&self, ctx: &ViewContext) -> Result<bool, IndexError> {
-        let EmbeddingDecision::Embed { profile, .. } = &ctx.embedding else {
+        let mut conn = self.store.acquire().await?;
+        // The serving profile; a switch's target is caught up by
+        // `reconcile_profiles`.
+        let Some(profile) = self
+            .embedding_targets(&mut conn, ctx)
+            .await?
+            .first()
+            .copied()
+        else {
             return Ok(false);
         };
-        let mut conn = self.store.acquire().await?;
         let Some(row) = views::get_view(&mut conn, ctx.view).await? else {
             return Ok(false);
         };
@@ -609,7 +624,7 @@ impl<E: Embedder + 'static> Inner<E> {
             view: ctx.view,
             generation,
         };
-        let started = embeddings::index_generation_at(&mut conn, pin, profile.id).await?;
+        let started = embeddings::index_generation_at(&mut conn, pin, profile).await?;
         if started
             .as_ref()
             .is_some_and(|ig| ig.state != GenerationState::Building)
@@ -637,6 +652,7 @@ impl<E: Embedder + 'static> Inner<E> {
             generation: Some(generation),
             priority: Priority::Background,
             force: false,
+            profile: None,
         };
         let queued = self
             .enqueue_next(&mut conn, Tier::T2, &payload, generation)
@@ -954,6 +970,8 @@ impl<E: Embedder + 'static> Indexer<E> {
         for view in &registration.views {
             outcomes.push(self.refresh_view(view.view, priority).await?);
         }
+        // Configuration changes become switches; building switches resume.
+        self.inner.reconcile_profiles(true).await?;
         self.run_until_idle_with(self.inner.config.concurrency)
             .await?;
         Ok((registration, outcomes))

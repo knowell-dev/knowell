@@ -45,6 +45,7 @@ mod references;
 mod relate;
 mod relations_stage;
 mod status;
+mod switching;
 mod symbols_stage;
 mod watch;
 mod worker;
@@ -70,5 +71,6 @@ pub use status::{
     EmbeddingCoverage, ProgressEvent, ProgressKind, Tier, TierSkip, TierState, TierStates,
     ViewStatus,
 };
+pub use switching::{CONFIGURATION_SWITCH_RETENTION_SECONDS, SwitchViewProgress};
 pub use watch::{ReconcileReport, WatchHandle};
 pub use worker::Worker;

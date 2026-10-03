@@ -28,4 +28,5 @@ mod overlay;
 mod references;
 mod scoping;
 mod searchable;
+mod switching;
 mod watching;

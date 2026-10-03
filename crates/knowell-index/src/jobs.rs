@@ -14,13 +14,13 @@
 //! | `index.text` (T0) | begin or resume the generation, plan changes, store content and file versions, build the lexical index | `index.text:<view>:<target>:n<last generation>` |
 //! | `index.symbols` (T1) | parse changed files: chunks and per-path inputs, symbols, definitions and references, syntactic edges; re-resolve invalidated dependents | `index.symbols:<view>:<target>:g<generation>` |
 //! | `index.relations` (T3) | relation stage (contract linking), staleness set, then activation behind the fence; queues T2 | `index.relations:<view>:<target>:g<generation>` |
-//! | `index.embeddings` (T2) | after activation: embed missing prepared inputs under the data policy and budget, then activate the vector index generation | `index.embeddings:<view>:<target>:g<generation>` |
+//! | `index.embeddings` (T2) | after activation: embed missing prepared inputs under the data policy and budget into the profile the view serves and the target of a building profile switch, then activate their vector index generations | `index.embeddings:<view>:<target>:g<generation>`, or `...:p<profile>` when a switch catches up on one profile |
 //!
 //! `<target>` is the commit id, or `tree-<hash>` for directory sources.
 
 use knowell_core::ContentHash;
-use knowell_store::ViewId;
 use knowell_store::jobs::NewJob;
+use knowell_store::{ProfileId, ViewId};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{JobSettings, Priority};
@@ -130,6 +130,10 @@ pub struct StagePayload {
     /// generation (reconciliation found the store out of step).
     #[serde(default)]
     pub force: bool,
+    /// T2 only: build just this profile (a profile switch catching up on an
+    /// active generation); `None` builds every profile the view needs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<ProfileId>,
 }
 
 pub(crate) fn decode<T: for<'de> Deserialize<'de>>(
@@ -181,6 +185,19 @@ pub(crate) fn stage_key(tier: Tier, view: ViewId, target: &BuildTarget, generati
     format!("{}:{view}:{}:g{generation}", stage_kind(tier), target.key())
 }
 
+/// The idempotency key of a T2 job that builds only `profile`.
+pub(crate) fn profile_stage_key(
+    view: ViewId,
+    target: &BuildTarget,
+    generation: i64,
+    profile: ProfileId,
+) -> String {
+    format!(
+        "{}:p{profile}",
+        stage_key(Tier::T2, view, target, generation)
+    )
+}
+
 /// The job of a later stage (T1..T3) of a build of `generation`.
 pub(crate) fn stage_job(
     tier: Tier,
@@ -200,7 +217,12 @@ pub(crate) fn stage_job(
         payload.priority.value()
     };
     job.max_attempts = settings.max_attempts;
-    job.idempotency_key = Some(stage_key(tier, payload.view, &payload.target, generation));
+    job.idempotency_key = Some(match payload.profile {
+        Some(profile) if tier == Tier::T2 => {
+            profile_stage_key(payload.view, &payload.target, generation, profile)
+        }
+        _ => stage_key(tier, payload.view, &payload.target, generation),
+    });
     Ok(job)
 }
 
@@ -215,6 +237,7 @@ mod tests {
             generation: None,
             priority: Priority::Active,
             force: false,
+            profile: None,
         }
     }
 
@@ -248,6 +271,39 @@ mod tests {
             forced.idempotency_key,
             text_job(&payload(), 3, &settings).unwrap().idempotency_key
         );
+    }
+
+    #[test]
+    fn profile_jobs_have_their_own_keys_and_old_payloads_still_decode() {
+        let settings = JobSettings::default();
+        let profile = ProfileId(uuid::Uuid::from_u128(7));
+        let all = stage_job(Tier::T2, &payload(), 4, &settings).unwrap();
+        let one = stage_job(
+            Tier::T2,
+            &StagePayload {
+                profile: Some(profile),
+                ..payload()
+            },
+            4,
+            &settings,
+        )
+        .unwrap();
+        assert_ne!(all.idempotency_key, one.idempotency_key);
+        assert_eq!(
+            one.idempotency_key.as_deref(),
+            Some(profile_stage_key(payload().view, &payload().target, 4, profile).as_str())
+        );
+        let back: StagePayload = decode(&one.payload).unwrap();
+        assert_eq!(back.profile, Some(profile));
+        // Payloads written before profiles existed decode to "every profile".
+        let legacy = serde_json::json!({
+            "view": payload().view,
+            "target": {"type": "commit", "id": "a".repeat(40)},
+            "generation": 4,
+            "priority": "active",
+        });
+        assert_eq!(decode::<StagePayload>(&legacy).unwrap().profile, None);
+        assert!(all.payload.get("profile").is_none());
     }
 
     #[test]

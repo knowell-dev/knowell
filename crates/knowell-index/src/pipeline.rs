@@ -360,6 +360,7 @@ impl<E: Embedder + 'static> Inner<E> {
             generation: None,
             priority,
             force,
+            profile: None,
         };
         let mut job = text_job(&payload, row.last_generation, &self.config.jobs)?;
         let mut queued = jobs::enqueue_scoped(&mut conn, &job, JobScope::View(view)).await?;
