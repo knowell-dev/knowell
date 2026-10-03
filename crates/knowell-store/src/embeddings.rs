@@ -208,11 +208,15 @@ pub async fn register_profile(
     }
     let dimensions = i32::try_from(spec.dimensions)
         .map_err(|_| StoreError::invalid("dimensions out of range"))?;
+    require_available(conn).await?;
+    // Concurrent identical inserts can conflict on either unique constraint.
+    // Resolve both after the insert, then distinguish name reuse from settings
+    // already registered under a different name.
     let inserted = sqlx::query_as::<_, ProfileRow>(concat!(
         "INSERT INTO embedding_profile (organization_id, name, provider, model, dimensions,
                                         input_format_version)
          VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (organization_id, name) DO NOTHING
+         ON CONFLICT DO NOTHING
          RETURNING ",
         profile_columns!()
     ))
@@ -225,13 +229,6 @@ pub async fn register_profile(
     .fetch_optional(&mut *conn)
     .await
     .map_err(|e| match violation(&e) {
-        Some(Violation::Unique(_)) => StoreError::already_exists(
-            "embedding profile with these settings",
-            format!(
-                "{}/{} ({} dims)",
-                spec.provider, spec.model, spec.dimensions
-            ),
-        ),
         Some(Violation::ForeignKey(_)) => StoreError::not_found("organization", organization),
         _ => StoreError::Database(e),
     })?;
@@ -240,7 +237,15 @@ pub async fn register_profile(
         None => {
             let existing = find_profile(conn, organization, &spec.name)
                 .await?
-                .ok_or_else(|| StoreError::not_found("embedding profile", &spec.name))?;
+                .ok_or_else(|| {
+                    StoreError::already_exists(
+                        "embedding profile with these settings",
+                        format!(
+                            "{}/{} ({} dims)",
+                            spec.provider, spec.model, spec.dimensions
+                        ),
+                    )
+                })?;
             if !existing.same_settings(spec) {
                 return Err(StoreError::ProfileConflict {
                     name: spec.name.to_string(),
@@ -251,6 +256,29 @@ pub async fn register_profile(
     };
     ensure_profile_index(conn, &profile).await?;
     Ok(profile)
+}
+
+/// Whether supported vector storage is installed in the current database.
+/// This checks live state rather than caching a result across migrations.
+pub async fn available(conn: &mut PgConnection) -> Result<bool, StoreError> {
+    let version: Option<String> = sqlx::query_scalar(
+        "SELECT extversion FROM pg_extension
+         WHERE extname = 'vector' AND to_regclass('embedding') IS NOT NULL",
+    )
+    .fetch_optional(conn)
+    .await?;
+    Ok(version.as_deref().is_some_and(|text| {
+        crate::store::parse_version(text)
+            .is_some_and(|v| v >= crate::ServerInfo::MIN_VECTOR_VERSION)
+    }))
+}
+
+async fn require_available(conn: &mut PgConnection) -> Result<(), StoreError> {
+    if available(conn).await? {
+        Ok(())
+    } else {
+        Err(StoreError::SemanticUnavailable)
+    }
 }
 
 /// Builds (or repairs) the profile's partial HNSW index, serialized per
@@ -421,6 +449,7 @@ pub async fn upsert_embeddings(
     profile: &EmbeddingProfile,
     embeddings: &[NewEmbedding],
 ) -> Result<u64, StoreError> {
+    require_available(conn).await?;
     for e in embeddings {
         check_vector(profile, &e.vector)?;
     }
@@ -456,6 +485,7 @@ pub async fn missing_embeddings(
     profile: ProfileId,
     hashes: &[ContentHash],
 ) -> Result<Vec<ContentHash>, StoreError> {
+    require_available(conn).await?;
     let mut missing = Vec::new();
     for batch in hashes.chunks(BATCH_ROWS) {
         let bytes: Vec<Vec<u8>> = batch.iter().map(hash_bytes).collect();
@@ -484,6 +514,7 @@ pub async fn get_embedding(
     profile: ProfileId,
     prepared_input_hash: &ContentHash,
 ) -> Result<Option<Vec<f32>>, StoreError> {
+    require_available(conn).await?;
     let row: Option<Vector> = sqlx::query_scalar(
         "SELECT embedding::vector FROM embedding WHERE profile_id = $1 AND prepared_input_hash = $2",
     )
@@ -555,6 +586,7 @@ async fn with_search_settings<'c>(
     query: &[f32],
     options: &NearestOptions,
 ) -> Result<(sqlx::Transaction<'c, sqlx::Postgres>, String), StoreError> {
+    require_available(conn).await?;
     check_vector(profile, query)?;
     if !(1..=MAX_K).contains(&options.k) {
         return Err(StoreError::invalid(format!(
@@ -917,6 +949,7 @@ pub async fn input_coverage(
     profile: ProfileId,
     parser_version: &str,
 ) -> Result<InputCoverage, StoreError> {
+    require_available(conn).await?;
     let (inputs, embedded): (i64, i64) = sqlx::query_as(
         "SELECT count(*), count(e.prepared_input_hash)
          FROM file_version f

@@ -38,7 +38,7 @@ pub(crate) struct InitArgs {
 pub(crate) enum DatabaseArg {
     /// Knowell installs and runs its own loopback-only PostgreSQL.
     Managed,
-    /// A PostgreSQL 17/18 server with pgvector that you operate.
+    /// A PostgreSQL 17/18 server you operate; pgvector enables semantic search.
     External,
     /// A team hub with PostgreSQL in Docker Compose (prints the steps).
     Compose,
@@ -177,22 +177,18 @@ async fn init_managed(
     ))?;
 
     let vector = ensure_pgvector(env, &pg, bundle, out).await?;
-    let Some(vector) = vector else {
+    if let Some(vector) = vector {
+        out.line(format!("pgvector: {vector} available"))?;
+    } else {
         out.line("pgvector: NOT AVAILABLE in the managed PostgreSQL")?;
-        out.line(
-            "  Knowell's storage schema and semantic search need the pgvector extension, so the schema was not created.",
-        )?;
+        out.line("  Core storage will be created; semantic search is disabled.")?;
         out.line(format!(
             "  Get the pgvector bundle for PostgreSQL {} and this platform from the Knowell release, unpack it to {}",
             pg.major(),
             default_bundle_dir(env, pg.major()).display()
         ))?;
         out.line("  (or pass --pgvector-bundle DIR), then run `know init` again.")?;
-        out.flush()?;
-        tracing::error!("init incomplete: pgvector is missing");
-        return Ok(ExitCode::FAILURE);
-    };
-    out.line(format!("pgvector: {vector} available"))?;
+    }
 
     let url = pg
         .connection_url(DATABASE_NAME)
@@ -203,7 +199,8 @@ async fn init_managed(
 }
 
 /// The pgvector version available to the managed server, installing the
-/// bundle first when the extension is missing and a bundle is at hand.
+/// bundle when explicitly supplied, or when the extension is missing and
+/// the default bundle directory exists.
 async fn ensure_pgvector(
     env: &Env,
     pg: &ManagedPostgres,
@@ -214,7 +211,7 @@ async fn ensure_pgvector(
         .extension_available("vector")
         .await
         .context("cannot query the available extensions")?;
-    if available.is_some() {
+    if bundle.is_none() && available.is_some() {
         return Ok(available);
     }
     let dir = match bundle {
@@ -227,9 +224,8 @@ async fn ensure_pgvector(
             default
         }
     };
-    let flat = flatten_bundle(&dir)?;
     let installed = pg
-        .install_extension_bundle(flat.as_ref().map_or(dir.as_path(), |t| t.path()))
+        .install_extension_bundle(&dir)
         .await
         .with_context(|| format!("cannot install the pgvector bundle from {}", dir.display()))?;
     out.line(format!(
@@ -243,49 +239,6 @@ async fn ensure_pgvector(
 
 fn default_bundle_dir(env: &Env, major: u32) -> PathBuf {
     env.home.join("pgvector").join(format!("pg{major}"))
-}
-
-/// The managed installer expects a flat directory; release bundles use
-/// `lib/` and `share/extension/`. Returns a flattened copy for the latter.
-fn flatten_bundle(dir: &Path) -> anyhow::Result<Option<tempfile::TempDir>> {
-    if dir.join("vector.control").is_file() {
-        return Ok(None);
-    }
-    let ext = dir.join("share").join("extension");
-    let lib = dir.join("lib");
-    if !ext.join("vector.control").is_file() || !lib.is_dir() {
-        bail!(
-            "{} is not a pgvector bundle (expected vector.control at its top or in share/extension/)",
-            dir.display()
-        );
-    }
-    let flat = tempfile::tempdir().context("cannot create a temporary directory")?;
-    let copy_matching = |from: &Path, keep: &dyn Fn(&str) -> bool| -> anyhow::Result<()> {
-        let entries =
-            std::fs::read_dir(from).with_context(|| format!("cannot read {}", from.display()))?;
-        for entry in entries {
-            let entry = entry.with_context(|| format!("cannot read {}", from.display()))?;
-            let name = entry.file_name();
-            let Some(name_str) = name.to_str() else {
-                continue;
-            };
-            let file_type = entry
-                .file_type()
-                .with_context(|| format!("cannot read {}", entry.path().display()))?;
-            if file_type.is_file() && keep(name_str) {
-                std::fs::copy(entry.path(), flat.path().join(&name))
-                    .with_context(|| format!("cannot copy {}", entry.path().display()))?;
-            }
-        }
-        Ok(())
-    };
-    copy_matching(&ext, &|n| {
-        n == "vector.control" || (n.starts_with("vector--") && n.ends_with(".sql"))
-    })?;
-    copy_matching(&lib, &|n| {
-        matches!(n, "vector.so" | "vector.dylib" | "vector.dll")
-    })?;
-    Ok(Some(flat))
 }
 
 async fn init_external(cfg: &EngineConfig, out: &mut Output) -> anyhow::Result<ExitCode> {
@@ -311,7 +264,7 @@ async fn init_external(cfg: &EngineConfig, out: &mut Output) -> anyhow::Result<E
         .await
         .context("cannot check the database server")?;
     let issues = info.issues();
-    if !issues.is_empty() {
+    if !info.supports_core() {
         for issue in &issues {
             out.line(format!("database: {issue}"))?;
         }
@@ -340,26 +293,30 @@ async fn connect(url: &SecretString) -> anyhow::Result<Store> {
 
 async fn migrate(url: &SecretString, out: &mut Output) -> anyhow::Result<()> {
     let store = connect(url).await?;
-    let info = store
-        .check_server()
-        .await
-        .context("cannot check the database server")?;
     store
         .migrate()
         .await
         .context("cannot apply the database migrations")?;
-    let vector = info.vector.as_ref().map(|v| {
-        v.installed_version
-            .as_deref()
-            .unwrap_or(&v.default_version)
-            .to_owned()
-    });
+    let info = store
+        .check_server()
+        .await
+        .context("cannot check the database server")?;
+    let vector = info
+        .vector
+        .as_ref()
+        .and_then(|v| v.installed_version.as_deref());
     store.close().await;
     out.line(format!(
         "database: postgresql {}, pgvector {}; schema up to date",
         info.server_version,
-        vector.as_deref().unwrap_or("missing")
+        vector.unwrap_or("not installed")
     ))?;
+    if !info.semantic_enabled() {
+        out.line("semantic search: disabled; lexical, symbol, graph and memory functions remain available")?;
+        out.line(
+            "  Install pgvector 0.8 or newer and run `know init` again to enable semantic search.",
+        )?;
+    }
     Ok(())
 }
 
@@ -400,47 +357,4 @@ fn compose_instructions(out: &mut Output) -> anyhow::Result<ExitCode> {
     }
     out.flush()?;
     Ok(ExitCode::SUCCESS)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn flat_bundles_are_used_as_they_are() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("vector.control"),
-            "default_version = '0.8.7'",
-        )
-        .unwrap();
-        assert!(flatten_bundle(dir.path()).unwrap().is_none());
-    }
-
-    #[test]
-    fn release_bundles_are_flattened() {
-        let dir = tempfile::tempdir().unwrap();
-        let ext = dir.path().join("share").join("extension");
-        let lib = dir.path().join("lib");
-        std::fs::create_dir_all(&ext).unwrap();
-        std::fs::create_dir_all(&lib).unwrap();
-        std::fs::write(ext.join("vector.control"), "default_version = '0.8.7'").unwrap();
-        std::fs::write(ext.join("vector--0.8.7.sql"), "-- sql").unwrap();
-        std::fs::write(ext.join("other.control"), "").unwrap();
-        std::fs::write(lib.join("vector.so"), "elf").unwrap();
-        std::fs::write(dir.path().join("manifest.json"), "{}").unwrap();
-        let flat = flatten_bundle(dir.path()).unwrap().unwrap();
-        let mut names: Vec<String> = std::fs::read_dir(flat.path())
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        names.sort();
-        assert_eq!(names, ["vector--0.8.7.sql", "vector.control", "vector.so"]);
-    }
-
-    #[test]
-    fn non_bundles_are_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(flatten_bundle(dir.path()).is_err());
-    }
 }

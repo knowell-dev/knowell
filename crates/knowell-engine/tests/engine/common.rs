@@ -21,6 +21,7 @@ use knowell_store::{PgConnectOptions, Store, StoreOptions};
 use sqlx::{ConnectOptions, Connection};
 
 pub(crate) const ENV: &str = "KNOWELL_TEST_DATABASE_URL";
+pub(crate) const PLAIN_ENV: &str = "KNOWELL_TEST_PLAIN_DATABASE_URL";
 /// Vector size of the fake embedder.
 pub(crate) const DIMS: u32 = 64;
 
@@ -31,12 +32,16 @@ pub(crate) struct TestDb {
 
 impl TestDb {
     pub(crate) async fn create(test: &str) -> Option<TestDb> {
-        let Ok(url) = std::env::var(ENV) else {
-            eprintln!("skipping {test}: {ENV} is not set");
+        Self::create_from(test, ENV).await
+    }
+
+    pub(crate) async fn create_from(test: &str, variable: &str) -> Option<TestDb> {
+        let Ok(url) = std::env::var(variable) else {
+            eprintln!("skipping {test}: {variable} is not set");
             return None;
         };
         let admin = PgConnectOptions::from_str(&url)
-            .unwrap_or_else(|_| panic!("{ENV} is not a valid postgres url"));
+            .unwrap_or_else(|_| panic!("{variable} is not a valid postgres url"));
         let name = format!("knowell_test_{}", uuid::Uuid::now_v7().simple());
         let mut conn = admin
             .connect()

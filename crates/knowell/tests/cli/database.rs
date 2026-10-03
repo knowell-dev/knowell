@@ -181,6 +181,47 @@ fn external_database_end_to_end() {
     no_leak(&seen);
 }
 
+#[test]
+fn external_plain_postgres_initializes_core_and_reports_semantic_disabled() {
+    let Ok(admin) = std::env::var("KNOWELL_TEST_PLAIN_DATABASE_URL") else {
+        eprintln!("skipping plain PostgreSQL CLI test: KNOWELL_TEST_PLAIN_DATABASE_URL is not set");
+        return;
+    };
+    let db = ScratchDb::create(&admin);
+    let mut sb = Sandbox::new();
+    sb.set_env("KNOWELL_CLI_DB_URL", &db.url);
+    for _ in 0..2 {
+        let init = sb.run(&[
+            "init",
+            "--database",
+            "external",
+            "--database-url-ref",
+            "env:KNOWELL_CLI_DB_URL",
+        ]);
+        assert_eq!(init.code, 0, "{init:?}");
+        assert!(init.stdout.contains("schema up to date"), "{init:?}");
+        assert!(
+            init.stdout.contains("semantic search: disabled"),
+            "{init:?}"
+        );
+    }
+    let doctor = sb.run(&["doctor", "--json"]);
+    let value: serde_json::Value = serde_json::from_str(&doctor.stdout).unwrap();
+    let vector = value["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "pgvector")
+        .unwrap();
+    assert_eq!(vector["status"], "warn", "{doctor:?}");
+    assert!(
+        vector["summary"]
+            .as_str()
+            .unwrap()
+            .contains("semantic search is disabled")
+    );
+}
+
 /// Stops the managed PostgreSQL of a sandbox when the test ends, also on
 /// failure, so the temporary directory can be removed.
 struct StopManaged(std::path::PathBuf);
@@ -201,13 +242,12 @@ fn managed_init_backup_restore() {
     let sb = Sandbox::new();
     let _stop = StopManaged(sb.knowell_home());
     let init = sb.run_with_timeout(&["init"], std::time::Duration::from_secs(180));
-    // Without the pgvector bundle init completes everything but the schema
-    // and says so; with it, it completes.
-    match init.code {
-        0 => assert!(init.stdout.contains("schema up to date"), "{init:?}"),
-        1 => assert!(init.stdout.contains("pgvector: NOT AVAILABLE"), "{init:?}"),
-        _ => panic!("{init:?}"),
-    }
+    assert_eq!(init.code, 0, "{init:?}");
+    assert!(init.stdout.contains("schema up to date"), "{init:?}");
+    assert!(
+        init.stdout.contains("semantic search: disabled"),
+        "{init:?}"
+    );
     let pg = knowell_pg_managed::ManagedPostgres::new(knowell_pg_managed::ManagedConfig::new(
         sb.knowell_home(),
     ))
@@ -230,6 +270,19 @@ fn managed_init_backup_restore() {
         .unwrap()
         .clone();
     assert_eq!(managed["status"], "ok", "{doctor:?}");
+    let vector = value["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "pgvector")
+        .unwrap();
+    assert_eq!(vector["status"], "warn", "{doctor:?}");
+    assert!(
+        vector["summary"]
+            .as_str()
+            .unwrap()
+            .contains("semantic search is disabled")
+    );
 
     let dump = sb.work().join("knowell.dump");
     let backup = sb.run(&["backup", dump.to_str().unwrap()]);

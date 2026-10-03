@@ -174,8 +174,12 @@ keyring, tracing (+ OpenTelemetry export), wasmtime, ts-rs/specta (panel types),
 ## 5. Data layer
 
 PostgreSQL is the database, pgvector is its vector extension, and `psql` is a terminal
-client. Knowell's single supported backend is **PostgreSQL 17/18 + pgvector 0.8.x**. There
-is no second storage implementation.
+client. Knowell's single supported backend is **PostgreSQL 17/18** with optional
+**pgvector 0.8 or newer** for semantic search. Core schema migration succeeds without
+pgvector, and lexical search, symbols, graph and memory remain available. Missing
+vector storage is reported explicitly; adding the extension files and rerunning
+`know init` enables it without discarding data or rewriting migration history.
+There is no second storage implementation.
 
 ### 5.1 One backend, three provisioning modes
 
@@ -192,6 +196,10 @@ The managed server outlives the CLI that starts it. `pg_ctl start` uses null sta
 streams and writes server diagnostics to `postgres.log`. On Windows an explicit handle
 list excludes the CLI's redirected pipes, so piping `know init` does not wait for the
 server to stop. Launcher timeout or cancellation still terminates the launcher.
+
+Managed pgvector installation accepts the release bundle's `lib/` and
+`share/extension/` directories directly, as well as the legacy flat layout.
+Incomplete, mixed or linked bundle members are rejected before content is read.
 
 ### 5.2 Layers
 

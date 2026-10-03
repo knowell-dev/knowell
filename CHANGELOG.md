@@ -10,6 +10,12 @@ is released. Nothing has been released yet.
 
 ### Fixed
 
+- Keep concurrent registrations of the same embedding profile idempotent across
+  both its name and settings uniqueness constraints.
+- Allow core storage and indexing without pgvector, report semantic search as disabled,
+  and enable vectors on a later initialization while preserving migration history.
+- Install managed pgvector directly from the release bundle's `lib/` and
+  `share/extension/` layout, retaining flat bundles and rejecting linked members.
 - Let redirected `know init` output close on Windows while managed PostgreSQL keeps
   running, by preventing the server launcher from inheriting the CLI's pipe handles.
 - Require Wasmtime and WASI 49.0.2, addressing upstream security advisories

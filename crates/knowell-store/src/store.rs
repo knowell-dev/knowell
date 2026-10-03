@@ -11,9 +11,6 @@ use sqlx::{ConnectOptions, Connection, PgPool, Postgres, Transaction};
 
 use crate::error::{StoreError, scrub};
 
-/// Embedded migrations (`crates/knowell-store/migrations`).
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!();
-
 /// Connection query parameters accepted in a database URL. Anything else is
 /// rejected up front, because the driver would log unknown parameters
 /// together with their values.
@@ -171,9 +168,15 @@ impl Store {
     }
 
     /// Applies all pending embedded migrations. Safe to call concurrently
-    /// from several processes (the migrator takes an advisory lock).
+    /// from several processes (the migrator takes an advisory lock). Core
+    /// storage works without pgvector; a later call installs vector storage
+    /// once pgvector 0.8 or newer becomes available.
     pub async fn migrate(&self) -> Result<(), StoreError> {
-        MIGRATOR.run(&self.pool).await.map_err(StoreError::Migrate)
+        let info = self.check_server().await?;
+        if !info.supports_core() {
+            return Err(StoreError::invalid("postgresql 17 or newer is required"));
+        }
+        crate::migrations::run(&self.pool, info.is_supported()).await
     }
 
     /// Reports the server version and the `vector` extension's availability
@@ -228,7 +231,7 @@ pub struct VectorExtension {
     pub installed_version: Option<String>,
 }
 
-/// A reason the server cannot run Knowell.
+/// A reason core storage or optional semantic search is unavailable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ServerIssue {
@@ -269,8 +272,8 @@ impl ServerInfo {
     /// Oldest supported pgvector version.
     pub const MIN_VECTOR_VERSION: (u32, u32, u32) = (0, 8, 0);
 
-    /// Every problem that prevents Knowell from using this server; empty
-    /// when the server is supported.
+    /// Problems preventing full functionality, including optional semantic
+    /// search. Missing or old pgvector does not prevent core storage.
     pub fn issues(&self) -> Vec<ServerIssue> {
         let mut issues = Vec::new();
         if self.server_version_num < Self::MIN_SERVER_VERSION_NUM {
@@ -301,10 +304,24 @@ impl ServerInfo {
     pub fn is_supported(&self) -> bool {
         self.issues().is_empty()
     }
+
+    /// Whether the server supports core storage without semantic search.
+    pub fn supports_core(&self) -> bool {
+        self.server_version_num >= Self::MIN_SERVER_VERSION_NUM
+    }
+
+    /// Whether a supported pgvector version is installed in this database.
+    pub fn semantic_enabled(&self) -> bool {
+        self.vector.as_ref().is_some_and(|ext| {
+            ext.installed_version.as_deref().is_some_and(|version| {
+                parse_version(version).is_some_and(|v| v >= Self::MIN_VECTOR_VERSION)
+            })
+        })
+    }
 }
 
 /// Parses `major.minor[.patch]`.
-fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
+pub(crate) fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
     let mut parts = text.split('.');
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;

@@ -3,7 +3,7 @@
 The zero-setup database mode of Knowell: `know` installs and runs its **own**
 PostgreSQL, bound to loopback, with a random password it keeps for you.
 
-Knowell has a single storage backend, PostgreSQL + pgvector, provisioned in one of
+Knowell has a single storage backend, PostgreSQL with optional pgvector, provisioned in one of
 three ways:
 
 | Mode | Who runs PostgreSQL | This crate |
@@ -113,20 +113,25 @@ set `GITHUB_TOKEN` in the environment to raise the limit.
 
 Knowell's release CI builds and attests pgvector per platform and PostgreSQL major
 version against the headers of the distribution that `install()` downloads. The
-bundle is a **flat directory**:
+bundle uses the release directory layout:
 
 ```text
 <bundle>/
-  vector.control        required; contains  default_version = 'X.Y.Z'
-  vector--X.Y.Z.sql     required; the script for default_version
-  vector--A--B.sql      optional upgrade scripts, any number
-  vector.so             required on Linux
-  vector.dylib          required on macOS (vector.so is also accepted)
-  vector.dll            required on Windows
+  share/extension/
+    vector.control      required; contains default_version = 'X.Y.Z'
+    vector--X.Y.Z.sql    required; the script for default_version
+    vector--A--B.sql     optional upgrade scripts, any number
+  lib/
+    vector.so           required on Linux
+    vector.dylib         required on macOS (vector.so is also accepted)
+    vector.dll          required on Windows
 ```
 
-Other files (licence, manifest, `bitcode/`) are ignored. Symlinks among the files
-above are rejected. `install_extension_bundle(dir)` validates the bundle, asks the
+The legacy flat directory containing the same files is also accepted. Mixed or
+incomplete layouts are rejected. Other files (licence, manifest, `bitcode/`) are
+ignored. Links in selected files or bundle directories (including Windows reparse
+points) are rejected before reading their contents. `install_extension_bundle(dir)`
+accepts the release layout directly, validates it, asks the
 installed `pg_config` for `--pkglibdir` and `--sharedir`, and copies the library to
 `pkglibdir` and the control and SQL files to `<sharedir>/extension`, each through a
 temporary name and a rename. It returns the pgvector version. The server need not be
@@ -134,6 +139,10 @@ stopped; `extension_available("vector")` then returns that version, and
 `CREATE EXTENSION vector` works. The bundle must match the platform and PostgreSQL
 major of the install; there is no cross-checking beyond the file names, so the CI
 attestation is what vouches for it.
+
+Without a bundle, `know init` still creates core storage and reports semantic search
+as disabled. Lexical search, symbols, graph and memory remain available. Unpack a
+matching bundle and run `know init --pgvector-bundle DIR` to enable vector storage.
 
 ## Tests
 

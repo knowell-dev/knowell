@@ -300,7 +300,13 @@ pub(crate) async fn decide_embedding<E: Embedder>(
         )));
     }
     let spec = store_profile(profile)?;
-    let stored = embeddings::register_profile(conn, organization, &spec).await?;
+    let stored = match embeddings::register_profile(conn, organization, &spec).await {
+        Ok(profile) => profile,
+        Err(error @ StoreError::SemanticUnavailable) => {
+            return Ok(EmbeddingDecision::Unavailable(error.to_string()));
+        }
+        Err(error) => return Err(error.into()),
+    };
     Ok(EmbeddingDecision::Embed {
         provider: name.clone(),
         profile: stored,

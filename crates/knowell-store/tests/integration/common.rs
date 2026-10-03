@@ -4,6 +4,8 @@
 //! PostgreSQL server with pgvector. Each test creates a randomly named
 //! database, migrates it, and drops it (also on panic). Without the
 //! variable, tests print one skip line and pass.
+//! `KNOWELL_TEST_PLAIN_DATABASE_URL` selects a second, unmodified PostgreSQL
+//! server for tests which require pgvector to be unavailable.
 
 use std::str::FromStr;
 use std::time::Duration;
@@ -15,17 +17,22 @@ use knowell_store::{PgConnectOptions, SourceKind, Store, StoreOptions};
 use sqlx::{ConnectOptions, Connection};
 
 pub(crate) const ENV: &str = "KNOWELL_TEST_DATABASE_URL";
+pub(crate) const PLAIN_ENV: &str = "KNOWELL_TEST_PLAIN_DATABASE_URL";
 
 /// The admin connection options, or `None` (with a skip notice) when the
 /// variable is unset. The URL itself is never printed.
 pub(crate) fn admin_options(test: &str) -> Option<PgConnectOptions> {
-    let Ok(url) = std::env::var(ENV) else {
-        eprintln!("skipping {test}: {ENV} is not set");
+    admin_options_from(test, ENV)
+}
+
+fn admin_options_from(test: &str, variable: &str) -> Option<PgConnectOptions> {
+    let Ok(url) = std::env::var(variable) else {
+        eprintln!("skipping {test}: {variable} is not set");
         return None;
     };
     match PgConnectOptions::from_str(&url) {
         Ok(options) => Some(options),
-        Err(_) => panic!("{ENV} is not a valid postgres url"),
+        Err(_) => panic!("{variable} is not a valid postgres url"),
     }
 }
 
@@ -37,7 +44,13 @@ pub(crate) struct TestDb {
 
 impl TestDb {
     pub(crate) async fn create(test: &str) -> Option<TestDb> {
-        let admin = admin_options(test)?;
+        let db = Self::unmigrated(test, ENV).await?;
+        db.store.migrate().await.unwrap();
+        Some(db)
+    }
+
+    pub(crate) async fn unmigrated(test: &str, variable: &str) -> Option<TestDb> {
+        let admin = admin_options_from(test, variable)?;
         let name = format!("knowell_test_{}", uuid::Uuid::now_v7().simple());
         let mut conn = admin
             .connect()
@@ -62,7 +75,6 @@ impl TestDb {
         let store = Store::connect_with(admin.database(&name), &options)
             .await
             .unwrap();
-        store.migrate().await.unwrap();
         Some(TestDb {
             store,
             _guard: guard,

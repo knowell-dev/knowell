@@ -221,8 +221,20 @@ jobs:
           --health-interval 2s
           --health-timeout 5s
           --health-retries 30
+      postgres-plain:
+        image: postgres:17@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f
+        env:
+          POSTGRES_PASSWORD: knowell-test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
     env:
       KNOWELL_TEST_DATABASE_URL: postgres://postgres:knowell-test@localhost:5432/postgres
+      KNOWELL_TEST_PLAIN_DATABASE_URL: postgres://postgres:knowell-test@localhost:5433/postgres
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

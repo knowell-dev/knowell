@@ -38,6 +38,7 @@ pub mod identity;
 mod ids;
 pub mod jobs;
 pub mod knowledge;
+mod migrations;
 mod store;
 pub mod symbols;
 pub mod tasks;
