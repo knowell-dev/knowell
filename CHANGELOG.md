@@ -42,3 +42,16 @@ is released. Nothing has been released yet.
 - Initial Rust workspace, contribution rules, and project documentation.
 - Continuous integration: formatting, linting, dependency policy, secret scanning,
   workflow security checks, tests, and a small synthetic evaluation.
+
+### Changed
+
+- Give the panel a softer, neutral look: rounded cards and pill buttons, outline-free status
+  badges, sentence-case labels and text colours that meet WCAG AA contrast in both themes.
+  The panel now follows the operating system's light or dark preference until a theme is
+  picked.
+- Show backtick-marked commands in panel text and server messages as code, keep the
+  Projects list readable beside its detail, add the missing space in monthly spend, shorten
+  the user id in the top bar, and keep top-bar controls and card grids within narrow
+  windows.
+- Draw code-graph edges as curves between columns, keep them from showing through node
+  boxes, fit the canvas to its card and show full node labels on hover.

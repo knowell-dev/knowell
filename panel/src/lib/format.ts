@@ -52,3 +52,40 @@ export function relativeTime(iso: string | null | undefined, now = Date.now()): 
 export function shortSha(s: string | null | undefined): string {
   return s ? s.slice(0, 7) : '-';
 }
+
+/** A run of prose or of inline code, as produced by {@link splitInlineCode}. */
+export interface TextPart {
+  text: string;
+  code: boolean;
+}
+
+/**
+ * Splits text that marks commands with backticks (`know init`) into prose and code parts, so
+ * they render as `<code>` instead of literal backticks. Works on plain strings only, never HTML;
+ * an unmatched backtick stays literal.
+ */
+export function splitInlineCode(text: string): TextPart[] {
+  const parts: TextPart[] = [];
+  let rest = text;
+  for (;;) {
+    const open = rest.indexOf('`');
+    const close = open < 0 ? -1 : rest.indexOf('`', open + 1);
+    if (close < 0) break;
+    if (open > 0) parts.push({ text: rest.slice(0, open), code: false });
+    if (close > open + 1) parts.push({ text: rest.slice(open + 1, close), code: true });
+    rest = rest.slice(close + 1);
+  }
+  if (rest) parts.push({ text: rest, code: false });
+  return parts;
+}
+
+/**
+ * A principal (`user:<uuid>`) short enough for the top bar: the kind prefix stays, a long id is
+ * cut to its first 8 characters. The full value belongs in a tooltip.
+ */
+export function shortUserId(id: string): string {
+  const colon = id.indexOf(':');
+  const prefix = colon < 0 ? '' : id.slice(0, colon + 1);
+  const rest = id.slice(prefix.length);
+  return rest.length > 12 ? `${prefix}${rest.slice(0, 8)}…` : id;
+}

@@ -4,6 +4,7 @@
   import { router, href } from '$lib/router.svelte';
   import { matchRoute, notFound, routes } from '$lib/routes';
   import { applyTheme, loadTheme, type Theme } from '$lib/theme';
+  import { shortUserId } from '$lib/format';
   import { useResource } from '$lib/resource.svelte';
   import Badge from '$lib/components/Badge.svelte';
   import Login from '$lib/components/Login.svelte';
@@ -125,8 +126,10 @@
         {/if}
         {#if session.data}
           <Badge tone="info" mono title="Engine role">{session.data.role}</Badge>
-          <span class="muted small" title="Session ends {session.data.expiresAt}"
-            >{session.data.user}</span
+          <span
+            class="who muted small"
+            title="{session.data.user}, session ends {session.data.expiresAt}"
+            >{shortUserId(session.data.user)}</span
           >
           {#if session.data.role === 'hub'}
             <button class="btn sm" type="button" onclick={signOut}>Sign out</button>
@@ -170,7 +173,7 @@
   }
   .side {
     background: var(--bg-sunken);
-    border-right: 1px solid var(--border);
+    border-right: 1px solid transparent;
     padding: var(--sp-3);
     position: sticky;
     top: 0;
@@ -191,8 +194,7 @@
   }
   .group {
     font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
+    font-weight: 500;
     color: var(--text-faint);
     padding: var(--sp-3) var(--sp-2) var(--sp-1);
   }
@@ -203,10 +205,9 @@
   }
   nav a {
     display: block;
-    padding: 0.3rem var(--sp-2);
+    padding: 0.4rem var(--sp-3);
     border-radius: var(--radius);
     color: var(--text-muted);
-    border-left: 2px solid transparent;
   }
   nav a:hover {
     background: var(--surface-2);
@@ -214,10 +215,9 @@
     text-decoration: none;
   }
   nav a.active {
-    background: var(--accent-bg);
+    background: var(--surface-2);
     color: var(--text);
-    border-left-color: var(--accent);
-    font-weight: 600;
+    font-weight: 500;
   }
   .content {
     min-width: 0;
@@ -226,8 +226,9 @@
   }
   .top {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: var(--sp-3);
+    gap: var(--sp-2) var(--sp-3);
     padding: var(--sp-2) var(--sp-5);
     border-bottom: 1px solid var(--border);
     background: var(--bg);
@@ -268,6 +269,12 @@
     }
     .top {
       padding: var(--sp-2) var(--sp-4);
+    }
+  }
+  @media (max-width: 600px) {
+    /* Keep the theme and sign-out controls on screen; the full id stays in the tooltip. */
+    .who {
+      display: none;
     }
   }
 </style>

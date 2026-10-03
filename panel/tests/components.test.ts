@@ -6,6 +6,7 @@ import { Resource } from '$lib/resource.svelte';
 import DataStateHarness from './DataStateHarness.svelte';
 import SecretRef from '$lib/components/SecretRef.svelte';
 import CodeBlock from '$lib/components/CodeBlock.svelte';
+import InlineText from '$lib/components/InlineText.svelte';
 import Tabs from '$lib/components/Tabs.svelte';
 import Meter from '$lib/components/Meter.svelte';
 
@@ -82,6 +83,19 @@ describe('CodeBlock', () => {
     expect(container.querySelector('img')).toBeNull();
     expect(container.querySelector('script')).toBeNull();
     expect(container.querySelector('pre')?.textContent).toContain('<img src=x');
+  });
+});
+
+describe('InlineText', () => {
+  it('renders backtick commands as code and everything as text, never as HTML', () => {
+    const { container } = render(InlineText, {
+      text: 'run `know init` then <b>`<img src=x onerror="alert(1)">`</b>'
+    });
+    const codes = [...container.querySelectorAll('code')].map((c) => c.textContent);
+    expect(codes).toEqual(['know init', '<img src=x onerror="alert(1)">']);
+    expect(container.querySelector('img')).toBeNull();
+    expect(container.querySelector('b')).toBeNull();
+    expect(container.textContent).not.toContain('`');
   });
 });
 
