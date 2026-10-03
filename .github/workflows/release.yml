@@ -495,7 +495,8 @@ jobs:
         run: |
           set -euo pipefail
           rm -f SHA256SUMS
-          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | LC_ALL=C sort | xargs sha256sum > SHA256SUMS
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | LC_ALL=C sort | xargs sha256sum > "$RUNNER_TEMP/knowell-SHA256SUMS"
+          mv "$RUNNER_TEMP/knowell-SHA256SUMS" SHA256SUMS
           cat SHA256SUMS
       - name: Every platform archive is listed
         run: python dist/render.py check --version "$VERSION" --sums release/SHA256SUMS
@@ -712,7 +713,7 @@ jobs:
           gh release download "$TAG" --dir verified
           cd verified
           sha256sum --strict -c SHA256SUMS
-          while read -r digest asset; do
+          while read -r _digest asset; do
             gh attestation verify "$asset" --repo "$GH_REPO" --signer-workflow "$GH_REPO/.github/workflows/release.yml" --source-ref "refs/tags/$TAG" >/dev/null
           done < SHA256SUMS
 
