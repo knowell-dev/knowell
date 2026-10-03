@@ -17,7 +17,7 @@ knowell-core.workspace = true
 serde.workspace = true
 # SHA-256 pins plugin components in manifests. Already in the dependency
 # graph through wasmtime-environ, so this adds no new crate.
-sha2 = { version = "0.10", default-features = false }
+sha2 = { version = "0.11", default-features = false }
 thiserror.workspace = true
 toml.workspace = true
 tracing.workspace = true
