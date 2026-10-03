@@ -156,7 +156,8 @@ is always returned as untrusted data.
 | `know impact [SYMBOL\|--file PATH\|--base REF] [--project NAME] [--json]` | Inspect local graph impact for a symbol, file or committed diff |
 | `know context` | Repository session hook; engine-backed context remains planned |
 | `know check` | Deterministic contract and rule checks (SARIF for CI) |
-| `know task`, `know memory` | Planned terminal task and memory administration; MCP tools exist |
+| `know memory list\|show` | Read standalone scoped records, their lifecycle states and saved evidence |
+| `know task list\|show` | List readable standalone tasks or resume one with checkpoints, decisions and changes |
 | `know profile` | Planned embedding profile administration |
 | `know connect codex\|claude\|cursor`, `know ci init` | Integrations |
 | `know login`, `know backup`, `know restore`, `know doctor`, `know eval` | Operations |
@@ -187,6 +188,16 @@ transport flags fail explicitly before credentials or database access.
 
 Content-policy changes trigger full reconciliation even when the source commit is
 unchanged; missing policy manifests are rebuilt conservatively before reporting success.
+
+`memory list` defaults to 20 accepted/proposed records; `memory show ID` includes all
+lifecycle states in the native readable scopes. Task-scoped decisions are available
+through `task show ID`. `task list` defaults to 10 open/in-progress/blocked tasks;
+`task show ID --limit N` limits the newest checkpoints. Both command groups support
+`--json`, `--format markdown` and atomic `--output FILE`. They prepare no provider
+clients or credentials, make no provider requests and do not schedule indexing.
+Empty lists and source gaps remain informative successes; absent requested IDs exit
+with 1, and malformed input or operational failures exit with 2. Memory/task writes,
+review, pinning, repository write-back and Hub/OIDC transport remain planned.
 
 These commands currently use the local database. Hub transport remains planned.
 Directory sources can be indexed and inspected, but source search cannot yet return

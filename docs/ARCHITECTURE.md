@@ -633,6 +633,34 @@ not narrow cross-project graph expansion. Missing subjects/indexes/refs exit wit
 operational and input failures exit with 2. Empty committed diffs and bounded traces
 remain informative reports. Hub/OIDC and terminal unapplied-patch input remain open.
 
+Local `memory list/show` and `task list/show` call `read_memory` and `resume_task` on
+the same engine through an explicit record-read opening path. It preserves configured
+profiles and data policy without constructing provider clients or resolving their
+credentials. Reports retain native records, source/index gaps and historical evidence,
+with safe text/Markdown, JSON and optional atomic files. Empty lists and incomplete
+source information remain successful reads; absent requested ids exit with 1, while
+input and operational errors exit with 2. Review, pinning and repository write-back
+commands remain open. Task-scoped decisions are read through task show rather than
+implicitly widening memory show's native scope selection.
+
+Persisted evidence retains its exact project/workspace identity at the repository
+boundary, including metadata for sources not configured in this process. Mapping those
+ids reads database hierarchy metadata without registering or opening the source. The write
+context binds new evidence to its workspace, including user and organization records.
+In-memory repositories retain that origin across Engine instances; unknown origins are
+omitted with a generic gap. Record reviews preserve canonical project ids rather than
+resolving names again.
+Current grants filter returned evidence, project links, replacement ids and historical task
+manifests before resumption; saved records and history are unchanged. Personal history
+in an owned task remains private to that owner; a shared task's personal pins require a
+matching currently authorized overlay. Missing or malformed saved pointers produce a
+generic gap without hidden identifiers. History rationale matches saved file evidence
+only after workspace identity and grant checks. Retry receipts without a gap field
+fail explicitly when linked data is unavailable. Freeform symbol labels and progress
+text remain untrusted scoped record content; they are not parsed as source identities.
+Task ownership filtering precedes the limit, and database pagination keeps full
+timestamp precision.
+
 `index` refreshes each selected workspace view, then drains and recovers leases only
 within its frozen registered view scope. Its completion report checks the observed
 commit or directory tree, required tiers and embedding coverage. Missing or superseded

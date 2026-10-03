@@ -27,7 +27,7 @@ use crate::access::Access;
 use crate::engine::Engine;
 use crate::usage::CallRecord;
 
-pub(crate) use memory::{conflict_map, memory_record, now_timestamp};
+pub(crate) use memory::{conflict_map, now_timestamp};
 
 impl Engine {
     /// Resolves the caller, runs `run`, and records the call.

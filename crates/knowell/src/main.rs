@@ -27,6 +27,7 @@ mod init_cmd;
 mod local_engine;
 mod login_cmd;
 mod mcp_cmd;
+mod memory_cmd;
 mod output;
 mod project_cmd;
 mod registry;
@@ -34,6 +35,7 @@ mod search_cmd;
 mod secrets_cmd;
 mod serve_cmd;
 mod status_cmd;
+mod task_cmd;
 mod token_cmd;
 mod tools;
 mod trace_cmd;
@@ -113,6 +115,12 @@ enum Command {
     Impact(impact_cmd::ImpactArgs),
     /// Report local index freshness, tier states and embedding coverage.
     Status(status_cmd::StatusArgs),
+    /// Read sourced memory records from the local workspace without provider calls.
+    #[command(subcommand)]
+    Memory(memory_cmd::MemoryCommand),
+    /// Read local tasks and saved checkpoints without provider calls.
+    #[command(subcommand)]
+    Task(task_cmd::TaskCommand),
     /// Back up the managed database.
     Backup(backup_cmd::BackupArgs),
     /// Restore a backup into the managed PostgreSQL.
@@ -166,6 +174,8 @@ fn main() -> ExitCode {
         Command::Trace(args) => trace_cmd::run(args, &env, &mut out),
         Command::Impact(args) => impact_cmd::run(args, &env, &mut out),
         Command::Status(args) => status_cmd::run(args, &env, &mut out),
+        Command::Memory(cmd) => memory_cmd::run(cmd, &env, &mut out),
+        Command::Task(cmd) => task_cmd::run(cmd, &env, &mut out),
         Command::Backup(args) => backup_cmd::backup(args, &env, &mut out),
         Command::Restore(args) => backup_cmd::restore(args, &env, &mut out),
         Command::Login(args) => login_cmd::run(args, &env, &mut out),

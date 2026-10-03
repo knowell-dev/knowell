@@ -187,7 +187,10 @@ fn record_evidence(e: &KEvidence, pinned: Option<&Pinned>) -> Option<Evidence> {
     let commit = CommitId::new(e.commit.as_str()).ok()?;
     let view: TrackTarget = e.view.as_str().parse().ok()?;
     let index_state = match pinned.and_then(|p| p.projects.get(&e.project)) {
-        Some(project) if project.commit.as_deref() == Some(e.commit.as_str()) => {
+        Some(project)
+            if project.commit.as_deref() == Some(e.commit.as_str())
+                && project.target.to_string() == e.view.as_str() =>
+        {
             project.index_state()
         }
         Some(_) => IndexState::Stale,
@@ -209,13 +212,21 @@ fn record_evidence(e: &KEvidence, pinned: Option<&Pinned>) -> Option<Evidence> {
 }
 
 /// A knowledge record as an MCP memory record (body labelled untrusted).
-pub(crate) fn memory_record(
+fn memory_record(
     record: &KnowledgeRecord,
     conflicts: &[RecordId],
     pinned: Option<&Pinned>,
+    gaps: &mut Vec<Gap>,
 ) -> Result<MemoryRecord, ToolError> {
-    let mut related_projects: BTreeSet<Name> =
-        record.evidence.iter().map(|e| e.project.clone()).collect();
+    let evidence: Vec<Evidence> = record
+        .evidence
+        .iter()
+        .filter_map(|e| record_evidence(e, pinned))
+        .collect();
+    if evidence.len() != record.evidence.len() {
+        unavailable_references(gaps);
+    }
+    let mut related_projects: BTreeSet<Name> = evidence.iter().map(|e| e.project.clone()).collect();
     if let Scope::Project { project, .. } = &record.scope {
         related_projects.insert(project.clone());
     }
@@ -236,11 +247,7 @@ pub(crate) fn memory_record(
             .iter()
             .map(|s| s.as_str().to_owned())
             .collect(),
-        evidence: record
-            .evidence
-            .iter()
-            .filter_map(|e| record_evidence(e, pinned))
-            .collect(),
+        evidence,
         superseded_by: record
             .superseded_by
             .and_then(|id| MemoryId::new(id.to_string()).ok()),
@@ -367,7 +374,182 @@ fn owns(row: &TaskRow, access: &Access) -> bool {
     }
 }
 
+fn unavailable_references(gaps: &mut Vec<Gap>) {
+    let gap = Gap::new(
+        GapReason::NotFound,
+        "some saved references are unavailable in this context",
+    );
+    if !gaps.contains(&gap) {
+        gaps.push(gap);
+    }
+}
+
 impl Engine {
+    /// Whether an already stored scope remains readable for this request.
+    async fn stored_scope_readable(
+        &self,
+        scope: &Scope,
+        access: &Access,
+        pinned: &Pinned,
+    ) -> Result<bool, ToolError> {
+        if let Scope::Task(task) = scope {
+            return Ok(self
+                .inner
+                .memory
+                .get_task(*task)
+                .await
+                .map_err(memory_error)?
+                .is_some_and(|row| {
+                    row.workspace.as_ref() == Some(&pinned.workspace.name) && owns(&row, access)
+                }));
+        }
+        Ok(self.readable_scopes(access, pinned).contains(scope))
+    }
+
+    fn visible_saved_project(&self, access: &Access, pinned: &Pinned, project: &Name) -> bool {
+        pinned
+            .workspace
+            .resolved
+            .projects
+            .iter()
+            .any(|entry| &entry.name == project)
+            && access.reads_project(&pinned.workspace.name, project)
+    }
+
+    fn visible_saved_pin(
+        &self,
+        access: &Access,
+        pinned: &Pinned,
+        task: &TaskRow,
+        pin: &ManifestPin,
+    ) -> bool {
+        if !self.visible_saved_project(access, pinned, &pin.project) {
+            return false;
+        }
+        // Invalid saved identities cannot be used to derive source changes.
+        if pin.view.as_str().parse::<TrackTarget>().is_err()
+            || CommitId::new(pin.commit.as_str()).is_err()
+        {
+            return false;
+        }
+        let Some(generation) = pin.local_generation else {
+            return true;
+        };
+        // A shared task does not prove ownership of its saved personal layer.
+        if task.owner.is_some() && owns(task, access) {
+            return true;
+        }
+        pinned.projects.get(&pin.project).is_some_and(|project| {
+            project.commit.as_deref() == Some(pin.commit.as_str())
+                && project.target.to_string() == pin.view.as_str()
+                && project
+                    .overlay
+                    .as_ref()
+                    .is_some_and(|overlay| overlay.generation == generation)
+        })
+    }
+
+    /// Filters only the returned copy; stored evidence and history remain intact.
+    async fn visible_knowledge_record(
+        &self,
+        record: &KnowledgeRecord,
+        access: &Access,
+        pinned: &Pinned,
+        gaps: &mut Vec<Gap>,
+    ) -> Result<KnowledgeRecord, ToolError> {
+        if !self
+            .stored_scope_readable(&record.scope, access, pinned)
+            .await?
+        {
+            return Err(ToolError::not_found(
+                "memory record is unavailable in this context",
+            ));
+        }
+        let mut visible = record.clone();
+        if !record.evidence.is_empty() {
+            let row = self
+                .inner
+                .memory
+                .get_record(record.id)
+                .await
+                .map_err(memory_error)?
+                .ok_or_else(|| {
+                    ToolError::not_found("memory record is unavailable in this context")
+                })?;
+            if row.record.scope != record.scope || row.record.evidence != record.evidence {
+                return Err(ToolError::invalid_input(
+                    "memory changed; read it again and retry",
+                ));
+            }
+            visible.evidence = record
+                .evidence
+                .iter()
+                .enumerate()
+                .filter(|(index, evidence)| {
+                    self.visible_saved_project(access, pinned, &evidence.project)
+                        && row.evidence_workspaces.get(*index).and_then(Option::as_ref)
+                            == Some(&pinned.workspace.name)
+                })
+                .map(|(_, evidence)| evidence.clone())
+                .collect();
+            if visible.evidence.len() != record.evidence.len() {
+                unavailable_references(gaps);
+            }
+        }
+        if let Some(id) = record.superseded_by {
+            let replacement = self
+                .inner
+                .memory
+                .get_record(id)
+                .await
+                .map_err(memory_error)?;
+            let readable = match replacement {
+                Some(row) => {
+                    self.stored_scope_readable(&row.record.scope, access, pinned)
+                        .await?
+                }
+                None => false,
+            };
+            if !readable {
+                visible.superseded_by = None;
+                unavailable_references(gaps);
+            }
+        }
+        Ok(visible)
+    }
+
+    pub(crate) async fn visible_memory_record(
+        &self,
+        record: &KnowledgeRecord,
+        conflicts: &[RecordId],
+        access: &Access,
+        pinned: &Pinned,
+        gaps: &mut Vec<Gap>,
+    ) -> Result<MemoryRecord, ToolError> {
+        let visible = self
+            .visible_knowledge_record(record, access, pinned, gaps)
+            .await?;
+        memory_record(&visible, conflicts, Some(pinned), gaps)
+    }
+
+    async fn memory_record_receipt(
+        &self,
+        record: &KnowledgeRecord,
+        access: &Access,
+        pinned: &Pinned,
+    ) -> Result<MemoryRecord, ToolError> {
+        let mut gaps = Vec::new();
+        let output = self
+            .visible_memory_record(record, &[], access, pinned, &mut gaps)
+            .await?;
+        if !gaps.is_empty() {
+            return Err(ToolError::not_found(
+                "memory references are unavailable in this context",
+            ));
+        }
+        Ok(output)
+    }
+
     /// The memory scopes `access` may read in `pinned`'s workspace: the
     /// organization, the workspace, every visible project and its own user
     /// scope (task scopes are added per task).
@@ -378,7 +560,7 @@ impl Engine {
             scopes.push(Scope::Organization);
             scopes.push(Scope::Workspace(ws.clone()));
         }
-        for project in &pinned.workspace.projects {
+        for project in &pinned.workspace.resolved.projects {
             if access.reads_project(ws, &project.name)
                 && access.allows(
                     Action::ReadMemory,
@@ -407,17 +589,17 @@ impl Engine {
         statuses: &[KTaskStatus],
         limit: u32,
     ) -> Result<Vec<TaskRow>, ToolError> {
-        let rows = self
-            .inner
+        let owner = access.acting_user().map(|user| user.to_string());
+        self.inner
             .memory
-            .list_tasks(
+            .list_owned_tasks(
                 Some(&pinned.workspace.name),
                 statuses,
-                limit.saturating_mul(4),
+                owner.as_deref(),
+                limit,
             )
             .await
-            .map_err(memory_error)?;
-        Ok(rows.into_iter().filter(|r| owns(r, access)).collect())
+            .map_err(memory_error)
     }
 
     /// A task the caller may use, or not found.
@@ -620,15 +802,21 @@ impl Engine {
         let records: Vec<KnowledgeRecord> = rows.into_iter().map(|r| r.record).collect();
         let conflicts = conflict_map(&records);
         let mut out = Vec::new();
+        let mut gaps = pinned.gaps.clone();
+        gaps.extend(pinned.not_indexed_gaps(&[]));
         for record in &records {
             let empty = Vec::new();
-            out.push(memory_record(
-                record,
-                conflicts.get(&record.id).unwrap_or(&empty),
-                Some(&pinned),
-            )?);
+            out.push(
+                self.visible_memory_record(
+                    record,
+                    conflicts.get(&record.id).unwrap_or(&empty),
+                    &access,
+                    &pinned,
+                    &mut gaps,
+                )
+                .await?,
+            );
         }
-        let mut gaps = Vec::new();
         if out.is_empty() {
             gaps.push(Gap::new(
                 GapReason::NoMatches,
@@ -657,6 +845,7 @@ impl Engine {
         projects: &[Name],
         query: &str,
         limit: usize,
+        gaps: &mut Vec<Gap>,
     ) -> Result<Vec<MemoryHit>, ToolError> {
         let words: Vec<String> = query
             .split(|c: char| !c.is_alphanumeric())
@@ -710,7 +899,9 @@ impl Engine {
                 .cloned()
                 .collect();
             hits.push(MemoryHit {
-                record: memory_record(record, &[], Some(pinned))?,
+                record: self
+                    .visible_memory_record(record, &[], access, pinned, gaps)
+                    .await?,
                 why: vec![MatchReason::Lexical {
                     terms,
                     rank: u32::try_from(rank.saturating_add(1)).unwrap_or(u32::MAX),
@@ -798,7 +989,9 @@ impl Engine {
                 .map_err(memory_error)?
         {
             return Ok(WriteMemoryOutput {
-                record: memory_record(&existing.record, &[], Some(&pinned))?,
+                record: self
+                    .memory_record_receipt(&existing.record, &access, &pinned)
+                    .await?,
                 created: false,
             });
         }
@@ -856,7 +1049,12 @@ impl Engine {
             now_timestamp(),
         )
         .map_err(knowledge_error)?;
-        let stored = match self.inner.memory.insert_record(&outcome.record).await {
+        let stored = match self
+            .inner
+            .memory
+            .insert_record_in_workspace(&outcome.record, &pinned.workspace.name)
+            .await
+        {
             Ok(row) => row,
             Err(MemoryError::AlreadyExists(_)) => self
                 .inner
@@ -868,7 +1066,9 @@ impl Engine {
             Err(other) => return Err(memory_error(other)),
         };
         Ok(WriteMemoryOutput {
-            record: memory_record(&stored.record, &[], Some(&pinned))?,
+            record: self
+                .memory_record_receipt(&stored.record, &access, &pinned)
+                .await?,
             created: true,
         })
     }
@@ -906,7 +1106,9 @@ impl Engine {
             } else {
                 domain_task_statuses(&input.statuses)
             };
-            let mut rows = self.own_tasks(&access, &pinned, &statuses, limit).await?;
+            let mut rows = self
+                .own_tasks(&access, &pinned, &statuses, limit.saturating_add(1))
+                .await?;
             if let Some(query) = &input.query {
                 let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
                 rows.retain(|r| {
@@ -914,6 +1116,7 @@ impl Engine {
                     words.iter().all(|w| text.contains(w.as_str()))
                 });
             }
+            let more_available = rows.len() > usize::try_from(limit).unwrap_or(usize::MAX);
             rows.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
             let mut tasks = Vec::new();
             for row in &rows {
@@ -927,14 +1130,20 @@ impl Engine {
                     .map(|c| c.seq);
                 tasks.push(task_summary(row, last)?);
             }
-            let gaps = if tasks.is_empty() {
-                vec![Gap::new(
+            let mut gaps = pinned.gaps.clone();
+            gaps.extend(pinned.not_indexed_gaps(&[]));
+            if tasks.is_empty() {
+                gaps.push(Gap::new(
                     GapReason::NoMatches,
                     "no task matches in this workspace",
-                )]
-            } else {
-                Vec::new()
-            };
+                ));
+            }
+            if more_available {
+                gaps.push(Gap::new(
+                    GapReason::LimitReached,
+                    "more tasks exist; raise `limit`",
+                ));
+            }
             return Ok(ResumeTaskOutput {
                 tasks,
                 task: None,
@@ -944,19 +1153,30 @@ impl Engine {
         let row = self
             .own_task(&access, &pinned, parse_task_id(task_id)?)
             .await?;
-        let checkpoint_rows = self
+        let mut checkpoint_rows = self
             .inner
             .memory
             .checkpoints(row.task.id)
             .await
             .map_err(memory_error)?;
-        let checkpoints: Vec<DomainCheckpoint> = checkpoint_rows
-            .iter()
-            .map(|c| c.checkpoint.clone())
-            .collect();
+        let mut gaps = pinned.gaps.clone();
+        gaps.extend(pinned.not_indexed_gaps(&[]));
         let current = Self::manifest_pins(&pinned);
+        let mut scopes = self.readable_scopes(&access, &pinned);
+        scopes.push(Scope::Task(row.task.id));
+        let requested_decisions: BTreeSet<RecordId> = row
+            .task
+            .decisions
+            .iter()
+            .chain(
+                checkpoint_rows
+                    .iter()
+                    .flat_map(|checkpoint| checkpoint.checkpoint.decisions.iter()),
+            )
+            .copied()
+            .collect();
         let mut records = Vec::new();
-        for id in &row.task.decisions {
+        for id in &requested_decisions {
             if let Some(r) = self
                 .inner
                 .memory
@@ -964,20 +1184,61 @@ impl Engine {
                 .await
                 .map_err(memory_error)?
             {
-                records.push(r.record);
+                if scopes.contains(&r.record.scope) {
+                    records.push(
+                        self.visible_knowledge_record(&r.record, &access, &pinned, &mut gaps)
+                            .await?,
+                    );
+                } else {
+                    unavailable_references(&mut gaps);
+                }
+            } else {
+                unavailable_references(&mut gaps);
             }
         }
         let stale = self
-            .records_in(
-                self.readable_scopes(&access, &pinned),
-                vec![RecordState::Stale],
-                None,
-                200,
-            )
+            .records_in(scopes, vec![RecordState::Stale], None, 200)
             .await?;
-        records.extend(stale.into_iter().map(|r| r.record));
-        let digest = knowell_knowledge::resume(&row.task, &checkpoints, &current, &records);
-        let mut gaps = Vec::new();
+        for row in stale {
+            if !records.iter().any(|record| record.id == row.record.id) {
+                records.push(
+                    self.visible_knowledge_record(&row.record, &access, &pinned, &mut gaps)
+                        .await?,
+                );
+            }
+        }
+        let visible_ids: BTreeSet<RecordId> = records.iter().map(|record| record.id).collect();
+        let mut visible_task = row.task.clone();
+        visible_task.decisions.retain(|id| visible_ids.contains(id));
+        let old_manifest_len = visible_task.view_manifest.len();
+        visible_task
+            .view_manifest
+            .retain(|pin| self.visible_saved_pin(&access, &pinned, &row, pin));
+        if old_manifest_len != visible_task.view_manifest.len() {
+            unavailable_references(&mut gaps);
+        }
+        for checkpoint in &mut checkpoint_rows {
+            let old_decisions = checkpoint.checkpoint.decisions.len();
+            let old_manifest = checkpoint.checkpoint.manifest.len();
+            checkpoint
+                .checkpoint
+                .decisions
+                .retain(|id| visible_ids.contains(id));
+            checkpoint
+                .checkpoint
+                .manifest
+                .retain(|pin| self.visible_saved_pin(&access, &pinned, &row, pin));
+            if old_decisions != checkpoint.checkpoint.decisions.len()
+                || old_manifest != checkpoint.checkpoint.manifest.len()
+            {
+                unavailable_references(&mut gaps);
+            }
+        }
+        let checkpoints: Vec<DomainCheckpoint> = checkpoint_rows
+            .iter()
+            .map(|row| row.checkpoint.clone())
+            .collect();
+        let digest = knowell_knowledge::resume(&visible_task, &checkpoints, &current, &records);
         let mut changed_since = Vec::new();
         for change in &digest.manifest_changes {
             let ManifestChangeKind::Moved {
@@ -1009,9 +1270,9 @@ impl Engine {
         let by_id: BTreeMap<RecordId, &KnowledgeRecord> =
             records.iter().map(|r| (r.id, r)).collect();
         let mut decisions = Vec::new();
-        for id in &row.task.decisions {
+        for id in &requested_decisions {
             if let Some(record) = by_id.get(id) {
-                decisions.push(memory_record(record, &[], Some(&pinned))?);
+                decisions.push(memory_record(record, &[], Some(&pinned), &mut gaps)?);
             }
         }
         let mut stale_knowledge = Vec::new();
@@ -1021,39 +1282,63 @@ impl Engine {
                 && seen.insert(issue.record)
                 && let Some(record) = by_id.get(&issue.record)
             {
-                stale_knowledge.push(memory_record(record, &[], Some(&pinned))?);
+                stale_knowledge.push(memory_record(record, &[], Some(&pinned), &mut gaps)?);
             }
         }
         for stale in &digest.stale_in_changed_projects {
             if seen.insert(stale.record)
                 && let Some(record) = by_id.get(&stale.record)
             {
-                stale_knowledge.push(memory_record(record, &[], Some(&pinned))?);
+                stale_knowledge.push(memory_record(record, &[], Some(&pinned), &mut gaps)?);
             }
         }
-        let last_manifest = checkpoints
-            .iter()
-            .max_by_key(|c| c.at)
-            .map_or_else(|| row.task.view_manifest.clone(), |c| c.manifest.clone());
+        let last_manifest = checkpoints.iter().max_by_key(|c| c.at).map_or_else(
+            || visible_task.view_manifest.clone(),
+            |c| c.manifest.clone(),
+        );
         let manifest = last_manifest
             .iter()
             .filter_map(|pin| {
+                let (Ok(view), Ok(commit)) = (
+                    pin.view.as_str().parse(),
+                    CommitId::new(pin.commit.as_str()),
+                ) else {
+                    unavailable_references(&mut gaps);
+                    return None;
+                };
                 Some(knowell_mcp::ProjectView {
                     project: pin.project.clone(),
-                    view: pin.view.as_str().parse().ok()?,
+                    view,
                     layer: if pin.local_generation.is_some() {
                         ViewLayer::Personal
                     } else {
                         ViewLayer::Shared
                     },
-                    commit: CommitId::new(pin.commit.as_str()).ok(),
+                    commit: Some(commit),
                     local_generation: pin.local_generation.unwrap_or(0),
                     freshness: None,
-                    index_state: IndexState::Current,
+                    index_state: match pinned.projects.get(&pin.project) {
+                        Some(project)
+                            if project.commit.as_deref() == Some(pin.commit.as_str())
+                                && project.target.to_string() == pin.view.as_str()
+                                && project.overlay.as_ref().map(|overlay| overlay.generation)
+                                    == pin.local_generation =>
+                        {
+                            project.index_state()
+                        }
+                        Some(_) => IndexState::Stale,
+                        None => IndexState::NotIndexed,
+                    },
                 })
             })
             .collect();
         let mut mcp_checkpoints = Vec::new();
+        if checkpoint_rows.len() > usize::try_from(limit).unwrap_or(usize::MAX) {
+            gaps.push(Gap::new(
+                GapReason::LimitReached,
+                "more checkpoints exist; raise `limit`",
+            ));
+        }
         for c in checkpoint_rows
             .iter()
             .rev()
@@ -1299,7 +1584,7 @@ impl Engine {
             let stored = self
                 .inner
                 .memory
-                .insert_record(&outcome.record)
+                .insert_record_in_workspace(&outcome.record, &pinned.workspace.name)
                 .await
                 .map_err(memory_error)?;
             task.add_decision(stored.record.id, now)
@@ -1378,7 +1663,7 @@ impl Engine {
             .await?;
         for record in &decision_records {
             out.decisions
-                .push(memory_record(record, &[], Some(&pinned))?);
+                .push(self.memory_record_receipt(record, &access, &pinned).await?);
         }
         Ok(out)
     }
@@ -1424,7 +1709,14 @@ impl Engine {
                         .await
                         .map_err(memory_error)?
                     {
-                        out.push(memory_record(&r.record, &[], Some(pinned))?);
+                        out.push(
+                            self.memory_record_receipt(&r.record, access, pinned)
+                                .await?,
+                        );
+                    } else {
+                        return Err(ToolError::not_found(
+                            "memory references are unavailable in this context",
+                        ));
                     }
                 }
                 out

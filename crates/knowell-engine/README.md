@@ -189,6 +189,24 @@ Existing contexts retain their pinned versions and still recheck current permiss
 Fresh queries observe the resolved source commit for freshness without writing it to
 the store or indexing it; an advanced ref cannot make its old generation appear current.
 
+Memory reads retain saved commits/hashes and report current, stale, catching-up or
+not-indexed source state without repinning the record. Returned evidence and task
+history obey current source grants even in cached contexts. Persisted project ids retain
+their workspace namespace, so equal names cannot authorize a different source; exact
+unregistered ids are mapped through database metadata without opening or registering
+sources. Hidden or malformed references produce one generic gap. New user/organization
+evidence is bound to the originating workspace, including shared in-memory repositories;
+an unknown origin is omitted. Reviews reuse canonical project ids rather than resolving
+equal names again. Read filtering does not rewrite records or history. History rationale
+matches saved file evidence after workspace identity
+and grant checks. Personal task pins require ownership or a currently matching authorized
+overlay. Task ownership is filtered before limits, using raw database timestamps for
+keyset pagination. Retry receipts fail explicitly when linked records are unavailable.
+
+Local memory/task CLI reads use configured profiles and policy without preparing
+provider clients or credentials. Source gaps do not prevent unsourced record reads.
+Freeform symbol labels and progress remain untrusted record content, not source ids.
+
 ## Known limits
 
 - Directory source views have no Git commit. Search reports missing commit evidence

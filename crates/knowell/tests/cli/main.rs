@@ -30,6 +30,7 @@ mod local;
 mod login;
 mod mcp;
 mod project;
+mod records;
 mod serve;
 mod token;
 mod workspace;

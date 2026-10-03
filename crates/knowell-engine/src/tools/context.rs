@@ -3,10 +3,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use knowell_core::RepoPath;
-use knowell_knowledge::{RecordState, Scope};
+use knowell_knowledge::RecordState;
 use knowell_mcp::tools::{
     BuildContextInput, BuildContextOutput, CoChange, ContextEntry, ContextSection, EntryKind,
-    HistoryFacet, HistoryInput, HistoryOutput, TokenBudget,
+    HistoryFacet, HistoryInput, HistoryOutput, ScopeLevel, TokenBudget,
 };
 use knowell_mcp::{FreshnessTier, Gap, GapReason, ResultId, ToolError, UntrustedText};
 use knowell_query::{OmitReason, Origin, PackItem, Reason, SnippetKind, Uncertainty};
@@ -22,7 +22,6 @@ use crate::evidence::{degradation_gaps, empty_gaps, place, reasons};
 use crate::memory::RecordQuery;
 use crate::search::{Filters, is_test_path, snippets};
 use crate::snapshot::slice_lines;
-use crate::tools::memory_record;
 
 /// Estimated tokens of `text` (four bytes per token, at least one).
 fn tokens(text: &str) -> u32 {
@@ -238,11 +237,15 @@ impl Engine {
                 }
                 used = used.saturating_add(cost);
                 let empty = Vec::new();
-                let mcp = memory_record(
-                    record,
-                    conflicts.get(&record.id).unwrap_or(&empty),
-                    Some(&pinned),
-                )?;
+                let mcp = self
+                    .visible_memory_record(
+                        record,
+                        conflicts.get(&record.id).unwrap_or(&empty),
+                        &access,
+                        &pinned,
+                        &mut gaps,
+                    )
+                    .await?;
                 entries.push(ContextEntry {
                     id: ResultId::new(format!("kn-memory:{}", record.id))
                         .map_err(|e| ToolError::internal(e.to_string()))?,
@@ -506,7 +509,10 @@ impl Engine {
                 .await
                 .map_err(memory_error)?;
             for row in rows {
-                let record = row.record;
+                // Names and paths alone do not establish a saved pointer's workspace.
+                let record = self
+                    .visible_memory_record(&row.record, &[], &access, &pinned, &mut gaps)
+                    .await?;
                 let cites = record
                     .evidence
                     .iter()
@@ -514,9 +520,10 @@ impl Engine {
                 let about = symbol_key
                     .as_ref()
                     .is_some_and(|k| record.related_symbols.iter().any(|s| s.as_str() == k));
-                let in_project = matches!(&record.scope, Scope::Project { project, .. } if *project == project_name);
+                let in_project = record.scope.level == ScopeLevel::Project
+                    && record.scope.project.as_ref() == Some(&project_name);
                 if cites || about || (in_project && record.title.contains(path.file_name())) {
-                    rationale.push(memory_record(&record, &[], Some(&pinned))?);
+                    rationale.push(record);
                 }
                 if rationale.len() >= limit {
                     break;

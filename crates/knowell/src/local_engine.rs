@@ -1,7 +1,8 @@
 //! Strict, one-workspace engine construction for local terminal commands.
 //!
 //! These commands act as the standalone installation's local caller. They
-//! never start watchers, substitute workspaces or omit selected providers.
+//! never start watchers or substitute workspaces. Index and search prepare every
+//! selected provider; explicit record reads retain profiles without transports.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -44,32 +45,45 @@ struct ProviderSpec {
     dimensions: u32,
 }
 
+enum ProviderPreparation {
+    Required(BTreeMap<Name, ProviderSpec>),
+    RecordsOnly,
+}
+
 /// Validated selection, before database connections or provider credentials.
 pub(crate) struct Prepared {
     config: EngineConfig,
     pub(crate) workspace: ResolvedWorkspace,
     organization: Name,
-    providers: BTreeMap<Name, ProviderSpec>,
+    providers: ProviderPreparation,
 }
 
 impl Prepared {
     /// Requires one selected workspace and a standalone engine configuration.
     pub(crate) fn load(env: &Env, organization: Name) -> anyhow::Result<Self> {
-        let config = env.require_engine()?;
-        if config.server.role != ServerRole::Standalone {
-            bail!(
-                "local commands require role `standalone`; the configured role is `{}`",
-                config.server.role.as_str()
-            );
-        }
-        let file = env.require_workspace()?;
-        let workspace = knowell_config::load_workspace(&file)?.resolve(&env::parent_dir(&file)?)?;
+        let (config, workspace) = selected_config(env)?;
         let providers = provider_specs(&config, &workspace)?;
         Ok(Self {
             config,
             workspace,
             organization,
-            providers,
+            providers: ProviderPreparation::Required(providers),
+        })
+    }
+
+    /// Validates record-read configuration without preparing provider transports.
+    /// Configured profiles and policy are retained; credential references stay unresolved.
+    pub(crate) fn load_records(env: &Env, organization: Name) -> anyhow::Result<Self> {
+        let (config, workspace) = selected_config(env)?;
+        let issues = workspace.check_against(&config);
+        if !issues.is_empty() {
+            bail!("{}", knowell_config::ConfigIssues(issues));
+        }
+        Ok(Self {
+            config,
+            workspace,
+            organization,
+            providers: ProviderPreparation::RecordsOnly,
         })
     }
 
@@ -81,8 +95,10 @@ impl Prepared {
     /// Opens the configured store and registers the selected workspace once.
     /// No indexing or provider request is started here.
     pub(crate) async fn open(self, env: &Env) -> anyhow::Result<LocalEngine> {
-        let embedders = self
-            .providers
+        let ProviderPreparation::Required(providers) = &self.providers else {
+            bail!("record-read preparation requires the record-read opener");
+        };
+        let embedders = providers
             .iter()
             .map(|(name, spec)| {
                 let provider = self
@@ -93,6 +109,20 @@ impl Prepared {
                 Ok((name.clone(), Arc::new(embedder(provider, spec)?)))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
+        self.open_with(env, embedders).await
+    }
+
+    /// Opens the real engine for memory and task reads without provider clients.
+    /// This does not change configured profiles or schedule indexing work.
+    pub(crate) async fn open_records(self, env: &Env) -> anyhow::Result<LocalEngine> {
+        self.open_with(env, Vec::new()).await
+    }
+
+    async fn open_with(
+        self,
+        env: &Env,
+        embedders: Vec<(Name, Arc<AnyEmbedder>)>,
+    ) -> anyhow::Result<LocalEngine> {
         let store = db::connect(env, &self.config, Duration::from_secs(15), 10)
             .await
             .context("cannot open the local index database; run `know doctor` for details")?;
@@ -131,6 +161,19 @@ impl Prepared {
         }
         result
     }
+}
+
+fn selected_config(env: &Env) -> anyhow::Result<(EngineConfig, ResolvedWorkspace)> {
+    let config = env.require_engine()?;
+    if config.server.role != ServerRole::Standalone {
+        bail!(
+            "local commands require role `standalone`; the configured role is `{}`",
+            config.server.role.as_str()
+        );
+    }
+    let file = env.require_workspace()?;
+    let workspace = knowell_config::load_workspace(&file)?.resolve(&env::parent_dir(&file)?)?;
+    Ok((config, workspace))
 }
 
 fn validate_projects(workspace: &ResolvedWorkspace, projects: &[Name]) -> anyhow::Result<()> {
