@@ -94,7 +94,16 @@ impl HybridRetriever {
             .await
             .map_err(|e| e.to_string())?;
         if !run.response.degraded.is_empty() {
-            return Err("hybrid evaluation requires every requested search component to succeed; inspect index and provider health".to_owned());
+            let reasons = run
+                .response
+                .degraded
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(format!(
+                "hybrid evaluation requires every requested search component to succeed: {reasons}"
+            ));
         }
         let mut seen = BTreeSet::new();
         let mut out = Vec::new();

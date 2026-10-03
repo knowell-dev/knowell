@@ -10,6 +10,9 @@ is released. Nothing has been released yet.
 
 ### Fixed
 
+- Add an explicit synthetic-only Gemini evaluation command and an opt-in,
+  main-only nightly matrix for 768/1536/3072 dimensions with shared token budgets
+  and reproducible measurement conditions. Live validation awaits owner setup.
 - Refuse degraded hybrid evaluations and expose the real engine through
   `know eval run --retriever hybrid`, using isolated scratch databases and
   deterministic local embeddings for the CI relevance baseline.

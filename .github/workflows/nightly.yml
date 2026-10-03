@@ -1,13 +1,18 @@
 # Nightly checks on the main repository only.
 #
-# The live-embeddings job (protected `live-embeddings` environment, the only place a
-# provider API key will ever exist) lands with the embeddings milestone.
+# Live embeddings require an explicit dispatch or the owner's repository
+# variable LIVE_EMBEDDINGS_ENABLED=true, and the main-only protected environment.
 name: Nightly
 
 on:
   schedule:
     - cron: "23 3 * * *"
   workflow_dispatch:
+    inputs:
+      live_embeddings:
+        description: Run the paid Gemini synthetic evaluation (estimated cap USD 0.30 total)
+        type: boolean
+        default: false
 
 concurrency:
   group: nightly-${{ github.ref }}
@@ -22,6 +27,71 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
+  live-embeddings:
+    name: live-embeddings (${{ matrix.dimensions }})
+    if: >-
+      github.repository == 'knowell-dev/knowell' &&
+      github.ref == 'refs/heads/main' &&
+      ((github.event_name == 'workflow_dispatch' && inputs.live_embeddings) ||
+       (github.event_name == 'schedule' && vars.LIVE_EMBEDDINGS_ENABLED == 'true'))
+    environment: live-embeddings
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: true
+      max-parallel: 1
+      matrix:
+        dimensions: [768, 1536, 3072]
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.7-pg17@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
+        env:
+          POSTGRES_PASSWORD: knowell-test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+      - uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # v1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: "false"
+      # Build scripts and dependency downloads never receive the API key.
+      - name: Build evaluation binary
+        run: python scripts/buildlock.py cargo build --locked --release -p knowell
+      - name: Measure synthetic retrieval with Gemini
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          KNOWELL_EVAL_DATABASE_URL: postgres://postgres:knowell-test@localhost:5432/postgres
+          DIMENSIONS: ${{ matrix.dimensions }}
+        run: >-
+          target/release/know eval live
+          --database-url env:KNOWELL_EVAL_DATABASE_URL
+          --api-key-ref env:GEMINI_API_KEY
+          --dimensions "$DIMENSIONS"
+          --max-tokens 500000
+          --json eval-live.json
+          --markdown eval-live.md
+      - name: Publish summary
+        run: cat eval-live.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: eval-live-${{ matrix.dimensions }}
+          path: |
+            eval-live.json
+            eval-live.md
+          if-no-files-found: error
+          retention-days: 30
+
   advisories:
     name: advisories
     if: github.repository == 'knowell-dev/knowell'

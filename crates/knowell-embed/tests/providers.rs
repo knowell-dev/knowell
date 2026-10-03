@@ -95,6 +95,42 @@ fn assert_no_key(text: &str) {
 // ---------------------------------------------------------------- Gemini
 
 #[tokio::test]
+async fn gemini_preserves_each_live_evaluation_dimension_and_rejects_wrong_sizes() {
+    for dimensions in [768, 1536, 3072] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(GEMINI_PATH))
+            .respond_with(gemini_ok(dimensions))
+            .mount(&server)
+            .await;
+        let embedder =
+            GeminiEmbedder::new(secret(), gemini_config(&server, dimensions as u32)).unwrap();
+        assert_eq!(
+            embedder
+                .embed_query("cancel subscription")
+                .await
+                .unwrap()
+                .dimensions(),
+            dimensions
+        );
+        assert_eq!(
+            bodies(&server).await[0]["requests"][0]["outputDimensionality"],
+            dimensions
+        );
+        server.reset().await;
+        Mock::given(method("POST"))
+            .and(path(GEMINI_PATH))
+            .respond_with(gemini_ok(dimensions - 1))
+            .mount(&server)
+            .await;
+        assert!(matches!(
+            embedder.embed_query("cancel subscription").await,
+            Err(EmbedError::Response { .. })
+        ));
+    }
+}
+
+#[tokio::test]
 async fn gemini_request_shape_prefixes_and_auth() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

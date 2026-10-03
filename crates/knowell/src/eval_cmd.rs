@@ -71,6 +71,29 @@ pub(crate) enum EvalCommand {
         #[arg(long, value_name = "SECRET_REF")]
         database_url: Option<String>,
     },
+    /// Send only the built-in Small synthetic fixture to Gemini Embedding 2
+    /// and measure grep, BM25 and hybrid. May incur provider charges.
+    Live {
+        /// PostgreSQL admin URL reference; creates a disposable database.
+        #[arg(long, value_name = "SECRET_REF")]
+        database_url: String,
+        /// Provider API key reference (env:NAME or file:/path), never a value.
+        #[arg(long, value_name = "SECRET_REF")]
+        api_key_ref: String,
+        /// Requested Gemini dimensions: 768, 1536 or 3072.
+        #[arg(long)]
+        dimensions: u32,
+        /// Input-token budget shared by indexing and queries (1..=500000).
+        /// Reservations are estimates; this is not a provider billing limit.
+        #[arg(long, default_value_t = 500_000)]
+        max_tokens: u64,
+        /// Report with model, dimensions, usage and measurement conditions.
+        #[arg(long, value_name = "FILE")]
+        json: PathBuf,
+        /// Append the Markdown report to this file instead of stdout.
+        #[arg(long, value_name = "FILE")]
+        markdown: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -159,13 +182,44 @@ pub(crate) fn run(cmd: EvalCommand, out: &mut Output) -> anyhow::Result<ExitCode
                 tolerance,
                 keep,
                 database_url,
+                live: None,
             };
             run_eval(opts, out)
+        }
+        EvalCommand::Live {
+            database_url,
+            api_key_ref,
+            dimensions,
+            max_tokens,
+            json,
+            markdown,
+        } => {
+            let live = crate::eval_hybrid::LiveOptions::new(&api_key_ref, dimensions, max_tokens)?;
+            run_eval(
+                RunOptions {
+                    database_url: Some(database_url),
+                    live: Some(live),
+                    bm25_coordination: None,
+                    spec: FixtureSpec {
+                        seed: 42,
+                        scale: Scale::Small,
+                    },
+                    retrievers: vec![RetrieverArg::Grep, RetrieverArg::Bm25, RetrieverArg::Hybrid],
+                    depth: 10,
+                    json: Some(json),
+                    markdown,
+                    baseline: None,
+                    tolerance: 1e-4,
+                    keep: None,
+                },
+                out,
+            )
         }
     }
 }
 
 struct RunOptions {
+    live: Option<crate::eval_hybrid::LiveOptions>,
     database_url: Option<String>,
     bm25_coordination: Option<f32>,
     spec: FixtureSpec,
@@ -219,13 +273,21 @@ fn run_eval(opts: RunOptions, out: &mut Output) -> anyhow::Result<ExitCode> {
         walked.redactions.len()
     );
 
-    let report = match &opts.database_url {
-        Some(reference) => crate::eval_hybrid::measure(root, &fixture, reference, |hybrid| {
-            measure(&fixture, &walked.corpus, &queries, &opts, Some(hybrid))
-        })?,
-        None => measure(&fixture, &walked.corpus, &queries, &opts, None)?,
+    let (report, evidence) = match &opts.database_url {
+        Some(reference) => {
+            crate::eval_hybrid::measure(root, &fixture, reference, opts.live.as_ref(), |hybrid| {
+                measure(&fixture, &walked.corpus, &queries, &opts, Some(hybrid))
+            })?
+        }
+        None => (
+            measure(&fixture, &walked.corpus, &queries, &opts, None)?,
+            None,
+        ),
     };
     let mut markdown = report.to_markdown();
+    if let Some(evidence) = &evidence {
+        markdown.push_str(&evidence.markdown());
+    }
     let mut regressed = false;
     if let Some(path) = &opts.baseline {
         let text = std::fs::read_to_string(path).with_context(|| {
@@ -243,8 +305,21 @@ fn run_eval(opts: RunOptions, out: &mut Output) -> anyhow::Result<ExitCode> {
     }
 
     if let Some(path) = &opts.json {
-        std::fs::write(path, report.to_json()?)
-            .with_context(|| format!("cannot write {}", path.display()))?;
+        let text = match &evidence {
+            Some(evidence) => {
+                let mut value = serde_json::to_value(&report)?;
+                let object = value
+                    .as_object_mut()
+                    .context("evaluation report is not an object")?;
+                object.insert(
+                    "live_embedding_conditions".into(),
+                    serde_json::to_value(evidence)?,
+                );
+                serde_json::to_string_pretty(&value)?
+            }
+            None => report.to_json()?,
+        };
+        std::fs::write(path, text).with_context(|| format!("cannot write {}", path.display()))?;
     }
     match &opts.markdown {
         Some(path) => append(path, &markdown)?,
