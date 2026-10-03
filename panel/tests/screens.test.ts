@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
-import { ApiError, apiContext } from '$lib/api';
+import { ApiError, apiContext, type GraphInsight } from '$lib/api';
 import { MockApiClient } from '$lib/api/mock';
 import Overview from '../src/routes/Overview.svelte';
 import Memory from '../src/routes/Memory.svelte';
@@ -106,5 +106,26 @@ describe('screens against the mock client', () => {
     ).toBeInTheDocument();
     expect(screen.getByText('Edges')).toBeInTheDocument();
     expect(screen.getByText(/sigma\.js/)).toBeInTheDocument();
+  });
+
+  it('Graph folds a long insight list into groups by kind', async () => {
+    const c = mk();
+    c.getGraphInsights = async (): Promise<GraphInsight[]> =>
+      Array.from({ length: 12 }, (_, n) => ({
+        id: `i${n}`,
+        kind: n < 9 ? 'endpoint-without-client' : 'missing-i18n-key',
+        title: `endpoint \`GET /v1/x${n}\` has no client`,
+        nodeIds: [],
+        evidence: 'contract-derived',
+        status: 'resolved'
+      }));
+    render(Graph, ctx(c));
+    const head = await screen.findByRole('button', { name: /endpoint-without-client/ });
+    expect(head).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByText('GET /v1/x0')).toBeNull();
+    await fireEvent.click(head);
+    expect(head).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByText('GET /v1/x0').tagName).toBe('CODE');
+    expect(screen.getAllByRole('button', { name: /missing-i18n-key/ })).toHaveLength(1);
   });
 });

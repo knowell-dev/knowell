@@ -58,6 +58,9 @@
     cursor: pointer;
     white-space: nowrap;
     margin-bottom: -1px;
+    transition:
+      color 150ms ease,
+      border-color 150ms ease;
   }
   button:hover {
     color: var(--text);

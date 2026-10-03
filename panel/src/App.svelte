@@ -146,7 +146,8 @@
       </header>
       <main id="main-content" tabindex="-1" bind:this={main}>
         {#key `${router.current.path}#${epoch}`}
-          <Page />
+          <!-- Re-created on every navigation, so its entry animation replays per page. -->
+          <div class="enter"><Page /></div>
         {/key}
       </main>
     </div>
@@ -208,6 +209,9 @@
     padding: 0.4rem var(--sp-3);
     border-radius: var(--radius);
     color: var(--text-muted);
+    transition:
+      background-color 120ms ease,
+      color 120ms ease;
   }
   nav a:hover {
     background: var(--surface-2);
