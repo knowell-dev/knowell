@@ -5,7 +5,7 @@
 <h1 align="center">Knowell</h1>
 
 <p align="center">
-  <strong>Evidence-backed code context and shared memory for AI coding agents, across all your repositories.</strong>
+  <strong>The hybrid code intelligence and memory engine for AI coding agents.</strong>
 </p>
 
 <p align="center">
@@ -17,52 +17,73 @@
 
 ---
 
-Coding agents such as Codex, Claude Code and Cursor are excellent inside one file and lost
-inside a real system. The behaviour you ask about is named differently in the code. A
-feature crosses ten repositories. The agent reads a stale branch. A search hit comes without
-its callers, contracts or tests. And whatever the last session decided is gone.
+**Knowell** is an open-source Rust engine that indexes multi-repository workspaces and
+serves source-cited context through MCP to Codex, Claude Code, Cursor and other coding
+agents. It combines exact symbol and path matches, BM25 text search, optional semantic
+vectors and evidence-carrying code relationships, then packs relevant results within a
+requested context budget. Versioned decisions and task checkpoints support continuity
+across sessions, while freshness and coverage gaps remain explicit.
 
-**Knowell** is one engine, written in Rust, that indexes a whole workspace of projects and
-gives agents what they need for a task: the current, relevant code — with a source for every
-statement.
+A feature can cross an API, an event consumer and a shared package. Its business name may
+never appear in the code. Knowell helps an agent find the implementation, follow indexed
+relationships across projects and retrieve the decisions saved by earlier sessions — with
+the source version behind each result.
 
 ## What Knowell does
 
 - **Finds code by meaning, words and structure.** Hybrid retrieval fuses exact symbol and
   path matches, a code-aware BM25 index (Tantivy) and semantic vectors (PostgreSQL +
-  pgvector), then expands along the code graph to callers, types, tests and contracts.
+  pgvector), then expands along available code-graph relationships. Analysis coverage and
+  unresolved relationships are reported with the results.
   It complements `grep`; it doesn't replace it.
 - **Connects projects through their contracts.** HTTP endpoints, events and topics, RPCs,
   database tables, environment variable names and i18n keys become graph nodes that link
-  producers to consumers across repositories. Every edge says how it is known — compiler
-  or SCIP resolved, contract-derived, syntactic, heuristic, model-suggested or observed at
-  runtime — and whether it is resolved.
-- **Stays current by itself.** Each project follows the ref you choose (`branch:development`,
+  producers to consumers across repositories where extraction is supported. Edges carry
+  their evidence type and resolution status; coverage depends on the configured analysis
+  and rule packs.
+- **Tracks changes and reports freshness.** Each project follows the ref you choose
+  (`branch:development`,
   `remote:origin/release/2.x`, a tag, a commit or a worktree's `HEAD`). Commits, saves,
   webhooks and periodic reconciliation update only what changed; a rebase or force-push
   reuses unchanged work. A missing ref is reported — never silently replaced by another
-  branch.
+  branch. The latest seen commit and the active index commit are reported separately;
+  indexing can lag behind source changes.
 - **Keeps your work-in-progress private.** Uncommitted changes in a worktree form a personal
   overlay on top of the shared view, visible only to you and your agents.
-- **Remembers.** Decisions, rules and task progress live in a scoped, versioned memory
+- **Preserves decisions and task progress.** Decisions, rules and task progress live in a
+  scoped, versioned memory
   (organisation, workspace, project, task, user) with sources and a review flow: agent
   findings are proposals until a human accepts them; records go stale when their evidence
-  changes. A fresh agent session — even on another machine — resumes a task with what
-  changed since the last checkpoint.
+  changes. A fresh agent session resumes a saved task with what changed since the last
+  checkpoint. Cross-machine continuity uses a shared hub or export/import and covers
+  records saved to Knowell; agents must write decisions and checkpoints through its tools.
 - **Checks pull requests.** `know check` reports contract drift, migration/entity
   mismatches, missing i18n keys, orphan endpoints and events, and architecture rule
   violations — deterministically, with no API key, as SARIF annotations in GitHub.
 - **Explains itself.** Every result carries project, view, commit, path, line range, content
   hash, why it matched and how fresh the index is. An empty answer says why it is empty.
 
+## Current status
+
+Knowell is pre-1.0. Hybrid retrieval, context packing, MCP tools and persisted memory have
+implementations; the architecture describes the full 1.0 target. The roadmap's milestone
+labels are not a current inventory of implemented features. Release readiness requires the
+[1.0 acceptance scenarios](docs/ROADMAP.md#10-acceptance-scenarios) to pass.
+
+Context packs use an estimated token budget; the agent's model context limit still applies.
+Session continuity comes from saved records and checkpoints; Knowell does not inherit an
+agent's conversation history. Symbol inspection currently reports incomplete reference
+coverage, and `history` provides indexed co-changes and saved rationale without git log or
+blame. See the [engine's known limits](crates/knowell-engine/README.md#known-limits) for
+integration details.
+
 ## Quick start
 
 ```sh
-# Install (pick one)
-brew install knowell-dev/tap/knowell          # macOS, Linux
-winget install Knowell.Knowell                # Windows
-cargo install knowell                         # from source
-curl -fsSL https://raw.githubusercontent.com/knowell-dev/knowell/main/scripts/install.sh | sh
+# Install from a source checkout (requires Rust and Python)
+git clone https://github.com/knowell-dev/knowell.git
+cd knowell
+python scripts/buildlock.py cargo install --path crates/knowell --locked
 
 # Set up a local engine: Knowell runs its own PostgreSQL + pgvector, no Docker needed
 know init
@@ -106,12 +127,12 @@ The full design is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 | `open_workspace` | Start a session: project map, rules, freshness, open tasks, recent decisions |
 | `search` | Code, docs, memory and contracts by meaning and by words |
 | `fetch` | The exact, versioned source behind any result id |
-| `inspect_symbol` | Definition, signature, docs, references, implementations |
+| `inspect_symbol` | Definition, signature, docs and available references/tests; coverage gaps reported |
 | `trace_flow` | How a request or event flows across services, with evidence |
 | `analyze_impact` | What a symbol, file, diff or unapplied patch affects, and which tests to run |
 | `contracts` | Endpoints, topics, RPCs, tables, env names: producers, consumers, drift |
 | `build_context` | A task-sized, token-budgeted context pack with citations |
-| `history` | Why code looks the way it does: commits, ADRs, co-changing files |
+| `history` | Indexed co-changing files and saved rationale citing the source |
 | `read_memory` / `write_memory` | Scoped team knowledge; agents propose, people accept |
 | `resume_task` / `save_checkpoint` | Continue work across sessions and machines |
 | `index_status` | Freshness and coverage per project |
