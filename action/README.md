@@ -123,7 +123,8 @@ Set `comment: false` to only produce the report file.
 - **Monorepo**: one workspace config at the root (`knowell.toml`), one workflow. Use
   `working-directory` and `workspace-config` if the config lives in a subdirectory.
   Each project's `path` and optional `root` identify its source directory. SARIF records
-  that directory as an absolute file URI, so annotations resolve to the checkout's files
+  each source location as an encoded absolute file URI; the uploader uses the repository
+  checkout as its root, so annotations resolve to the checkout's files
   even when the command runs in a subdirectory. Files in other repositories remain external
   to the uploaded checkout.
 - **Multi-repo with a hub**: every repository runs `check` (local, no secret) and `index`
@@ -233,6 +234,7 @@ variables). The offline harness and fakes are in `action/test/`:
 
 ```sh
 bash action/test/run-tests.sh   # no network, no secrets
+python -m unittest discover -s scripts -p test_verify_sarif_ingestion.py
 shellcheck -x -P SCRIPTDIR action/scripts/*.sh action/test/*.sh action/test/bin/*
 ```
 
@@ -251,8 +253,10 @@ gh workflow run sarif-smoke.yml --repo knowell-dev/knowell --ref main
 
 This builds the real CLI through the build lock and scans the committed synthetic HTTP
 client fixtures. Before upload it verifies `link.endpoint_without_provider` at
-`packs/js-http-client/tests/pos-axios.ts:5`, including the project URI base. After upload,
-an authenticated API check requires completed processing; errors or a polling timeout
+`packs/js-http-client/tests/pos-axios.ts:5`, using absolute artifact URIs independently of
+project URI bases. After upload, an authenticated API check requires completed processing,
+the expected analysis commit/category and the actual alert's repository path and line.
+Errors, incorrect source placement or a polling timeout
 fail the job. The
 `sarif-ingestion-evidence` artifact retains the SARIF, source-location validation and
 completed upload ID for 14 days. Inspect that ID and the analysis commit/category through

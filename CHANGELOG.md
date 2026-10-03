@@ -10,6 +10,8 @@ is released. Nothing has been released yet.
 
 ### Fixed
 
+- Emit absolute source file URIs in SARIF so GitHub places primary and related
+  locations under the checkout correctly, including monorepo project subdirectories.
 - Verify real Knowell SARIF upload and GitHub processing with a main-only manual
   workflow that checks expected rules and committed source locations before upload.
 - Add an explicit synthetic-only Gemini evaluation command and an opt-in,

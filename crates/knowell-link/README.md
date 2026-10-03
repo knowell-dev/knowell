@@ -250,17 +250,27 @@ locale JSON and ARB files, Prisma schemas (no bundled grammar).
 
 Graph insights about placeholder nodes are replaced by `link.unresolved_reference`. Findings
 are sorted by code, project, subject, location and message. `to_sarif` lists every code as a
-rule, gives each result a physical location relative to its project root (`uriBaseId` = the
-project name), related locations, and a `partialFingerprints` entry (`knowellFinding/v1`)
-that ignores line numbers.
+rule, gives each primary and related location an absolute `file:` URI, and adds a
+`partialFingerprints` entry (`knowellFinding/v1`) that ignores line numbers and checkout
+directories.
 
 The caller supplies an absolute `file:` URI ending in `/` for every project referenced by
-a finding. `originalUriBaseIds` records those roots; file paths are percent-encoded so
-spaces, reserved characters and Unicode resolve to the original files. Missing roots and
-invalid directory URIs are errors. For a monorepo, use each project's subdirectory as its
-root. `know check` resolves these directories from `knowell.toml`, including its `root`
-setting, and canonicalizes them before rendering. A code-scanning upload uses the scanned
-repository's checkout as its source root; locations in other repositories remain external.
+a finding. `originalUriBaseIds` records those roots as metadata; artifact locations do not
+depend on `uriBaseId`. GitHub interprets relative artifact URIs from its checkout root and
+does not use project URI bases to locate source files, so the full absolute URI preserves
+each project's subdirectory. File paths are percent-encoded so spaces, reserved characters
+and Unicode resolve to the original files. Missing roots and invalid directory URIs are
+errors. For a monorepo, use each project's subdirectory as its root. `know check` resolves
+these directories from `knowell.toml`, including its `root` setting, and canonicalizes them
+before rendering. A code-scanning upload uses the scanned repository's checkout as its
+source root to convert absolute URIs into repository-relative paths; locations in other
+repositories remain external. Moving a checkout changes its source URIs while keeping
+Knowell's finding fingerprints stable.
+
+GitHub uses `primaryLocationLineHash` for its own alert matching. The upload action adds
+that hash when it can resolve the source file and line; `knowellFinding/v1` is Knowell's
+separate stable identity. Direct REST upload clients must supply a GitHub-supported
+fingerprint when they require the same alert matching behavior.
 
 ## Safety
 

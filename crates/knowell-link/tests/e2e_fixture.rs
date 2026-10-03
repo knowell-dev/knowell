@@ -705,7 +705,7 @@ fn sarif_output_is_valid_and_fingerprinted() {
     let results = sarif["runs"][0]["results"].as_array().unwrap();
     assert_eq!(results.len(), run.findings.len());
     let mut fingerprints = BTreeSet::new();
-    for result in results {
+    for (result, finding) in results.iter().zip(&run.findings) {
         let index = result["ruleIndex"].as_u64().unwrap() as usize;
         assert_eq!(rules[index]["id"], result["ruleId"]);
         let location = &result["locations"][0]["physicalLocation"];
@@ -715,12 +715,25 @@ fn sarif_output_is_valid_and_fingerprinted() {
                 .unwrap()
                 .is_empty()
         );
-        assert!(
-            !location["artifactLocation"]["uriBaseId"]
-                .as_str()
-                .unwrap()
-                .is_empty()
+        assert!(location["artifactLocation"].get("uriBaseId").is_none());
+        let primary = finding.locations.first().unwrap();
+        assert_eq!(
+            location["artifactLocation"]["uri"],
+            format!("file:///fixture/{}/{}", primary.project, primary.path)
         );
+        let related = result["relatedLocations"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        assert_eq!(related.len(), finding.locations.len().saturating_sub(1));
+        for (related, source) in related.iter().zip(finding.locations.iter().skip(1)) {
+            let artifact = &related["physicalLocation"]["artifactLocation"];
+            assert!(artifact.get("uriBaseId").is_none());
+            assert_eq!(
+                artifact["uri"],
+                format!("file:///fixture/{}/{}", source.project, source.path)
+            );
+        }
         assert!(location["region"]["startLine"].as_u64().unwrap() >= 1);
         let fingerprint = result["partialFingerprints"][FINGERPRINT_KEY]
             .as_str()
