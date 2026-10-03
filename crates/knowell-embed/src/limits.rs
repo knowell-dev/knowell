@@ -111,7 +111,10 @@ pub struct RequestLimits {
     pub timeout: Duration,
     /// Maximum requests in flight at once for this provider instance.
     pub max_concurrency: usize,
-    /// Request rate cap (token bucket, refilled continuously). `None` = unlimited.
+    /// Provider request quota per minute (continuously refilled token bucket).
+    /// Gemini conservatively charges one unit per input entry; OpenAI-compatible
+    /// and Ollama providers charge one unit per HTTP batch. Each retry consumes
+    /// the same quota again. `None` = unlimited.
     pub requests_per_minute: Option<u32>,
     /// Estimated-token rate cap (token bucket). `None` = unlimited. Must be
     /// at least the batch's `max_batch_tokens`.
@@ -159,52 +162,130 @@ impl RequestLimits {
     }
 }
 
-/// A continuously refilled token bucket. Costs above the capacity are
-/// clamped to it so that an oversized request waits for a full bucket
-/// instead of waiting forever.
+/// Joint request and token quota reservation. Both costs are consumed at
+/// the same instant, after both continuously refilled buckets are ready.
 #[derive(Debug)]
-pub(crate) struct TokenBucket {
+pub(crate) struct RateLimiter {
+    state: Mutex<RateState>,
+}
+
+impl RateLimiter {
+    /// Builds optional buckets, each measured in quota units per minute.
+    pub(crate) fn new(requests_per_minute: Option<u32>, tokens_per_minute: Option<u32>) -> Self {
+        Self {
+            state: Mutex::new(RateState::new(
+                requests_per_minute,
+                tokens_per_minute,
+                Instant::now(),
+            )),
+        }
+    }
+
+    /// Waits until both costs are available and consumes them together.
+    pub(crate) async fn acquire(&self, request_cost: u64, token_cost: u64) {
+        loop {
+            let wait = self
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .try_acquire(request_cost, token_cost, Instant::now());
+            match wait {
+                None => return,
+                Some(wait) => tokio::time::sleep(wait).await,
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RateState {
+    requests: Option<TokenBucket>,
+    tokens: Option<TokenBucket>,
+    updated_at: Instant,
+}
+
+impl RateState {
+    fn new(requests_per_minute: Option<u32>, tokens_per_minute: Option<u32>, now: Instant) -> Self {
+        Self {
+            requests: requests_per_minute.map(TokenBucket::per_minute),
+            tokens: tokens_per_minute.map(TokenBucket::per_minute),
+            updated_at: now,
+        }
+    }
+
+    fn try_acquire(
+        &mut self,
+        request_cost: u64,
+        token_cost: u64,
+        now: Instant,
+    ) -> Option<Duration> {
+        let elapsed = now.saturating_duration_since(self.updated_at).as_secs_f64();
+        self.updated_at = now;
+        if let Some(bucket) = &mut self.requests {
+            bucket.refill(elapsed);
+        }
+        if let Some(bucket) = &mut self.tokens {
+            bucket.refill(elapsed);
+        }
+        let request_wait = self
+            .requests
+            .as_ref()
+            .map_or(0.0, |bucket| bucket.wait_seconds(request_cost));
+        let token_wait = self
+            .tokens
+            .as_ref()
+            .map_or(0.0, |bucket| bucket.wait_seconds(token_cost));
+        let wait = request_wait.max(token_wait);
+        if wait > 0.0 {
+            return Some(Duration::from_secs_f64(wait.clamp(0.001, 3600.0)));
+        }
+        // Reserving one quota before waiting for the other would let that
+        // reservation age and refill, causing bursts when the wait ends.
+        if let Some(bucket) = &mut self.requests {
+            bucket.consume(request_cost);
+        }
+        if let Some(bucket) = &mut self.tokens {
+            bucket.consume(token_cost);
+        }
+        None
+    }
+}
+
+/// One continuously refilled bucket, accessed only under the joint mutex.
+/// Oversized costs retain the existing clamp to capacity; provider config
+/// validation ensures valid batches fit both configured quota capacities.
+#[derive(Debug)]
+struct TokenBucket {
     capacity: f64,
     per_second: f64,
-    state: Mutex<(f64, Instant)>,
+    available: f64,
 }
 
 impl TokenBucket {
     /// A bucket holding `per_minute` units, refilled at `per_minute / 60` per second.
-    pub(crate) fn per_minute(per_minute: u32) -> Self {
+    fn per_minute(per_minute: u32) -> Self {
         let capacity = f64::from(per_minute.max(1));
         Self {
             capacity,
             per_second: capacity / 60.0,
-            state: Mutex::new((capacity, Instant::now())),
+            available: capacity,
         }
     }
 
-    /// Waits until `cost` units are available and takes them.
-    pub(crate) async fn acquire(&self, cost: u64) {
-        let cost = (cost as f64).clamp(0.0, self.capacity);
-        loop {
-            let wait = {
-                let mut guard = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-                let now = Instant::now();
-                let elapsed = now.saturating_duration_since(guard.1).as_secs_f64();
-                guard.0 = (guard.0 + elapsed * self.per_second).min(self.capacity);
-                guard.1 = now;
-                if guard.0 >= cost {
-                    guard.0 -= cost;
-                    None
-                } else {
-                    Some((cost - guard.0) / self.per_second)
-                }
-            };
-            match wait {
-                None => return,
-                Some(seconds) => {
-                    let seconds = seconds.clamp(0.001, 3600.0);
-                    tokio::time::sleep(Duration::from_secs_f64(seconds)).await;
-                }
-            }
-        }
+    fn refill(&mut self, elapsed: f64) {
+        self.available = (self.available + elapsed * self.per_second).min(self.capacity);
+    }
+
+    fn cost(&self, cost: u64) -> f64 {
+        (cost as f64).clamp(0.0, self.capacity)
+    }
+
+    fn wait_seconds(&self, cost: u64) -> f64 {
+        ((self.cost(cost) - self.available) / self.per_second).max(0.0)
+    }
+
+    fn consume(&mut self, cost: u64) {
+        self.available -= self.cost(cost);
     }
 }
 
@@ -278,17 +359,63 @@ mod tests {
     #[tokio::test]
     async fn bucket_serves_burst_then_throttles() {
         // 6000/min = 100/s: the first 6000 units are free, the next wait.
-        let bucket = TokenBucket::per_minute(6000);
+        let bucket = RateLimiter::new(Some(6000), None);
         let start = Instant::now();
-        bucket.acquire(6000).await;
+        bucket.acquire(6000, 0).await;
         assert!(start.elapsed() < Duration::from_millis(100));
-        bucket.acquire(20).await; // needs ~0.2 s of refill
+        bucket.acquire(20, 0).await; // needs ~0.2 s of refill
         assert!(start.elapsed() >= Duration::from_millis(150));
     }
 
     #[tokio::test]
     async fn oversized_cost_is_clamped_not_deadlocked() {
-        let bucket = TokenBucket::per_minute(60);
-        bucket.acquire(1_000_000).await;
+        let bucket = RateLimiter::new(Some(60), None);
+        bucket.acquire(1_000_000, 0).await;
+    }
+
+    #[test]
+    fn joint_wait_consumes_request_quota_only_when_tokens_are_ready() {
+        let start = Instant::now();
+        let mut state = RateState::new(Some(60), Some(120), start);
+        assert_eq!(state.try_acquire(60, 120, start), None);
+        assert_eq!(
+            state.try_acquire(10, 120, start + Duration::from_secs(30)),
+            Some(Duration::from_secs(30))
+        );
+        let ready = start + Duration::from_secs(60);
+        assert_eq!(state.try_acquire(10, 120, ready), None);
+        // The ten request units must be charged now, rather than before
+        // the token wait, or another full request burst could go out now.
+        assert_eq!(
+            state.try_acquire(60, 0, ready),
+            Some(Duration::from_secs(10))
+        );
+    }
+
+    #[test]
+    fn waiting_for_one_quota_does_not_reserve_the_other() {
+        let start = Instant::now();
+        let mut state = RateState::new(Some(60), Some(120), start);
+        assert_eq!(state.try_acquire(60, 120, start), None);
+        let halfway = start + Duration::from_secs(30);
+        assert_eq!(
+            state.try_acquire(10, 120, halfway),
+            Some(Duration::from_secs(30))
+        );
+        // A token-blocked caller must leave the available request quota
+        // untouched so a smaller call can still proceed.
+        assert_eq!(state.try_acquire(30, 60, halfway), None);
+
+        let mut state = RateState::new(Some(60), Some(120), start);
+        assert_eq!(state.try_acquire(60, 0, start), None);
+        assert_eq!(
+            state.try_acquire(60, 60, start),
+            Some(Duration::from_secs(60))
+        );
+        // Symmetrically, a request-blocked caller cannot reserve tokens.
+        assert_eq!(
+            state.try_acquire(1, 120, start + Duration::from_secs(1)),
+            None
+        );
     }
 }

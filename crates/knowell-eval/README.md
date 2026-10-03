@@ -66,8 +66,13 @@ resolved policy is changed to allow cloud embedding. The normal secret boundary
 still excludes sensitive paths and redacts synthetic canaries before provider
 calls. The API key is resolved from its reference and is never written to reports.
 
-Indexing and queries share the token budget. Provider retries and job retries are
-disabled. The cap is based on token estimates before sending and provider usage
+Indexing and queries share the token budget. Live calls conservatively count each
+Gemini batch entry as one request quota unit, capped at 40 units and 10,000 estimated
+tokens per minute. A batch holds at most 40 inputs and 8,192 estimated tokens.
+Rate buckets initially hold one minute of capacity and refill continuously; these
+settings constrain bursts as well as sustained traffic. They do not reserve provider
+quota against other applications or bypass daily quotas. Provider retries and job retries
+are disabled. The cap is based on token estimates before sending and provider usage
 after success; it is not an exact provider billing ceiling. Each dimension may
 account for at most 500,000 estimated tokens, approximately USD 0.10 at the
 [standard text price of USD 0.20/million tokens](https://ai.google.dev/gemini-api/docs/pricing#gemini-embedding-2)
@@ -76,12 +81,13 @@ cap of USD 0.30 per workflow run. Provider billing remains authoritative.
 
 Reports include model, requested dimensions, the actual request field
 `requests[].outputDimensionality`, dimension-validation success, token accounting,
-estimated cost, input count, database versions, OS/architecture and cold-cache
-conditions. Every returned vector is checked against the requested dimension;
-wrong dimensions, partial coverage, budgets and provider failures prevent a
+estimated cost, provider rate and batch caps, input count, database versions,
+OS/architecture and cold-cache conditions. Every returned vector is checked against the
+requested dimension; wrong dimensions, partial coverage, budgets and provider failures prevent a
 successful report. The top-level dimension field is documented as deprecated in
-the [API reference](https://ai.google.dev/api/embeddings); a successful real run
-is needed to verify that it is still accepted. No live result has been recorded yet.
+the [API reference](https://ai.google.dev/api/embeddings). One synthetic 768-dimensional
+request accepted it on 2026-10-03; complete engine measurements across all three
+dimensions remain pending. No live relevance result has been recorded yet.
 
 The Nightly `live-embeddings` matrix runs serially, only on this repository's
 `main`, in the protected `live-embeddings` environment. The owner must provision
