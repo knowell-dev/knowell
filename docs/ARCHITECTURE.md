@@ -103,12 +103,12 @@ live in one place. The same binary runs in different roles:
 
 | Role | Where | Job |
 |---|---|---|
-| `standalone` | A single developer | Hub, worker, and edge in one process |
-| `hub` | Team or company server | Shared views, graph, memory, users and permissions, panel, Streamable HTTP MCP. **Provider API keys exist only here.** |
+| `standalone` | A single developer | Hub, worker, and edge in one process; resolves configured provider secret references locally |
+| `hub` | Team or company server | Shared views, graph, memory, users and permissions, panel, Streamable HTTP MCP. Holds provider API keys for team deployments. |
 | `worker` | Next to the hub, scalable | Heavy indexing jobs (parsing, embedding, SCIP) |
 | `edge` | Each developer machine | Watches local worktrees and saved changes, builds the personal layer, serves stdio MCP to agents, merges with the hub |
 
-- The edge asks the hub for embeddings, so developer machines hold no provider keys.
+- In team deployments, the edge asks the hub for embeddings and holds no provider keys.
 - Uncommitted content does not leave the machine by default; sharing it is an explicit
   choice.
 - Two independent local installs do not discover each other. For multiple devices use a
@@ -275,6 +275,21 @@ does not (rebase, cherry-pick), vectors are reused.
 
 **Scenarios with dedicated tests:** rename, move, delete, merge, rebase, reset,
 force-push, branch switch, deletion of the tracked branch.
+
+Committed diffs select regular-file metadata by project root and exclusion policy
+before rename similarity can read blobs. Moves across that boundary expose only the
+allowed addition or deletion. Exact and edited renames inside the scope retain their
+identity; similarity reads obey the configured file size limit. Temporary filtered
+trees stay in memory, and diffing uses no Git attributes, clean filters or external
+drivers. Indexing, personal overlays, committed impact analysis, task resumption and
+CLI diff checks use this same boundary.
+
+Saved-change status also selects approved source paths before hashing. Recognized
+same-repository Git ignore and attribute controls are captured separately with per-file
+and aggregate byte limits, without following symlinks or reading outside-repository
+controls. Their bytes remain transient control data and do not expand the source scope.
+Native line-ending conversion operates only on bounded allowed source bytes; unsupported
+filters and transforms produce an error rather than silently altering Git semantics.
 
 ### 6.4 Freshness tiers
 
@@ -578,6 +593,13 @@ every call. Context reuse rechecks those grants. User callers become agents; del
 agents and service accounts keep their verified identity. Read-only tokens cannot write
 memory, and a token from another organization cannot authenticate to the hub.
 
+Graph tools retain explicit gaps for authorized projects without an index or with a
+missing tracked ref. Missing diff refs produce gaps; corrupt objects and other source
+failures remain operational errors. When changed content is skipped by source policy,
+impact analysis does not infer removed symbols from an absent text. Trace node limits
+apply to the whole returned graph, including all starts, and every returned edge has
+both endpoints present.
+
 ### 12.2 CLI (`know`), main commands
 
 `init`, `serve [--role standalone|hub|worker|edge]`, `workspace import|add|list`,
@@ -592,7 +614,7 @@ list and revoke expose identifiers and metadata. Creation and revocation are aud
 the same transaction. Login verifies authenticated hub health before saving references;
 remote connections require HTTPS, and redirects are refused.
 
-Implemented local `index`, `search` and `status` commands construct the same engine
+Implemented local `index`, `search`, `trace`, `impact` and `status` commands construct the same engine
 with the standalone caller and selected workspace. Configuration, project selection
 and provider profiles are validated before opening the database. A configured provider
 cannot silently become an unconfigured lexical-only profile. Registration issues,
@@ -603,6 +625,13 @@ saved generation; existing contexts retain their original pins. Explicit project
 filters narrow source probes before unrelated source failures can affect the query.
 If a Git target has advanced since indexing, fresh results retain the indexed commit
 and report its stale or catching-up state from the observed target without queuing work.
+
+Local graph commands call `trace_flow` and `analyze_impact` on that engine. They report
+native evidence and gaps as JSON or escaped text/Markdown, and optionally write a
+complete report atomically to an explicit output path. A subject's project flag does
+not narrow cross-project graph expansion. Missing subjects/indexes/refs exit with 1;
+operational and input failures exit with 2. Empty committed diffs and bounded traces
+remain informative reports. Hub/OIDC and terminal unapplied-patch input remain open.
 
 `index` refreshes each selected workspace view, then drains and recovers leases only
 within its frozen registered view scope. Its completion report checks the observed

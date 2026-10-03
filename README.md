@@ -116,7 +116,8 @@ field?"* — in English or Turkish.
 One binary runs in four roles: **standalone** (everything on one machine), **hub** (a shared
 team server with users, permissions and audit), **worker** (scalable indexing) and **edge**
 (each developer's machine: worktree overlays and a stdio MCP server for local agents).
-Provider API keys live only on the hub.
+In team deployments, provider API keys belong on the hub. Standalone commands resolve
+their configured provider secret references on the local machine.
 
 The full design is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
@@ -151,7 +152,8 @@ is always returned as untrusted data.
 | `know index [--rebuild] [--json]` | Index the selected standalone workspace and report incomplete targets |
 | `know search QUERY [--project NAME] [--no-snippets] [--json]` | Search the standalone index with versioned evidence and explicit coverage gaps |
 | `know status [--project NAME] [--json]` | Read standalone index freshness, tier states and embedding coverage |
-| `know trace`, `know impact` | Planned terminal graph queries |
+| `know trace SYMBOL [--project NAME] [--json]` | Trace sourced relations in the standalone index; `--id` and `--contract` select other starts |
+| `know impact [SYMBOL\|--file PATH\|--base REF] [--project NAME] [--json]` | Inspect local graph impact for a symbol, file or committed diff |
 | `know context` | Repository session hook; engine-backed context remains planned |
 | `know check` | Deterministic contract and rule checks (SARIF for CI) |
 | `know task`, `know memory` | Planned terminal task and memory administration; MCP tools exist |
@@ -160,7 +162,7 @@ is always returned as untrusted data.
 | `know login`, `know backup`, `know restore`, `know doctor`, `know eval` | Operations |
 | `know token create\|list\|revoke` | Local database administration of scoped hub credentials; values go only to new private files |
 
-Local `index`, `search` and `status` require an engine configuration with role
+Local `index`, `search`, `trace`, `impact` and `status` require an engine configuration with role
 `standalone` and a selected `knowell.toml` (use the global `--config` and `--workspace`
 options to choose them). `index` processes only that workspace's registered views,
 including their expired leases. It exits with 1 when the observed source target or a
@@ -169,6 +171,20 @@ required tier remains incomplete; idle jobs alone do not prove completion. Use
 configured providers may charge for that work. Search and status register metadata but
 do not refresh or index sources. Search exits with 1 for a missing ref or index, and
 reports reduced semantic coverage as a gap. Operational errors exit with 2.
+
+`trace` and `impact` query existing generations without indexing or making provider
+requests. Graph reports preserve source commits, hashes, line ranges, freshness,
+relation evidence and resolution gaps. A project flag selects or disambiguates the
+subject; graph expansion can still reach other authorized projects. Use `--format
+markdown` for an escaped human report, `--json` for the native structured result,
+or `--output FILE` to write the chosen report atomically. Missing requested subjects,
+indexes and refs exit with 1. A valid empty committed diff remains a report with gaps.
+Trace limits apply to the total returned nodes, and `impact --no-tests` omits the
+suggested test list without changing the risk assessment. Committed impact accepts
+full commit IDs or typed refs with `--base` (alias `--diff-base`) and optional `--head`.
+Hub/OIDC transport and terminal unapplied-patch input remain unimplemented; remote
+transport flags fail explicitly before credentials or database access.
+
 Content-policy changes trigger full reconciliation even when the source commit is
 unchanged; missing policy manifests are rebuilt conservatively before reporting success.
 
@@ -208,8 +224,9 @@ explicit and can leave the index incomplete.
         command: check
   ```
 
-  `know ci init github|gitlab|gitea` generates this and the impact/index workflows (GitHub
-  OIDC to the hub, no stored tokens).
+  `know ci init github|gitlab|gitea` generates check and remote impact/index workflow
+  templates. The remote templates target GitHub OIDC to the hub without stored tokens;
+  they remain pending CLI hub transport, and their remote flags currently fail explicitly.
 
 ## Privacy and security
 

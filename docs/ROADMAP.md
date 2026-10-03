@@ -47,6 +47,11 @@ dependencies; completion of the whole is defined by the acceptance scenarios at 
 
 ### M4: Graph and contracts (planned)
 
+- **Current surface:** local `know trace` and `impact` query the real saved engine
+  graph, preserve evidence and gaps, and support JSON/text/Markdown reports.
+  Hub/OIDC transport, terminal unapplied patches and precise reference resolution
+  remain open; this does not complete the milestone.
+
 - **Deliverables:** SCIP import; edge evidence types; `trace_flow`, `analyze_impact`, and
   patch preview; rule packs; cross-project links; `know check`.
 - **Done when:** every link type is found in the synthetic full-stack workspace, and

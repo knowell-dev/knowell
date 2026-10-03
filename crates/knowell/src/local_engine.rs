@@ -58,7 +58,7 @@ impl Prepared {
         let config = env.require_engine()?;
         if config.server.role != ServerRole::Standalone {
             bail!(
-                "local index, search and status require role `standalone`; the configured role is `{}`",
+                "local commands require role `standalone`; the configured role is `{}`",
                 config.server.role.as_str()
             );
         }

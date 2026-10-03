@@ -37,6 +37,7 @@
 //!
 //! [`SkipReason::InvalidPath`]: crate::SkipReason::InvalidPath
 
+mod diff;
 mod status;
 mod task;
 mod tree;
@@ -527,36 +528,59 @@ impl GitRepo {
         tree::read_one(&repo, tree_id, path, policy, options)
     }
 
-    /// The changes that turn `old`'s tree into `new`'s tree, sorted by path.
+    /// The changes between the regular, built-in-policy-permitted files of
+    /// `old` and `new`, sorted by repository-relative path.
     ///
     /// Rename tracking uses git's defaults explicitly (not the user's
     /// `diff.renames`): a deleted and an added file with at least 50 %
     /// similar content are reported as [`Change::Renamed`]; copies are not
     /// tracked. Mode-only changes (for example the executable bit) are
     /// [`Change::Modified`]. Directories never appear, only the files in
-    /// them.
+    /// them. This is [`GitRepo::diff_scoped`] with no project root, the
+    /// built-in exclusion policy and default [`WalkOptions`] size limit.
+    /// Similarity reads permitted blobs only; attributes, external filters,
+    /// text conversion and working-tree files are never read.
     ///
     /// # Errors
     /// Invalid or missing commit ids, or unreadable objects.
     pub fn diff(&self, old: &str, new: &str) -> Result<Vec<Change>, GitError> {
-        let repo = self.local();
-        let old_tree = repo
-            .find_tree(commit_tree(&repo, old)?)
-            .map_err(failed("tree lookup"))?;
-        let new_tree = repo
-            .find_tree(commit_tree(&repo, new)?)
-            .map_err(failed("tree lookup"))?;
-        let options =
-            gix::diff::Options::default().with_rewrites(Some(gix::diff::Rewrites::default()));
-        let raw = repo
-            .diff_tree_to_tree(Some(&old_tree), Some(&new_tree), Some(options))
-            .map_err(failed("tree diff"))?;
-        let mut changes = Vec::with_capacity(raw.len());
-        for change in raw {
-            tree::convert_change(change, &mut changes);
-        }
-        sort_changes(&mut changes);
-        Ok(changes)
+        self.diff_scoped(
+            old,
+            new,
+            None,
+            &ExclusionPolicy::builtin(),
+            &WalkOptions::default(),
+        )
+    }
+
+    /// Changes between permitted regular files of two commits, sorted by
+    /// repository-relative path. `root`, when present, selects a project
+    /// subtree; `policy` matches paths relative to that project root.
+    ///
+    /// Both trees are filtered by metadata before rename similarity can
+    /// access a blob. Moves across the root or exclusion boundary produce
+    /// only the permitted addition or deletion. Exact renames retain 100 %
+    /// similarity; edited renames require at least 50 %. Inexact matching
+    /// reads only blobs no larger than `options.max_file_bytes` (bytes),
+    /// and is disabled when that limit is zero. Symlinks and gitlinks are
+    /// omitted. No attributes, worktree files, external filters or text
+    /// conversion are consulted; temporary filtered trees exist only in memory.
+    ///
+    /// # Errors
+    /// Invalid or missing commit ids, unreadable tree objects or permitted
+    /// blobs needed for similarity matching.
+    pub fn diff_scoped(
+        &self,
+        old: &str,
+        new: &str,
+        root: Option<&RepoPath>,
+        policy: &ExclusionPolicy,
+        options: &WalkOptions,
+    ) -> Result<Vec<Change>, GitError> {
+        let old = self.list_tree(old)?;
+        let new = self.list_tree(new)?;
+        let repo = self.local().with_object_memory();
+        diff::scoped(&repo, &old, &new, root, policy, options)
     }
 
     /// Whether `ancestor` is reachable from `descendant` (a commit is its
@@ -656,7 +680,7 @@ impl GitRepo {
     /// files, staged or not. This is the "saved but not committed" state
     /// that feeds a personal overlay.
     ///
-    /// Paths excluded by `policy` are dropped (they are never indexed);
+    /// Paths excluded by `policy` are filtered before status may hash content;
     /// ignored files, submodules and empty directories do not appear;
     /// renames appear as a deletion plus an addition. Staged changes that
     /// a later worktree edit undoes may be reported as `Modified`
@@ -666,13 +690,29 @@ impl GitRepo {
     /// # Errors
     /// [`GitError::NoWorktree`] for a bare repository; [`GitError::Git`].
     pub fn working_changes(&self, policy: &ExclusionPolicy) -> Result<Vec<Change>, GitError> {
+        self.working_changes_scoped(None, policy, &WalkOptions::default())
+    }
+
+    /// Uncommitted changes restricted to `root` and `policy` before any
+    /// content hashing. The policy matches project-relative paths beneath
+    /// `root`; returned paths remain repository-relative. `options` carries
+    /// the maximum permitted file size in bytes. Nothing is written.
+    ///
+    /// # Errors
+    /// [`GitError::NoWorktree`] for a bare repository; [`GitError::Git`].
+    pub fn working_changes_scoped(
+        &self,
+        root: Option<&RepoPath>,
+        policy: &ExclusionPolicy,
+        options: &WalkOptions,
+    ) -> Result<Vec<Change>, GitError> {
         let repo = self.local();
         if repo.workdir().is_none() {
             return Err(GitError::NoWorktree {
                 path: self.git_dir.clone(),
             });
         }
-        let mut changes = status::working_changes(&repo, policy)?;
+        let mut changes = status::working_changes_scoped(&repo, root, policy, options)?;
         sort_changes(&mut changes);
         Ok(changes)
     }

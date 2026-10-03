@@ -10,6 +10,15 @@ is released. Nothing has been released yet.
 
 ### Fixed
 
+- Apply project scope and exclusions before Git rename similarity reads source blobs
+  in indexing, overlays, impact analysis, task resumption and CLI diff checks.
+- Filter saved Git status before hashing; capture bounded repository control rules
+  separately and preserve native line-ending and ignored-parent semantics.
+- Preserve missing-index and missing-ref gaps in graph tools, propagate operational
+  diff failures and bound trace nodes across all starting points. Omitting the test
+  suggestion list no longer removes test evidence from impact risk.
+- Report stale or catching-up source indexes in saved memory evidence without
+  replacing the record's original commit, content hash or historical context.
 - Reject missing Git targets in fresh engine queries without serving an old active
   index; observe advanced refs for honest freshness, preserve existing context pins
   and narrow source access and project-scoped memory before filtered searches.
@@ -57,6 +66,8 @@ is released. Nothing has been released yet.
 
 ### Added
 
+- Standalone `know trace` and `know impact` over the real engine graph, with versioned
+  evidence, explicit gaps and safe text/JSON/Markdown output.
 - Standalone `know index`, `know search` and `know status` commands backed by the real
   engine, with versioned evidence, tier and embedding coverage reports, JSON output
   and explicit incomplete outcomes. `index --rebuild` rebuilds an unchanged target

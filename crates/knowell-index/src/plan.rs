@@ -203,7 +203,13 @@ fn plan_commit(input: &PlanInput<'_>, commit: &str) -> Result<Plan, IndexError> 
         && let Some(base) = input.base_commit
     {
         let mut set = BTreeSet::new();
-        for change in repo.diff(base, commit)? {
+        for change in repo.diff_scoped(
+            base,
+            commit,
+            ctx.root.as_ref(),
+            &ctx.policy,
+            &walk_options(&input.limits),
+        )? {
             let new = ctx.to_project_path(change.path());
             let old = change.old_path().and_then(|p| ctx.to_project_path(p));
             if let (Change::Renamed { .. }, Some(to), Some(from)) = (&change, &new, &old) {

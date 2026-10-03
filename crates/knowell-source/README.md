@@ -20,6 +20,7 @@ let commit = repo.resolve(&"branch:main".parse()?)?.commit;          // never an
 let all = repo.walk_commit(&commit, &policy, &options)?;              // every file of a commit
 let some = repo.read_commit_files(&commit, &paths, &policy, &options)?; // a list (missing = error)
 let one = repo.read_commit_file(&commit, &path, &policy, &options)?;    // one (missing = Missing)
+let changes = repo.diff_scoped(&old, &commit, project_root.as_ref(), &policy, &options)?;
 ```
 
 ## One content pipeline
@@ -56,6 +57,37 @@ repository, its index or working tree. It resolves track targets exactly (a miss
 `GitError::RefNotFound`, never replaced), lists trees, diffs commits with rename tracking,
 checks ancestry (force-push detection), lists worktrees and groups them into task views,
 and reports a worktree's uncommitted changes.
+
+`diff_scoped(old, new, root, policy, options)` selects regular-file metadata from both
+commit trees before any rename-similarity blob access. The policy matches project-relative
+paths beneath `root`; returned paths remain repository-relative. Built-in sensitive-path
+exclusions also apply before stripping the root. A move across a root or exclusion boundary
+appears only as an allowed addition or deletion. Allowed exact renames retain 100 % similarity;
+edited renames require at least 50 %. Similarity reads honor `options.max_file_bytes`; zero
+disables inexact matching. Symlinks and gitlinks are omitted.
+
+The filtered trees live only in memory. Diffing uses no attributes from commit trees,
+the worktree, `.git/info/attributes` or global configuration, and no external drivers,
+clean filters or text conversion. `diff(old, new)` delegates to this same safe path with
+the built-in policy, no project root and default `WalkOptions`; consumers with project
+exclusions or size limits must call `diff_scoped` explicitly.
+
+`working_changes_scoped(root, policy, options)` uses the same project-relative policy
+and repository-relative result convention for saved changes, filtering candidates before
+status can hash their content. The legacy `working_changes(policy)` delegates with no
+project root and default options.
+
+Saved status captures recognized same-repository Git control rules separately from source
+content: ancestor `.gitignore` and `.gitattributes`, and `.git/info/exclude` and
+`.git/info/attributes` (the common directory for linked worktrees). Controls are limited
+to 64 KiB each, 1 MiB in total and 1,024 present control files, checked without following
+symlinks, and held only in memory. Missing controls do not consume the file count. Their
+capture does not add an outside-root or excluded path to source results,
+indexing or provider inputs. Ordinary source candidates still obey the project policy.
+Native line-ending normalization uses these captured attributes on bounded allowed bytes;
+external filters, encoding transforms and outside-repository controls are explicit errors.
+Entries with line-ending rules are checked through a copy of the stat cache and can be
+rehashed even when their filesystem metadata matches. The on-disk index remains unchanged.
 
 Worktree listings canonicalize existing paths, including Windows short-name aliases, so
 opening the main checkout or any linked worktree yields the same identities. A missing
