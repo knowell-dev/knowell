@@ -285,6 +285,20 @@ jobs:
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.7-pg17@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
+        env:
+          POSTGRES_PASSWORD: knowell-test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      KNOWELL_EVAL_DATABASE_URL: postgres://postgres:knowell-test@localhost:5432/postgres
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -297,10 +311,11 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: >
-          cargo run --locked --release -p knowell --
+          python scripts/buildlock.py cargo run --locked --release -p knowell --
           eval run --scale small --seed 42
-          --retriever grep --retriever bm25
-          --baseline eval/baselines/synthetic-small.json
+          --retriever grep --retriever bm25 --retriever hybrid
+          --database-url env:KNOWELL_EVAL_DATABASE_URL
+          --baseline eval/baselines/synthetic-small-hybrid.json
           --markdown "$GITHUB_STEP_SUMMARY"
 
   panel:

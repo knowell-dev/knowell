@@ -52,3 +52,98 @@ fn existing_commands_keep_their_arguments() {
     let scan = sb.run(&["secrets", "scan", sb.work().to_str().unwrap(), "--json"]);
     assert_eq!(scan.code, 0, "{scan:?}");
 }
+
+#[test]
+fn hybrid_requires_an_explicit_secret_reference_without_echoing_values() {
+    let sb = Sandbox::new();
+    let missing = sb.run(&["eval", "run", "--retriever", "hybrid"]);
+    assert_eq!(missing.code, 2, "{missing:?}");
+    assert!(missing.stderr.contains("--database-url"));
+    let canary = "postgres://eval:KNOWELL_CANARY_eval_pw@localhost/eval";
+    let pasted = sb.run(&[
+        "eval",
+        "run",
+        "--retriever",
+        "hybrid",
+        "--database-url",
+        canary,
+    ]);
+    assert_eq!(pasted.code, 2, "{pasted:?}");
+    assert!(!pasted.all().contains("KNOWELL_CANARY_eval_pw"));
+    assert!(pasted.stderr.contains("reference"));
+}
+
+#[test]
+fn hybrid_cli_measures_all_retrievers_reproducibly() {
+    let Some(admin) = crate::common::admin_url("eval::hybrid") else {
+        return;
+    };
+    let mut sb = Sandbox::new();
+    sb.set_env("KNOWELL_EVAL_TEST_DB", &admin);
+    let report_path = sb.work().join("hybrid.json");
+    let run = || {
+        sb.run(&[
+            "eval",
+            "run",
+            "--retriever",
+            "grep",
+            "--retriever",
+            "bm25",
+            "--retriever",
+            "hybrid",
+            "--database-url",
+            "env:KNOWELL_EVAL_TEST_DB",
+            "--json",
+            report_path.to_str().unwrap(),
+        ])
+    };
+    let first = run();
+    assert_eq!(first.code, 0, "{first:?}");
+    let text = std::fs::read_to_string(&report_path).unwrap();
+    let report = knowell_eval::Report::from_json(&text).unwrap();
+    assert_eq!(report.retrievers.len(), 3);
+    assert!(
+        report
+            .retriever("hybrid")
+            .unwrap()
+            .overall
+            .recall_at_10
+            .unwrap()
+            > 0.0
+    );
+    let manifest =
+        std::env::var_os("CARGO_MANIFEST_DIR").unwrap_or_else(|| env!("CARGO_MANIFEST_DIR").into());
+    let baseline_path =
+        std::path::PathBuf::from(manifest).join("../../eval/baselines/synthetic-small-hybrid.json");
+    let baseline =
+        knowell_eval::Report::from_json(&std::fs::read_to_string(baseline_path).unwrap()).unwrap();
+    let comparison = knowell_eval::compare(&report, &baseline, 1e-4).unwrap();
+    assert!(
+        !comparison.has_regressions(),
+        "{}",
+        comparison.to_markdown()
+    );
+    let second = run();
+    assert_eq!(second.code, 0, "{second:?}");
+    assert_eq!(text, std::fs::read_to_string(&report_path).unwrap());
+}
+
+#[test]
+fn hybrid_refuses_a_server_without_pgvector() {
+    let Ok(admin) = std::env::var("KNOWELL_TEST_PLAIN_DATABASE_URL") else {
+        eprintln!("skipping eval::hybrid_plain: KNOWELL_TEST_PLAIN_DATABASE_URL is not set");
+        return;
+    };
+    let mut sb = Sandbox::new();
+    sb.set_env("KNOWELL_EVAL_TEST_DB", &admin);
+    let result = sb.run(&[
+        "eval",
+        "run",
+        "--retriever",
+        "hybrid",
+        "--database-url",
+        "env:KNOWELL_EVAL_TEST_DB",
+    ]);
+    assert_eq!(result.code, 2, "{result:?}");
+    assert!(result.stderr.contains("requires pgvector"));
+}

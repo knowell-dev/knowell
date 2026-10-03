@@ -42,6 +42,7 @@ reqwest = { workspace = true, features = ["rustls"] }
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sqlx.workspace = true
 tempfile.workspace = true
 time.workspace = true
 tokio.workspace = true
