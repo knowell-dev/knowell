@@ -19,13 +19,24 @@ pub(crate) struct Env {
     pub(crate) home: PathBuf,
     /// The engine configuration file (`--config` or `$KNOWELL_HOME/config.toml`).
     pub(crate) engine_config: PathBuf,
+    /// Explicit opt-in to the bounded persisted parse-product experiment.
+    pub(crate) parse_cache: bool,
+    /// Most lexical spans per file; the default 1 preserves baseline retrieval.
+    pub(crate) lexical_spans: u8,
+    /// An explicitly selected engine file, retained for connected launchers.
+    engine_config_flag: Option<PathBuf>,
     /// `--workspace`, if given.
     workspace_flag: Option<PathBuf>,
+    /// Whether the caller selected a non-default home through the environment.
+    home_override: bool,
+    /// Relative homes cannot retain their meaning across client working directories.
+    relative_home_override: bool,
 }
 
 impl Env {
     pub(crate) fn from_globals(global: &GlobalArgs) -> anyhow::Result<Self> {
         let home = knowell_home()?;
+        let home_override = std::env::var_os("KNOWELL_HOME").filter(|value| !value.is_empty());
         let engine_config = global
             .engine_config
             .clone()
@@ -33,8 +44,68 @@ impl Env {
         Ok(Self {
             home,
             engine_config,
+            parse_cache: global.parse_cache,
+            lexical_spans: global.lexical_spans,
+            engine_config_flag: global.engine_config.clone(),
             workspace_flag: global.workspace_file.clone(),
+            home_override: home_override.is_some(),
+            relative_home_override: home_override
+                .as_deref()
+                .is_some_and(|value| !Path::new(value).is_absolute()),
         })
+    }
+
+    /// Explicit workspace selection; discovery remains relative to each invocation.
+    pub(crate) fn explicit_workspace(&self) -> Option<&Path> {
+        self.workspace_flag.as_deref()
+    }
+
+    /// Whether the user explicitly selected the engine configuration.
+    pub(crate) fn has_explicit_engine_config(&self) -> bool {
+        self.engine_config_flag.is_some()
+    }
+
+    /// Whether connected clients must forward `KNOWELL_HOME` by name.
+    pub(crate) fn has_home_override(&self) -> bool {
+        self.home_override
+    }
+
+    /// Global arguments needed to preserve explicit selections across client working directories.
+    /// Defaults are omitted so project-scoped configuration remains portable.
+    pub(crate) fn connection_args(&self) -> anyhow::Result<Vec<String>> {
+        if self.relative_home_override {
+            bail!(
+                "connected clients may use a different working directory; set KNOWELL_HOME to an absolute path before connecting"
+            );
+        }
+        let mut args = Vec::new();
+        if self.parse_cache {
+            args.push("--parse-cache".to_owned());
+        }
+        if self.lexical_spans != 1 {
+            args.push("--lexical-spans".to_owned());
+            args.push(self.lexical_spans.to_string());
+        }
+        if let Some(path) = &self.engine_config_flag {
+            args.push("--config".to_owned());
+            let path = absolute(path)?;
+            args.push(
+                path.to_str()
+                    .context("the selected engine configuration path must be valid utf-8")?
+                    .to_owned(),
+            );
+        }
+        if let Some(path) = &self.workspace_flag {
+            let path = find_workspace(Some(path))?
+                .context("the selected workspace file could not be located")?;
+            args.push("--workspace".to_owned());
+            args.push(
+                path.to_str()
+                    .context("the selected workspace path must be valid utf-8")?
+                    .to_owned(),
+            );
+        }
+        Ok(args)
     }
 
     /// The workspace file: `--workspace` if given (it must exist), else

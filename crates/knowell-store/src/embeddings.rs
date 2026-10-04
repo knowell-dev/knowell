@@ -122,6 +122,12 @@ pub struct NearestOptions {
     /// searches use pgvector's iterative index scan (`relaxed_order`) so the
     /// filter does not under-fill the result.
     pub scope: Option<Vec<GenerationPin>>,
+    /// Literal path prefixes admitted inside the scoped ANN query. Empty
+    /// admits all paths. Requires `scope`; '%' and '_' are not wildcards.
+    pub path_prefixes: Vec<String>,
+    /// Stored languages admitted inside the scoped ANN query. Empty admits
+    /// all languages. Requires `scope`.
+    pub languages: Vec<String>,
 }
 
 impl NearestOptions {
@@ -131,6 +137,8 @@ impl NearestOptions {
             k,
             ef_search: None,
             scope: None,
+            path_prefixes: Vec::new(),
+            languages: Vec::new(),
         }
     }
 }
@@ -617,13 +625,21 @@ fn nearest_sql(profile: &EmbeddingProfile, scoped: bool) -> String {
                                   AND f.valid_from = ci.file_valid_from
                JOIN pins p ON p.view_id = f.view_id AND f.valid_from <= p.generation
                           AND (f.valid_to IS NULL OR f.valid_to > p.generation)
+               JOIN content b ON b.organization_id = $5 AND b.hash = f.content_hash
                WHERE ci.prepared_input_hash = e.prepared_input_hash
+                 AND (cardinality($6::text[]) = 0 OR EXISTS (
+                      SELECT 1 FROM unnest($6::text[]) prefix WHERE starts_with(f.path, prefix)))
+                 AND (cardinality($7::text[]) = 0 OR f.language = ANY($7::text[]))
              ) OR EXISTS (
                SELECT 1 FROM chunk c
                JOIN file_version f ON f.content_hash = c.content_hash
                JOIN pins p ON p.view_id = f.view_id AND f.valid_from <= p.generation
                           AND (f.valid_to IS NULL OR f.valid_to > p.generation)
+               JOIN content b ON b.organization_id = $5 AND b.hash = f.content_hash
                WHERE c.organization_id = $5 AND c.prepared_input_hash = e.prepared_input_hash
+                 AND (cardinality($6::text[]) = 0 OR EXISTS (
+                      SELECT 1 FROM unnest($6::text[]) prefix WHERE starts_with(f.path, prefix)))
+                 AND (cardinality($7::text[]) = 0 OR f.language = ANY($7::text[]))
                  AND NOT EXISTS (SELECT 1 FROM chunk_input x
                                  WHERE x.view_id = f.view_id AND x.path = f.path
                                    AND x.file_valid_from = f.valid_from)
@@ -654,6 +670,13 @@ async fn with_search_settings<'c>(
     query: &[f32],
     options: &NearestOptions,
 ) -> Result<(sqlx::Transaction<'c, sqlx::Postgres>, String), StoreError> {
+    if options.scope.is_none()
+        && (!options.path_prefixes.is_empty() || !options.languages.is_empty())
+    {
+        return Err(StoreError::invalid(
+            "path and language filters require a generation scope",
+        ));
+    }
     require_available(conn).await?;
     check_vector(profile, query)?;
     if !(1..=MAX_K).contains(&options.k) {
@@ -705,7 +728,12 @@ pub async fn nearest(
         .bind(Vector::from(query.to_vec()))
         .bind(i64::from(options.k));
     if options.scope.is_some() {
-        q = q.bind(views).bind(generations).bind(profile.organization);
+        q = q
+            .bind(views)
+            .bind(generations)
+            .bind(profile.organization)
+            .bind(&options.path_prefixes)
+            .bind(&options.languages);
     }
     let rows = q.fetch_all(&mut *tx).await?;
     tx.commit().await?;
@@ -734,7 +762,12 @@ pub async fn explain_nearest(
             .bind(Vector::from(query.to_vec()))
             .bind(i64::from(options.k));
     if options.scope.is_some() {
-        q = q.bind(views).bind(generations).bind(profile.organization);
+        q = q
+            .bind(views)
+            .bind(generations)
+            .bind(profile.organization)
+            .bind(&options.path_prefixes)
+            .bind(&options.languages);
     }
     let lines = q.fetch_all(&mut *tx).await?;
     tx.commit().await?;

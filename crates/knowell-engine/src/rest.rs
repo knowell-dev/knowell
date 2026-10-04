@@ -514,6 +514,8 @@ impl Engine {
                 projects,
                 languages: languages.clone(),
                 path_prefixes: request.path_prefix.iter().cloned().collect(),
+                kinds: Vec::new(),
+                sections: Vec::new(),
             };
             let run = self
                 .run_search(

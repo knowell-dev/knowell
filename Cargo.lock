@@ -3261,6 +3261,7 @@ dependencies = [
  "globset",
  "knowell-config",
  "knowell-core",
+ "knowell-secrets",
  "pretty_assertions",
  "serde",
  "serde_json",
@@ -3288,6 +3289,7 @@ name = "knowell-store"
 version = "0.0.0"
 dependencies = [
  "knowell-core",
+ "knowell-parse",
  "pgvector",
  "secrecy",
  "serde",

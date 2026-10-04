@@ -18,9 +18,49 @@ fn response(lines: &mut Lines, id: u64) -> serde_json::Value {
 
 #[test]
 fn initialize_list_and_call_over_stdio() {
+    stdio_session(&["mcp"], knowell_mcp::OutputMode::Source);
+}
+
+#[test]
+fn source_stdio_flag_omits_read_schemas_and_preserves_errors() {
+    stdio_session(
+        &["mcp", "--output-mode", "source"],
+        knowell_mcp::OutputMode::Source,
+    );
+}
+
+#[test]
+fn full_stdio_flag_preserves_typed_read_schemas() {
+    stdio_session(
+        &["mcp", "--output-mode", "full"],
+        knowell_mcp::OutputMode::Full,
+    );
+}
+
+#[test]
+fn compact_stdio_flag_changes_read_schemas_and_preserves_errors() {
+    stdio_session(
+        &["mcp", "--output-mode", "compact"],
+        knowell_mcp::OutputMode::Compact,
+    );
+}
+
+#[test]
+fn mcp_output_mode_rejects_unknown_values_before_starting() {
+    let sb = Sandbox::new();
+    let result = sb.run(&["mcp", "--output-mode", "unknown"]);
+    assert_eq!(result.code, 2, "{result:?}");
+    assert!(result.stderr.contains("--output-mode"), "{result:?}");
+    assert!(result.stderr.contains("full"), "{result:?}");
+    assert!(result.stderr.contains("compact"), "{result:?}");
+    assert!(result.stderr.contains("source"), "{result:?}");
+    assert!(result.stdout.is_empty(), "{result:?}");
+}
+
+fn stdio_session(args: &[&str], mode: knowell_mcp::OutputMode) {
     let sb = Sandbox::new();
     let mut child = sb
-        .command(&["mcp"])
+        .command(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -50,6 +90,25 @@ fn initialize_list_and_call_over_stdio() {
     let list = response(&mut lines, 2);
     let tools = list["result"]["tools"].as_array().unwrap();
     assert_eq!(tools.len(), 14, "{list}");
+    for tool in tools {
+        let name = tool["name"].as_str().unwrap();
+        let read_only = knowell_mcp::ToolName::parse(name).unwrap().is_read_only();
+        if mode == knowell_mcp::OutputMode::Source && read_only {
+            assert!(tool.get("outputSchema").is_none(), "{name}: {tool}");
+            continue;
+        }
+        let properties = tool["outputSchema"]["properties"].as_object().unwrap();
+        if mode == knowell_mcp::OutputMode::Compact && read_only {
+            assert_eq!(properties.len(), 1, "{name}");
+            assert_eq!(properties["text"]["type"], "string", "{name}");
+            assert_eq!(
+                tool["outputSchema"]["required"],
+                serde_json::json!(["text"])
+            );
+        } else {
+            assert!(!properties.contains_key("text"), "{name}");
+        }
+    }
     let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     names.sort_unstable();
     for expected in [
@@ -67,6 +126,7 @@ fn initialize_list_and_call_over_stdio() {
     }));
     let call = response(&mut lines, 3);
     assert_eq!(call["result"]["isError"], true, "{call}");
+    assert!(call["result"].get("structuredContent").is_none(), "{call}");
     let text = call["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("not_ready"), "{text}");
     // No database in this isolated home: the tools say so instead of guessing.

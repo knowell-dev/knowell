@@ -459,11 +459,11 @@ or guarantee a billing total.
 
 ### 9.4 Model-written descriptions ("code meanings")
 
-Short descriptions of symbols or modules can be produced by a separate generative model.
-They are stored with evidence and version, indexed as separate vectors, and become stale
-when the source changes. Whether this is on by default is undecided; the panel shows a cost
-estimate before anything runs. A connected agent can also propose descriptions through
-`write_memory`.
+The retrieval and source-context pipeline does not call a generative model. Embeddings
+retrieve candidate regions; deterministic source analysis and selection return actual
+redacted source bytes. The connected coding agent reasons about those bytes. Agent-written
+descriptions may be proposed separately through `write_memory`, with evidence and version;
+they are not a prerequisite for source retrieval or an automatically generated fact graph.
 
 ### 9.5 Optional rerankers
 
@@ -488,8 +488,25 @@ Pipeline:
 6. **Graph expansion:** callers, types, tests, contracts, documents; bounded by depth,
    edge type, and budget.
 7. **Optional reranking** of the short list only.
-8. **Context packing:** signatures and skeletons first, deduplication, source citations,
-   uncertainties, and what is missing.
+8. **Source context:** retrieve bodies at the pinned version, preserve fitting declarations,
+   and choose bounded query-centered regions from larger ones. Select complementary actual
+   source under a whole-response budget, with same-occurrence overlap removal and explicit
+   source omissions. No heuristic certifies that an arbitrary task has all its evidence.
+
+The default MCP `source` mode presents one text response containing actual code, documents
+and tests, shared version provenance, accurate displayed ranges and version-bound fetch
+continuations. It does not duplicate the bodies in structured content. `full` and `compact`
+remain explicit diagnostic/compatibility modes. Normal `search` and `build_context` use the
+body-only source selector; the earlier named research selectors remain available explicitly.
+Budgets include rendered headers, source fences, handles and limitation text. Token counts
+are byte-based estimates; the renderer also enforces a hard UTF-8 byte cap without silently
+cutting a source body.
+
+Search reads generation metadata in keyset pages and hydrates only admitted source paths.
+This removes generation-wide body reads and parsing from the ordinary search path, but the
+metadata/relationship catalog still occupies memory proportional to the generation. Full
+graph and inspection tools retain their complete snapshot path. Distributed partitioning,
+arbitrary-size catalogs and billion-line capacity are not established by this implementation.
 
 **Explainability:** each result says why it came (exact symbol / semantic / "this test
 references this function" / graph path). An empty result says why ("project not indexed",

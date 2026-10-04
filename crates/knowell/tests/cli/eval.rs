@@ -74,6 +74,32 @@ fn hybrid_requires_an_explicit_secret_reference_without_echoing_values() {
 }
 
 #[test]
+fn lexical_span_experiment_requires_an_engine_retriever_before_creating_reports() {
+    let sb = Sandbox::new();
+    let fixture = sb.work().join("not-generated");
+    let report = sb.work().join("not-written.json");
+    let out = sb.run(&[
+        "--lexical-spans",
+        "3",
+        "eval",
+        "run",
+        "--retriever",
+        "grep",
+        "--keep",
+        fixture.to_str().unwrap(),
+        "--json",
+        report.to_str().unwrap(),
+    ]);
+    assert_eq!(out.code, 2, "{out:?}");
+    assert!(
+        out.stderr
+            .contains("--lexical-spans requires --retriever hybrid")
+    );
+    assert!(!fixture.exists());
+    assert!(!report.exists());
+}
+
+#[test]
 fn hybrid_cli_measures_all_retrievers_reproducibly() {
     let Some(admin) = crate::common::admin_url("eval::hybrid") else {
         return;
@@ -100,6 +126,13 @@ fn hybrid_cli_measures_all_retrievers_reproducibly() {
     let first = run();
     assert_eq!(first.code, 0, "{first:?}");
     let text = std::fs::read_to_string(&report_path).unwrap();
+    let conditions: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(conditions["engine_retrieval"]["lexical_spans_per_file"], 1);
+    assert!(
+        first
+            .stdout
+            .contains("Lexical spans per pinned file: 1 (default)")
+    );
     let report = knowell_eval::Report::from_json(&text).unwrap();
     assert_eq!(report.retrievers.len(), 3);
     assert!(

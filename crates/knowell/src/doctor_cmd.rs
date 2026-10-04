@@ -581,11 +581,19 @@ fn agents_check(env: &Env) -> Check {
             return Check::warn(NAME, format!("not checked: {err:#}"), "set HOME");
         }
     };
+    let mut launcher = ConnectOptions::new(&home, &project);
+    if let Err(err) = connect_cmd::configure_launcher(env, &mut launcher) {
+        return Check::warn(
+            NAME,
+            format!("not checked: {err:#}"),
+            "check the selected engine and workspace paths",
+        );
+    }
     let mut connected = Vec::new();
     let mut problems = Vec::new();
     for client in [Client::Claude, Client::Codex, Client::Cursor] {
         for (scope, label) in [(Scope::Project, "project"), (Scope::User, "user")] {
-            let mut opts = ConnectOptions::new(&home, &project);
+            let mut opts = launcher.clone();
             opts.scope = scope;
             opts.dry_run = true;
             match knowell_setup::connect(client, &opts) {
@@ -607,10 +615,13 @@ fn agents_check(env: &Env) -> Check {
     if connected.is_empty() {
         Check::warn(
             NAME,
-            "no agent client is connected",
-            "run `know connect claude` (or codex, cursor)",
+            "no agent client has the current source-output connection settings",
+            "run or repeat `know connect claude` (or codex, cursor)",
         )
     } else {
-        Check::ok(NAME, format!("connected: {}", connected.join(", ")))
+        Check::ok(
+            NAME,
+            format!("source-output settings ready: {}", connected.join(", ")),
+        )
     }
 }

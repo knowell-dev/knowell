@@ -15,6 +15,7 @@ mod common;
 mod audit;
 mod connect;
 mod content;
+mod content_structure;
 mod embeddings;
 mod graph;
 mod hierarchy;

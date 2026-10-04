@@ -50,6 +50,33 @@ pub const META_EVIDENCE: &str = "knowell/evidence";
 /// `_meta` key carrying the instruction-like flags of resource contents.
 pub const META_INSTRUCTION_LIKE: &str = "knowell/instructionLike";
 
+/// Presentation of successful MCP tool results for one server instance.
+///
+/// The mode is static for the server and its clones. Clients must refresh
+/// the tool catalogue after changing it because output schemas differ.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OutputMode {
+    /// Source-centered text for read tools, without duplicate structured content.
+    /// Write receipts retain their full typed outputs.
+    #[default]
+    Source,
+    /// Full typed outputs, with the existing short text rendering.
+    Full,
+    /// Read tools return only the rendering in a structured `text` field.
+    /// Write receipts retain their full typed outputs.
+    Compact,
+}
+
+impl OutputMode {
+    fn compacts(self, tool: ToolName) -> bool {
+        self == Self::Compact && tool.is_read_only()
+    }
+
+    fn sources(self, tool: ToolName) -> bool {
+        self == Self::Source && tool.is_read_only()
+    }
+}
+
 /// MCP server for a [`KnowellTools`] engine.
 ///
 /// The server holds no per-session selection: every call carries its own
@@ -58,6 +85,7 @@ pub struct KnowellServer<T> {
     tools: Arc<T>,
     resolver: Arc<dyn CallerResolver>,
     transport: TransportKind,
+    output_mode: OutputMode,
 }
 
 impl<T> Clone for KnowellServer<T> {
@@ -66,6 +94,7 @@ impl<T> Clone for KnowellServer<T> {
             tools: Arc::clone(&self.tools),
             resolver: Arc::clone(&self.resolver),
             transport: self.transport,
+            output_mode: self.output_mode,
         }
     }
 }
@@ -78,12 +107,22 @@ impl<T: KnowellTools> KnowellServer<T> {
             tools,
             resolver: Arc::new(LocalOnly),
             transport: TransportKind::Stdio,
+            output_mode: OutputMode::default(),
         }
     }
 
     /// Replaces the caller resolver (the authentication seam).
     pub fn with_caller_resolver(mut self, resolver: Arc<dyn CallerResolver>) -> Self {
         self.resolver = resolver;
+        self
+    }
+
+    /// Selects the static output format for this server and its clones.
+    ///
+    /// Source is the default. Read-tool schemas and results change together;
+    /// mutation receipts and resource contents are unchanged.
+    pub fn with_output_mode(mut self, mode: OutputMode) -> Self {
+        self.output_mode = mode;
         self
     }
 
@@ -118,77 +157,88 @@ impl<T: KnowellTools> KnowellServer<T> {
         caller: &Caller,
     ) -> Result<Rendered, ToolError> {
         let tools = &*self.tools;
+        let mode = if tool.is_read_only() {
+            self.output_mode
+        } else {
+            OutputMode::Full
+        };
         match tool {
             ToolName::OpenWorkspace => {
-                invoke::<OpenWorkspaceInput, _, _, _>(arguments, |input| {
+                invoke::<OpenWorkspaceInput, _, _, _>(arguments, mode, |input| {
                     tools.open_workspace(caller, input)
                 })
                 .await
             }
             ToolName::Search => {
-                invoke::<SearchInput, _, _, _>(arguments, |input| tools.search(caller, input)).await
+                invoke::<SearchInput, _, _, _>(arguments, mode, |input| tools.search(caller, input))
+                    .await
             }
             ToolName::Fetch => {
-                invoke::<FetchInput, _, _, _>(arguments, |input| tools.fetch(caller, input)).await
+                invoke::<FetchInput, _, _, _>(arguments, mode, |input| tools.fetch(caller, input))
+                    .await
             }
             ToolName::InspectSymbol => {
-                invoke::<InspectSymbolInput, _, _, _>(arguments, |input| {
+                invoke::<InspectSymbolInput, _, _, _>(arguments, mode, |input| {
                     tools.inspect_symbol(caller, input)
                 })
                 .await
             }
             ToolName::TraceFlow => {
-                invoke::<TraceFlowInput, _, _, _>(arguments, |input| {
+                invoke::<TraceFlowInput, _, _, _>(arguments, mode, |input| {
                     tools.trace_flow(caller, input)
                 })
                 .await
             }
             ToolName::AnalyzeImpact => {
-                invoke::<AnalyzeImpactInput, _, _, _>(arguments, |input| {
+                invoke::<AnalyzeImpactInput, _, _, _>(arguments, mode, |input| {
                     tools.analyze_impact(caller, input)
                 })
                 .await
             }
             ToolName::Contracts => {
-                invoke::<ContractsInput, _, _, _>(arguments, |input| tools.contracts(caller, input))
-                    .await
+                invoke::<ContractsInput, _, _, _>(arguments, mode, |input| {
+                    tools.contracts(caller, input)
+                })
+                .await
             }
             ToolName::BuildContext => {
-                invoke::<BuildContextInput, _, _, _>(arguments, |input| {
+                invoke::<BuildContextInput, _, _, _>(arguments, mode, |input| {
                     tools.build_context(caller, input)
                 })
                 .await
             }
             ToolName::History => {
-                invoke::<HistoryInput, _, _, _>(arguments, |input| tools.history(caller, input))
-                    .await
+                invoke::<HistoryInput, _, _, _>(arguments, mode, |input| {
+                    tools.history(caller, input)
+                })
+                .await
             }
             ToolName::ReadMemory => {
-                invoke::<ReadMemoryInput, _, _, _>(arguments, |input| {
+                invoke::<ReadMemoryInput, _, _, _>(arguments, mode, |input| {
                     tools.read_memory(caller, input)
                 })
                 .await
             }
             ToolName::WriteMemory => {
-                invoke::<WriteMemoryInput, _, _, _>(arguments, |input| {
+                invoke::<WriteMemoryInput, _, _, _>(arguments, mode, |input| {
                     tools.write_memory(caller, input)
                 })
                 .await
             }
             ToolName::ResumeTask => {
-                invoke::<ResumeTaskInput, _, _, _>(arguments, |input| {
+                invoke::<ResumeTaskInput, _, _, _>(arguments, mode, |input| {
                     tools.resume_task(caller, input)
                 })
                 .await
             }
             ToolName::SaveCheckpoint => {
-                invoke::<SaveCheckpointInput, _, _, _>(arguments, |input| {
+                invoke::<SaveCheckpointInput, _, _, _>(arguments, mode, |input| {
                     tools.save_checkpoint(caller, input)
                 })
                 .await
             }
             ToolName::IndexStatus => {
-                invoke::<IndexStatusInput, _, _, _>(arguments, |input| {
+                invoke::<IndexStatusInput, _, _, _>(arguments, mode, |input| {
                     tools.index_status(caller, input)
                 })
                 .await
@@ -248,14 +298,25 @@ impl<T: KnowellTools> KnowellServer<T> {
     }
 }
 
+/// The complete structured read result in compact mode.
+#[derive(serde::Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CompactReadOutput {
+    text: String,
+}
+
 /// A rendered tool result: structured content plus text.
 struct Rendered {
-    structured: Value,
+    structured: Option<Value>,
     text: String,
 }
 
 /// Deserialises, validates, runs and renders one tool call.
-async fn invoke<I, O, F, Fut>(arguments: JsonObject, run: F) -> Result<Rendered, ToolError>
+async fn invoke<I, O, F, Fut>(
+    arguments: JsonObject,
+    mode: OutputMode,
+    run: F,
+) -> Result<Rendered, ToolError>
 where
     I: DeserializeOwned + Validate,
     O: ToolOutput,
@@ -269,12 +330,24 @@ where
     if output.ensure_explained() {
         tracing::warn!("engine returned an empty or pending result without a gap; added one");
     }
-    let structured = serde_json::to_value(&output)
-        .map_err(|error| ToolError::internal(format!("cannot serialize tool output: {error}")))?;
-    Ok(Rendered {
-        structured,
-        text: output.render(),
-    })
+    let text = if mode == OutputMode::Source {
+        output.render_source()
+    } else {
+        output.render()
+    };
+    // Both output channels use the same rendering in compact mode. Clients
+    // may serialize structuredContent into the model's context instead of
+    // exposing TextContent, so keeping the full DTO there defeats compaction.
+    let structured = match mode {
+        OutputMode::Source => None,
+        OutputMode::Compact => Some(serde_json::to_value(CompactReadOutput {
+            text: text.clone(),
+        })),
+        OutputMode::Full => Some(serde_json::to_value(&output)),
+    }
+    .transpose()
+    .map_err(|error| ToolError::internal(format!("cannot serialize tool output: {error}")))?;
+    Ok(Rendered { structured, text })
 }
 
 /// The MCP tool definition of one tool: schemas, description and annotations.
@@ -282,41 +355,61 @@ where
 /// Returns an error only if a schema is not an object schema, which the
 /// crate's tests rule out.
 pub fn tool_definition(tool: ToolName) -> Result<Tool, String> {
-    fn build<I, O>(tool: ToolName) -> Result<Tool, String>
+    tool_definition_with_mode(tool, OutputMode::Full)
+}
+
+fn tool_definition_with_mode(tool: ToolName, mode: OutputMode) -> Result<Tool, String> {
+    fn build<I, O>(tool: ToolName, mode: OutputMode) -> Result<Tool, String>
     where
         I: JsonSchema + 'static,
         O: JsonSchema + 'static,
     {
         let mut input = schema_for_input::<I>()?.as_ref().clone();
         schema::compact_input(&mut input);
-        let mut output = schema_for_output::<O>().as_ref().clone();
-        schema::compact_output(&mut output);
-        Ok(Tool::new(tool.as_str(), tool.description(), input)
+        let definition = Tool::new(tool.as_str(), tool.description(), input)
             .with_title(tool.title())
-            .with_raw_output_schema(Arc::new(output))
-            .with_annotations(tool.annotations()))
+            .with_annotations(tool.annotations());
+        if mode.sources(tool) {
+            // MCP output schemas describe structuredContent, which source mode
+            // deliberately omits rather than presenting the text twice.
+            return Ok(definition);
+        }
+        let mut output = if mode.compacts(tool) {
+            schema_for_output::<CompactReadOutput>().as_ref().clone()
+        } else {
+            schema_for_output::<O>().as_ref().clone()
+        };
+        schema::compact_output(&mut output);
+        Ok(definition.with_raw_output_schema(Arc::new(output)))
     }
     match tool {
-        ToolName::OpenWorkspace => build::<OpenWorkspaceInput, OpenWorkspaceOutput>(tool),
-        ToolName::Search => build::<SearchInput, SearchOutput>(tool),
-        ToolName::Fetch => build::<FetchInput, FetchOutput>(tool),
-        ToolName::InspectSymbol => build::<InspectSymbolInput, InspectSymbolOutput>(tool),
-        ToolName::TraceFlow => build::<TraceFlowInput, TraceFlowOutput>(tool),
-        ToolName::AnalyzeImpact => build::<AnalyzeImpactInput, AnalyzeImpactOutput>(tool),
-        ToolName::Contracts => build::<ContractsInput, ContractsOutput>(tool),
-        ToolName::BuildContext => build::<BuildContextInput, BuildContextOutput>(tool),
-        ToolName::History => build::<HistoryInput, HistoryOutput>(tool),
-        ToolName::ReadMemory => build::<ReadMemoryInput, ReadMemoryOutput>(tool),
-        ToolName::WriteMemory => build::<WriteMemoryInput, WriteMemoryOutput>(tool),
-        ToolName::ResumeTask => build::<ResumeTaskInput, ResumeTaskOutput>(tool),
-        ToolName::SaveCheckpoint => build::<SaveCheckpointInput, SaveCheckpointOutput>(tool),
-        ToolName::IndexStatus => build::<IndexStatusInput, IndexStatusOutput>(tool),
+        ToolName::OpenWorkspace => build::<OpenWorkspaceInput, OpenWorkspaceOutput>(tool, mode),
+        ToolName::Search => build::<SearchInput, SearchOutput>(tool, mode),
+        ToolName::Fetch => build::<FetchInput, FetchOutput>(tool, mode),
+        ToolName::InspectSymbol => build::<InspectSymbolInput, InspectSymbolOutput>(tool, mode),
+        ToolName::TraceFlow => build::<TraceFlowInput, TraceFlowOutput>(tool, mode),
+        ToolName::AnalyzeImpact => build::<AnalyzeImpactInput, AnalyzeImpactOutput>(tool, mode),
+        ToolName::Contracts => build::<ContractsInput, ContractsOutput>(tool, mode),
+        ToolName::BuildContext => build::<BuildContextInput, BuildContextOutput>(tool, mode),
+        ToolName::History => build::<HistoryInput, HistoryOutput>(tool, mode),
+        ToolName::ReadMemory => build::<ReadMemoryInput, ReadMemoryOutput>(tool, mode),
+        ToolName::WriteMemory => build::<WriteMemoryInput, WriteMemoryOutput>(tool, mode),
+        ToolName::ResumeTask => build::<ResumeTaskInput, ResumeTaskOutput>(tool, mode),
+        ToolName::SaveCheckpoint => build::<SaveCheckpointInput, SaveCheckpointOutput>(tool, mode),
+        ToolName::IndexStatus => build::<IndexStatusInput, IndexStatusOutput>(tool, mode),
     }
 }
 
 /// Every tool definition, in catalog order.
 pub fn tool_definitions() -> Result<Vec<Tool>, String> {
-    ToolName::ALL.into_iter().map(tool_definition).collect()
+    tool_definitions_with_mode(OutputMode::Full)
+}
+
+fn tool_definitions_with_mode(mode: OutputMode) -> Result<Vec<Tool>, String> {
+    ToolName::ALL
+        .into_iter()
+        .map(|tool| tool_definition_with_mode(tool, mode))
+        .collect()
 }
 
 /// The single resource template (versioned files).
@@ -359,7 +452,7 @@ impl<T: KnowellTools> ServerHandler for KnowellServer<T> {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        let tools = tool_definitions().map_err(|error| {
+        let tools = tool_definitions_with_mode(self.output_mode).map_err(|error| {
             tracing::error!(%error, "invalid tool schema");
             ErrorData::internal_error("tool definitions are unavailable", None)
         })?;
@@ -369,7 +462,8 @@ impl<T: KnowellTools> ServerHandler for KnowellServer<T> {
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        ToolName::parse(name).and_then(|tool| tool_definition(tool).ok())
+        ToolName::parse(name)
+            .and_then(|tool| tool_definition_with_mode(tool, self.output_mode).ok())
     }
 
     async fn call_tool(
@@ -399,11 +493,14 @@ impl<T: KnowellTools> ServerHandler for KnowellServer<T> {
         let result = match outcome {
             Ok(rendered) => {
                 tracing::debug!(tool = tool.as_str(), request = %label, elapsed_ms, "tool call succeeded");
-                // `structured` also sets a JSON text block; the short
-                // rendering replaces it so the text is not a second copy.
-                let mut result = CallToolResult::structured(rendered.structured);
-                result.content = vec![ContentBlock::text(rendered.text)];
-                result
+                let content = vec![ContentBlock::text(rendered.text)];
+                if let Some(structured) = rendered.structured {
+                    let mut result = CallToolResult::structured(structured);
+                    result.content = content;
+                    result
+                } else {
+                    CallToolResult::success(content)
+                }
             }
             Err(error) => {
                 match &error {

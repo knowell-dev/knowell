@@ -15,8 +15,10 @@ pub const BACKUP_SUFFIX: &str = ".knowell-bak";
 pub struct FileDiff {
     /// The file the diff applies to.
     pub path: PathBuf,
-    /// Unified diff text (`---`/`+++` headers, one hunk). A new file diffs
-    /// against empty text; a removed file diffs to empty text.
+    /// Display-only unified diff text (`---`/`+++` headers, one hunk).
+    /// Configuration values are redacted and JSON/TOML may be normalized;
+    /// this is not an exact patch to apply to the original file.
+    /// A new file diffs against empty text; a removed file diffs to empty text.
     pub diff: String,
 }
 
@@ -146,9 +148,193 @@ fn write_atomic(path: &Path, text: &str) -> Result<(), SetupError> {
     })
 }
 
-/// Single-hunk unified diff: the common head and tail are trimmed, up to two
-/// lines of context are kept on each side.
+const DISPLAY_REDACTION: &str = "[REDACTED:config]";
+const DISPLAY_MAX_DEPTH: usize = 64;
+
+fn normalized_key(key: &str) -> String {
+    key.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|character| character.to_ascii_lowercase())
+        .collect()
+}
+
+fn sensitive_field(key: &str) -> bool {
+    [
+        "password",
+        "passwd",
+        "secret",
+        "token",
+        "apikey",
+        "privatekey",
+        "credential",
+        "credentials",
+    ]
+    .iter()
+    .any(|suffix| key.ends_with(suffix))
+        || matches!(
+            key,
+            "authorization" | "proxyauthorization" | "cookie" | "setcookie"
+        )
+}
+
+fn sensitive_map(key: &str) -> bool {
+    matches!(
+        key,
+        "env" | "environment" | "envvars" | "headers" | "httpheaders"
+    )
+}
+
+fn environment_name(name: &str) -> bool {
+    let mut characters = name.chars();
+    characters
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
+}
+
+fn mask_json_payload(value: &mut serde_json::Value, depth: usize) {
+    if depth >= DISPLAY_MAX_DEPTH {
+        *value = serde_json::Value::String(DISPLAY_REDACTION.to_owned());
+        return;
+    }
+    match value {
+        serde_json::Value::Object(values) => {
+            for value in values.values_mut() {
+                mask_json_payload(value, depth + 1);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                mask_json_payload(value, depth + 1);
+            }
+        }
+        _ => *value = serde_json::Value::String(DISPLAY_REDACTION.to_owned()),
+    }
+}
+
+fn safe_json(value: &mut serde_json::Value, depth: usize) {
+    if depth >= DISPLAY_MAX_DEPTH {
+        *value = serde_json::Value::String(DISPLAY_REDACTION.to_owned());
+        return;
+    }
+    match value {
+        serde_json::Value::Object(values) => {
+            for (key, value) in values {
+                let key = normalized_key(key);
+                let names = key == "envvars"
+                    && value.as_array().is_some_and(|values| {
+                        values
+                            .iter()
+                            .all(|value| value.as_str().is_some_and(environment_name))
+                    });
+                if sensitive_field(&key) || (sensitive_map(&key) && !names) {
+                    mask_json_payload(value, depth + 1);
+                } else {
+                    safe_json(value, depth + 1);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                safe_json(value, depth + 1);
+            }
+        }
+        serde_json::Value::String(text) => *text = knowell_secrets::redact(text).text,
+        _ => {}
+    }
+}
+
+fn mask_toml_payload(value: &mut toml::Value, depth: usize) {
+    if depth >= DISPLAY_MAX_DEPTH {
+        *value = toml::Value::String(DISPLAY_REDACTION.to_owned());
+        return;
+    }
+    match value {
+        toml::Value::Table(values) => {
+            for (_, value) in values.iter_mut() {
+                mask_toml_payload(value, depth + 1);
+            }
+        }
+        toml::Value::Array(values) => {
+            for value in values {
+                mask_toml_payload(value, depth + 1);
+            }
+        }
+        _ => *value = toml::Value::String(DISPLAY_REDACTION.to_owned()),
+    }
+}
+
+fn safe_toml(value: &mut toml::Value, depth: usize) {
+    if depth >= DISPLAY_MAX_DEPTH {
+        *value = toml::Value::String(DISPLAY_REDACTION.to_owned());
+        return;
+    }
+    match value {
+        toml::Value::Table(values) => {
+            for (key, value) in values {
+                let key = normalized_key(key);
+                let names = key == "envvars"
+                    && value.as_array().is_some_and(|values| {
+                        values
+                            .iter()
+                            .all(|value| value.as_str().is_some_and(environment_name))
+                    });
+                if sensitive_field(&key) || (sensitive_map(&key) && !names) {
+                    mask_toml_payload(value, depth + 1);
+                } else {
+                    safe_toml(value, depth + 1);
+                }
+            }
+        }
+        toml::Value::Array(values) => {
+            for value in values {
+                safe_toml(value, depth + 1);
+            }
+        }
+        toml::Value::String(text) => *text = knowell_secrets::redact(text).text,
+        _ => {}
+    }
+}
+
+/// The complete document supplies configuration context even when the changed
+/// hunk is far from its environment/header table. Parser failures never return
+/// original configuration bytes. Only this display copy is normalized.
+fn display_text(path: &Path, text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("");
+    let normalized = if extension.eq_ignore_ascii_case("json") {
+        match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(mut value) => {
+                safe_json(&mut value, 0);
+                serde_json::to_string_pretty(&value)
+                    .unwrap_or_else(|_| DISPLAY_REDACTION.to_owned())
+            }
+            Err(_) => DISPLAY_REDACTION.to_owned(),
+        }
+    } else if extension.eq_ignore_ascii_case("toml") {
+        match toml::from_str::<toml::Value>(text) {
+            Ok(mut value) => {
+                safe_toml(&mut value, 0);
+                toml::to_string_pretty(&value).unwrap_or_else(|_| DISPLAY_REDACTION.to_owned())
+            }
+            Err(_) => DISPLAY_REDACTION.to_owned(),
+        }
+    } else {
+        text.to_owned()
+    };
+    knowell_secrets::redact(&normalized).text
+}
+
+/// Display-safe single-hunk diff: sanitize complete documents first, trim the
+/// common head and tail, then keep up to two context lines on each side.
 pub(crate) fn unified_diff(path: &Path, before: &str, after: &str) -> String {
+    let before = display_text(path, before);
+    let after = display_text(path, after);
     let old: Vec<&str> = before.lines().collect();
     let new: Vec<&str> = after.lines().collect();
     let mut head = 0;
@@ -207,7 +393,7 @@ pub(crate) fn unified_diff(path: &Path, before: &str, after: &str) -> String {
         out.push_str(line);
         out.push('\n');
     }
-    out
+    knowell_secrets::redact(&out).text
 }
 
 /// Begin/end marker lines of a block Knowell owns inside a user file.
@@ -367,6 +553,97 @@ mod tests {
         assert!(created.contains("+one\n+two\n"));
         let removed = unified_diff(Path::new("f"), "one\n", "");
         assert!(removed.contains("-one\n"));
+    }
+
+    #[test]
+    fn json_display_masks_full_configuration_context_and_decoded_strings() {
+        let escaped_key = format!("ghp_{}", "\\u0041".repeat(36));
+        let before = format!(
+            r#"{{"mcpServers":{{"other":{{"command":"keep-command","args":["--literal","keep-argv"],"env":{{"SHORT":"zzq","ESCAPED":"CANARY_\u0045NV"}},"environment":{{"LOW_ENTROPY":"aaaaaaaa"}},"env_vars":{{"VALUE":"bbx"}},"headers":{{"Authorization":"ccc","X-Other":"ddd"}},"http_headers":{{"Anything":"eee"}},"apiKey":"fff","password":"ggg","access_token":"hhh","description":"{escaped_key}"}}}}}}"#
+        );
+        let mut after: serde_json::Value = serde_json::from_str(&before).unwrap();
+        after["mcpServers"]["other"]["args"] = serde_json::json!(["--literal", "updated-argv"]);
+        let diff = unified_diff(
+            Path::new("client.json"),
+            &before,
+            &serde_json::to_string(&after).unwrap(),
+        );
+        for value in [
+            "zzq",
+            "CANARY_ENV",
+            "aaaaaaaa",
+            "bbx",
+            "ccc",
+            "ddd",
+            "eee",
+            "fff",
+            "ggg",
+            "hhh",
+            escaped_key.as_str(),
+        ] {
+            assert!(
+                !diff.contains(value),
+                "display leaked a synthetic classified value"
+            );
+        }
+        assert!(!diff.contains(&format!("ghp_{}", "A".repeat(36))));
+        assert!(diff.contains("keep-argv") && diff.contains("updated-argv"));
+        let shown = display_text(Path::new("client.json"), &before);
+        assert!(shown.contains(DISPLAY_REDACTION));
+        assert!(shown.contains("keep-command") && shown.contains("--literal"));
+    }
+
+    #[test]
+    fn toml_display_masks_tables_literals_inlines_and_preserves_name_arrays() {
+        let before = "[mcp_servers.other]\ncommand = 'keep-command'\nargs = ['keep-argv']\nenv_vars = ['CANARY_ONE', 'CANARY_TWO']\napi_key = 'zzq'\nenv = { SHORT = 'bbx', ESCAPED = \"CANARY_\\u0045NV\" }\nheaders = { Authorization = 'ccc', 'X-Other' = 'ddd' }\n[mcp_servers.other.environment]\nVALUE = 'aaaaaaaa'\n[mcp_servers.other.http_headers]\nAuthorization = 'eee'\nAny = 'fff'\n";
+        let shown = display_text(Path::new("client.toml"), before);
+        for value in [
+            "zzq",
+            "bbx",
+            "CANARY_ENV",
+            "ccc",
+            "ddd",
+            "aaaaaaaa",
+            "eee",
+            "fff",
+        ] {
+            assert!(
+                !shown.contains(value),
+                "display leaked a synthetic classified value"
+            );
+        }
+        assert!(shown.contains("CANARY_ONE") && shown.contains("CANARY_TWO"));
+        assert!(shown.contains("keep-command") && shown.contains("keep-argv"));
+        let after = before.replace("'fff'", "'changedclassifiedvalue'");
+        assert!(
+            !unified_diff(Path::new("client.toml"), before, &after)
+                .contains("changedclassifiedvalue")
+        );
+    }
+
+    #[test]
+    fn malformed_configuration_has_no_raw_display_fallback() {
+        let hostile = "KNOWELL_CANARY_unparsed_config";
+        for filename in ["client.json", "client.toml"] {
+            let diff = unified_diff(Path::new(filename), hostile, &format!("{hostile} changed"));
+            assert!(!diff.contains(hostile));
+            assert_eq!(
+                display_text(Path::new(filename), hostile),
+                DISPLAY_REDACTION
+            );
+        }
+    }
+
+    #[test]
+    fn markdown_scan_covers_entire_private_key_before_hunk_trimming() {
+        let body = "KNOWELLCANARYPRIVATEKEYBASE64ONLY";
+        let before = format!(
+            "-----BEGIN PRIVATE KEY-----\n{body}\n-----END PRIVATE KEY-----\n\nold instruction\n"
+        );
+        let after = before.replace("old instruction", "new instruction");
+        let diff = unified_diff(Path::new("CLAUDE.md"), &before, &after);
+        assert!(!diff.contains(body));
+        assert!(diff.contains("old instruction") && diff.contains("new instruction"));
     }
 
     #[test]

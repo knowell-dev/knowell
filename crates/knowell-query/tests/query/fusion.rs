@@ -4,13 +4,14 @@
 use std::collections::BTreeSet;
 
 use knowell_query::{
-    Candidate, Glossary, GlossaryEntry, Layer, MatchDetail, OverlayPin, PathFilter, PathGlob,
-    QueryPlan, QueryScope, Reason, SearchConfig, SearchResponse, SourceKind, Sources, TermRelation,
-    ViewId, plan, search,
+    Candidate, CommitId, EdgeKind, EvidenceType, Glossary, GlossaryEntry, Layer, MatchDetail,
+    OverlayPin, PathFilter, PathGlob, QueryPlan, QueryScope, Reason, Resolution, SearchConfig,
+    SearchResponse, SourceKind, Sources, TermRelation, ViewId, plan, search,
 };
 
 use crate::common::{
-    COMMIT, FakeSource, approx, blob, hit, lang, name, no_expansion, path, pinned, scope, view,
+    COMMIT, FakeGraph, FakeSource, approx, blob, graph_node, hit, lang, name, neighbor,
+    no_expansion, path, pinned, scope, view,
 };
 
 use SourceKind::{Exact, Lexical, Semantic};
@@ -262,26 +263,230 @@ fn overlapping_hits_on_the_same_content_merge_keeping_best_ranks() {
 }
 
 #[test]
-fn identical_content_in_another_project_merges_into_the_stronger_hit() {
+fn identical_content_in_another_project_keeps_each_binding_and_its_pinned_evidence() {
     let p = plan("how is the invoice total calculated", &Glossary::default());
     let api = hit(Lexical, 1, "api", "src/pay.rs", (1, 40));
     let mut vendored = hit(Semantic, 1, "web", "vendor/pay.rs", (1, 40));
     vendored.content_hash = api.content_hash;
+    vendored.view = view("release");
+    vendored.generation = 7;
+    let release_commit = "abcdef0123456789abcdef0123456789abcdef01";
+    let mut query_scope = scope(&["api", "web"]);
+    let pin = &mut query_scope
+        .manifest
+        .projects
+        .get_mut(&name("web"))
+        .unwrap()
+        .base;
+    *pin = pinned("release", 7);
+    pin.commit = Some(CommitId::new(release_commit).unwrap());
     let response = run(
         &p,
-        &scope(&["api", "web"]),
-        [vec![], vec![api.clone()], vec![vendored]],
+        &query_scope,
+        [vec![], vec![api.clone()], vec![vendored.clone()]],
         &no_expansion(),
     );
-    assert_eq!(response.results.len(), 1);
-    let only = &response.results[0];
+    assert_eq!(response.results.len(), 2);
+    assert_eq!(response.stats.merged_duplicates, 0);
+    let stronger = &response.results[0];
     assert_eq!(
-        only.location.project,
+        stronger.location.project,
         name("web"),
         "semantic #1 outweighs lexical #1"
     );
-    assert_eq!(only.also_at, [api.location()]);
-    assert_eq!(only.score.sources.len(), 2);
+    assert_eq!(stronger.location, vendored.location());
+    assert_eq!(stronger.commit.as_ref().unwrap().as_str(), release_commit);
+    assert_eq!(stronger.score.sources.len(), 1);
+    assert_eq!(stronger.score.sources[0].source, Semantic);
+    assert!(matches!(
+        stronger.why.as_slice(),
+        [Reason::SemanticSimilarity { .. }]
+    ));
+    let original = &response.results[1];
+    assert_eq!(original.location, api.location());
+    assert_eq!(original.commit.as_ref().unwrap().as_str(), COMMIT);
+    assert_eq!(original.score.sources.len(), 1);
+    assert_eq!(original.score.sources[0].source, Lexical);
+    assert!(matches!(
+        original.why.as_slice(),
+        [Reason::LexicalTerms { .. }]
+    ));
+    assert!(
+        response
+            .results
+            .iter()
+            .all(|result| result.also_at.is_empty())
+    );
+    query_scope.projects = Some([name("api")].into());
+    let restricted = run(
+        &p,
+        &query_scope,
+        [vec![], vec![api.clone()], vec![vendored]],
+        &no_expansion(),
+    );
+    assert_eq!(restricted.results.len(), 1);
+    assert_eq!(restricted.results[0].location, api.location());
+    assert!(matches!(
+        restricted.results[0].why.as_slice(),
+        [Reason::LexicalTerms { .. }]
+    ));
+}
+
+#[test]
+fn identical_content_at_other_paths_keeps_occurrence_specific_exact_matches() {
+    let mut first = hit(Exact, 1, "api", "src/billing/apply.rs", (1, 4));
+    first.symbol = Some("Billing::apply".to_owned());
+    first.detail = MatchDetail::Exact {
+        term: "Billing::apply".to_owned(),
+        target: knowell_query::ExactTarget::Symbol,
+    };
+    let mut second = hit(Exact, 2, "api", "src/sandbox/apply.rs", (1, 4));
+    second.content_hash = first.content_hash;
+    second.symbol = Some("Sandbox::apply".to_owned());
+    second.detail = MatchDetail::Exact {
+        term: "Sandbox::apply".to_owned(),
+        target: knowell_query::ExactTarget::Symbol,
+    };
+    let response = run(
+        &plan("apply", &Glossary::default()),
+        &scope(&["api"]),
+        [vec![first.clone(), second.clone()], Vec::new(), Vec::new()],
+        &no_expansion(),
+    );
+    assert_eq!(response.results.len(), 2);
+    assert_eq!(response.stats.merged_duplicates, 0);
+    for candidate in [first, second] {
+        let result = response
+            .results
+            .iter()
+            .find(|result| result.location == candidate.location())
+            .unwrap();
+        assert_eq!(result.symbol, candidate.symbol);
+        let MatchDetail::Exact { term, target } = candidate.detail else {
+            panic!("exact fixture required")
+        };
+        assert_eq!(result.why, [Reason::ExactMatch { term, target }]);
+        assert!(result.also_at.is_empty());
+    }
+}
+
+#[test]
+fn identical_bodies_in_authorized_projects_remain_independent_graph_seeds() {
+    let mut api = hit(Lexical, 1, "api", "src/apply.rs", (1, 4));
+    api.symbol = Some("Api::apply".to_owned());
+    let mut web = hit(Lexical, 2, "web", "src/apply.rs", (1, 4));
+    web.content_hash = api.content_hash;
+    web.symbol = Some("Web::apply".to_owned());
+    let lexical = FakeSource::answering(vec![api, web]);
+    let mut graph = FakeGraph::default();
+    for (project, symbol) in [("api", "Api::apply"), ("web", "Web::apply")] {
+        let mut caller = graph_node(
+            project,
+            "src/local-caller.rs",
+            (1, 4),
+            &format!("{project}::local_caller"),
+        );
+        caller.location.content_hash = blob("identical synthetic caller bodies");
+        graph.add(
+            symbol,
+            neighbor(
+                caller,
+                EdgeKind::Caller,
+                EvidenceType::SemanticallyResolved,
+                Resolution::Resolved,
+            ),
+        );
+    }
+    let mut config = SearchConfig::default();
+    config.expansion.seeds = 2;
+    config.expansion.max_depth = 1;
+    let response = search(
+        &plan("who calls apply", &Glossary::default()),
+        &scope(&["api", "web"]),
+        &Sources {
+            lexical: Some(&lexical),
+            graph: Some(&graph),
+            ..Sources::default()
+        },
+        &config,
+    )
+    .unwrap();
+    assert_eq!(response.results.len(), 2);
+    assert_eq!(response.expanded.len(), 2);
+    assert_eq!(response.stats.expansion.requests, 2);
+    for expanded in &response.expanded {
+        let seed = response
+            .results
+            .iter()
+            .find(|result| result.rank == expanded.seed_rank)
+            .unwrap();
+        assert_eq!(expanded.location.project, seed.location.project);
+        assert_eq!(expanded.path.len(), 1);
+        assert_eq!(
+            expanded.path[0].evidence,
+            EvidenceType::SemanticallyResolved
+        );
+        assert_eq!(expanded.path[0].resolution, Resolution::Resolved);
+        assert!(expanded.why.iter().any(|reason| matches!(reason,
+            Reason::GraphPath {seed: location, ..} if *location == seed.location)));
+    }
+    assert_eq!(
+        response
+            .expanded
+            .iter()
+            .map(|item| item.location.project.clone())
+            .collect::<BTreeSet<_>>(),
+        [name("api"), name("web")].into()
+    );
+}
+
+#[test]
+fn overlapping_call_neighbors_in_the_same_pinned_occurrence_still_deduplicate() {
+    let mut seed = hit(Lexical, 1, "api", "src/subject.rs", (1, 4));
+    seed.symbol = Some("Subject::apply".to_owned());
+    let lexical = FakeSource::answering(vec![seed]);
+    let mut graph = FakeGraph::default();
+    for range in [(1, 4), (2, 3)] {
+        graph.add(
+            "Subject::apply",
+            neighbor(
+                graph_node("api", "src/caller.rs", range, "Caller::apply"),
+                EdgeKind::Caller,
+                EvidenceType::SemanticallyResolved,
+                Resolution::Resolved,
+            ),
+        );
+    }
+    let mut config = SearchConfig::default();
+    config.expansion.max_depth = 1;
+    let response = search(
+        &plan("who calls Subject::apply", &Glossary::default()),
+        &scope(&["api"]),
+        &Sources {
+            lexical: Some(&lexical),
+            graph: Some(&graph),
+            ..Sources::default()
+        },
+        &config,
+    )
+    .unwrap();
+    assert_eq!(response.expanded.len(), 1);
+    assert_eq!(
+        response.expanded[0]
+            .location
+            .range
+            .map(|range| (range.start(), range.end())),
+        Some((1, 4))
+    );
+    assert_eq!(response.stats.expansion.duplicates, 1);
+    assert_eq!(
+        response.expanded[0].path[0].evidence,
+        EvidenceType::SemanticallyResolved
+    );
+    assert_eq!(
+        response.expanded[0].path[0].resolution,
+        Resolution::Resolved
+    );
 }
 
 #[test]
@@ -373,6 +578,7 @@ fn scope_filters_drop_and_count_by_reason() {
     s.paths = PathFilter {
         include: vec![PathGlob::new("src/**").unwrap()],
         exclude: vec![PathGlob::new("**/generated/**").unwrap()],
+        ..PathFilter::default()
     };
     let mut typescript = hit(Lexical, 2, "api", "src/y.ts", (1, 5));
     typescript.language = Some(lang("typescript"));
@@ -404,6 +610,102 @@ fn scope_filters_drop_and_count_by_reason() {
         .map(|v| v.project.to_string())
         .collect();
     assert_eq!(searched, BTreeSet::from(["api".to_owned()]));
+}
+
+#[test]
+fn literal_prefixes_do_not_interpret_glob_or_sql_metacharacters() {
+    for (prefix, admitted, rejected) in [
+        ("src/*", "src/*literal.rs", "src/other.rs"),
+        ("src/?", "src/?literal.rs", "src/xliteral.rs"),
+        ("src/%", "src/%literal.rs", "src/anything.rs"),
+        ("src/_", "src/_literal.rs", "src/xliteral.rs"),
+    ] {
+        let filter = PathFilter {
+            prefixes: vec![prefix.into()],
+            ..PathFilter::default()
+        };
+        assert!(filter.admits(&path(admitted)), "{prefix}");
+        assert!(!filter.admits(&path(rejected)), "{prefix}");
+        assert!(!filter.is_unrestricted());
+    }
+}
+
+#[test]
+fn literal_prefixes_are_any_of_and_intersect_existing_glob_filters() {
+    let filter = PathFilter {
+        prefixes: vec!["src/lib".into(), "tests/unit/".into()],
+        include: vec![PathGlob::new("**/*.rs").unwrap()],
+        exclude: vec![PathGlob::new("**/generated/**").unwrap()],
+    };
+    assert!(
+        filter.admits(&path("src/library.rs")),
+        "partial filename prefix"
+    );
+    assert!(filter.admits(&path("tests/unit/case.rs")), "second prefix");
+    assert!(
+        !filter.admits(&path("tests/unitish/case.rs")),
+        "literal slash boundary"
+    );
+    assert!(!filter.admits(&path("src/lib.ts")), "include still applies");
+    assert!(
+        !filter.admits(&path("src/lib/generated/case.rs")),
+        "exclude still applies"
+    );
+    assert!(
+        !filter.admits(&path("src/other.rs")),
+        "prefix still applies"
+    );
+    assert!(!filter.admits(&path("Src/library.rs")), "case is exact");
+    let padded = PathFilter {
+        prefixes: vec![" src/".into()],
+        ..PathFilter::default()
+    };
+    assert!(
+        !padded.admits(&path("src/lib.rs")),
+        "query does not trim caller input"
+    );
+}
+
+#[test]
+fn old_serialized_path_filters_remain_compatible() {
+    let old = r#"{"include":[],"exclude":[]}"#;
+    let filter: PathFilter = serde_json::from_str(old).unwrap();
+    assert!(filter.prefixes.is_empty());
+    assert!(filter.is_unrestricted());
+    assert_eq!(serde_json::to_string(&filter).unwrap(), old);
+    let filtered = PathFilter {
+        prefixes: vec!["README".into()],
+        ..PathFilter::default()
+    };
+    let json = serde_json::to_string(&filtered).unwrap();
+    assert_eq!(serde_json::from_str::<PathFilter>(&json).unwrap(), filtered);
+    assert!(filtered.admits(&path("README.md")));
+    assert!(!filtered.admits(&path("docs/README.md")));
+}
+
+#[test]
+fn literal_prefix_rejections_are_counted_before_fusion_quota() {
+    let query = plan("how is the invoice total calculated", &Glossary::default());
+    let mut query_scope = scope(&["api"]);
+    query_scope.paths.prefixes = vec!["src/_".into()];
+    let mut config = no_expansion();
+    config.fusion.candidate_quota_per_project = Some(1);
+    let response = run(
+        &query,
+        &query_scope,
+        [
+            vec![],
+            vec![
+                hit(Lexical, 1, "api", "src/x.rs", (1, 5)),
+                hit(Lexical, 2, "api", "src/_wanted.rs", (1, 5)),
+            ],
+            vec![],
+        ],
+        &config,
+    );
+    assert_eq!(paths(&response), ["src/_wanted.rs"]);
+    assert_eq!(response.stats.dropped.path_filter, 1);
+    assert_eq!(response.stats.dropped.candidate_quota, 0);
 }
 
 #[test]

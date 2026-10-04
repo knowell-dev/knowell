@@ -5,13 +5,122 @@ use std::time::Duration;
 use knowell_core::ContentHash;
 use knowell_store::content::{self, NewContent};
 use knowell_store::embeddings::{self, NewEmbedding, NewEmbeddingProfile};
+use knowell_store::views::{self, GenerationPin};
 use knowell_store::{Store, StoreError};
 use sqlx::migrate::{Migrate, MigrateError, Migration, Migrator};
 use sqlx::{PgConnection, SqlSafeStr};
 
-use crate::common::{ENV, PLAIN_ENV, TestDb, fixture, name};
+use crate::common::{ENV, PLAIN_ENV, TestDb, fixture, name, path};
 
 static LEGACY: Migrator = sqlx::migrate!();
+
+#[tokio::test]
+async fn source_structure_upgrade_preserves_chunks_vectors_and_unknown_legacy_counts() {
+    let Some(db) = TestDb::unmigrated(module_path!(), ENV).await else {
+        return;
+    };
+    let old_migrations = LEGACY
+        .iter()
+        .filter(|migration| migration.version < 15)
+        .cloned()
+        .collect();
+    Migrator::with_migrations(old_migrations)
+        .run(db.store.pool())
+        .await
+        .unwrap();
+    let mut conn = db.conn().await;
+    let before = history(&mut conn).await;
+    let fx = fixture(&mut conn, "source-structure-upgrade").await;
+    let text = "pub fn synthetic() {}\n";
+    let hash = ContentHash::of(text.as_bytes());
+    sqlx::query("INSERT INTO content (organization_id, hash, size_bytes, language, redacted_text) VALUES ($1, $2, $3, 'rust', $4)")
+        .bind(fx.org.id).bind(hash.as_bytes().as_slice()).bind(i64::try_from(text.len()).unwrap()).bind(text)
+        .execute(&mut *conn).await.unwrap();
+    let chunk = content::NewChunk {
+        content_hash: hash,
+        parser_version: "synthetic-upgrade".into(),
+        ordinal: 0,
+        lines: knowell_core::LineRange::new(1, 1).unwrap(),
+        start_byte: 0,
+        end_byte: text.len() as u64,
+        kind: "function".into(),
+        symbol_path: Some("synthetic".into()),
+        prepared_input_hash: ContentHash::of(b"synthetic migration prepared input"),
+    };
+    content::upsert_chunks(&mut conn, fx.org.id, std::slice::from_ref(&chunk))
+        .await
+        .unwrap();
+    let generation = views::begin_generation(&mut conn, fx.view.id, None)
+        .await
+        .unwrap();
+    let pin = GenerationPin {
+        view: fx.view.id,
+        generation,
+    };
+    content::apply_file_changes(
+        &mut conn,
+        fx.view.id,
+        generation,
+        &[content::FileChange::Upsert {
+            path: path("src/synthetic.rs"),
+            content_hash: hash,
+            renamed_from: None,
+        }],
+    )
+    .await
+    .unwrap();
+    let profile = embeddings::register_profile(&mut conn, fx.org.id, &profile())
+        .await
+        .unwrap();
+    embeddings::upsert_embeddings(
+        &mut conn,
+        &profile,
+        &[NewEmbedding {
+            prepared_input_hash: chunk.prepared_input_hash,
+            vector: vec![1.0, 0.0, 0.0],
+        }],
+    )
+    .await
+    .unwrap();
+    migrate(&db.store).await.unwrap();
+    let upgraded = history(&mut conn).await;
+    assert_eq!(&upgraded[..before.len()], before.as_slice());
+    assert_eq!(upgraded.len(), before.len() + 1);
+    assert_eq!(upgraded.last().unwrap().0, 15);
+    let stored = content::chunks_of(&mut conn, fx.org.id, &hash, &chunk.parser_version)
+        .await
+        .unwrap();
+    assert_eq!(stored[0].chunk, chunk);
+    assert!(
+        content::chunk_structures_of(&mut conn, fx.org.id, &[hash], &chunk.parser_version)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let metadata =
+        content::files_metadata_in_paths(&mut conn, fx.org.id, pin, &[path("src/synthetic.rs")])
+            .await
+            .unwrap();
+    assert_eq!(metadata[0].line_count, None);
+    assert!(metadata[0].has_text);
+    assert_eq!(
+        content::get_content_bounded(&mut conn, fx.org.id, &hash, text.len())
+            .await
+            .unwrap()
+            .unwrap()
+            .redacted_text
+            .as_deref(),
+        Some(text)
+    );
+    assert_eq!(
+        embeddings::get_embedding(&mut conn, profile.id, &chunk.prepared_input_hash)
+            .await
+            .unwrap(),
+        Some(vec![1.0, 0.0, 0.0])
+    );
+    migrate(&db.store).await.unwrap();
+    assert_eq!(history(&mut conn).await, upgraded);
+}
 
 fn profile() -> NewEmbeddingProfile {
     NewEmbeddingProfile {
@@ -179,6 +288,173 @@ async fn legacy_checksums_and_vectors_survive_upgrade() {
     assert_eq!(history(&mut conn).await, before);
     assert_eq!(
         embeddings::get_embedding(&mut conn, profile.id, &hash)
+            .await
+            .unwrap(),
+        Some(vec![1.0, 0.0, 0.0])
+    );
+    assert!(
+        embeddings::profile_index_ready(&mut conn, &profile)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn occurrence_language_upgrade_backfills_history_and_never_rewrites_classified_unknowns() {
+    let Some(db) = TestDb::unmigrated(module_path!(), ENV).await else {
+        return;
+    };
+    let old_migrations = LEGACY
+        .iter()
+        .filter(|migration| migration.version < 14)
+        .cloned()
+        .collect();
+    Migrator::with_migrations(old_migrations)
+        .run(db.store.pool())
+        .await
+        .unwrap();
+    let mut conn = db.conn().await;
+    let before = history(&mut conn).await;
+    let fx = fixture(&mut conn, "occurrence-language-upgrade").await;
+    let text = "// shared historical language probe\n";
+    let hash = ContentHash::of(text.as_bytes());
+    let unknown_hash = ContentHash::of(b"synthetic unavailable historical body");
+    // Use the historical writer's columns; the current writer requires schema 15.
+    sqlx::query(
+        "INSERT INTO content (organization_id, hash, size_bytes, language, redacted_text)
+         VALUES ($1, $2, $3, 'python', $4), ($1, $5, 0, 'python', NULL)",
+    )
+    .bind(fx.org.id)
+    .bind(hash.as_bytes().as_slice())
+    .bind(i64::try_from(text.len()).unwrap())
+    .bind(text)
+    .bind(unknown_hash.as_bytes().as_slice())
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    let g1 = views::begin_generation(&mut conn, fx.view.id, None)
+        .await
+        .unwrap();
+    views::activate_generation(&mut conn, fx.view.id, g1)
+        .await
+        .unwrap();
+    let g2 = views::begin_generation(&mut conn, fx.view.id, None)
+        .await
+        .unwrap();
+    views::activate_generation(&mut conn, fx.view.id, g2)
+        .await
+        .unwrap();
+    // Write only the pre-upgrade columns, as the previous binary would.
+    sqlx::query(
+        "INSERT INTO file_version
+           (view_id, path, valid_from, valid_to, content_hash, renamed_from)
+         VALUES ($1, 'docs/probe.md', $2, $3, $4, NULL),
+                ($1, 'src/probe.rs', $3, NULL, $4, 'docs/probe.md'),
+                ($1, 'unknown.bin', $2, NULL, $5, NULL)",
+    )
+    .bind(fx.view.id)
+    .bind(g1)
+    .bind(g2)
+    .bind(hash.as_bytes().as_slice())
+    .bind(unknown_hash.as_bytes().as_slice())
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    // More than one backfill batch, without loading shared bodies for known paths.
+    sqlx::query(
+        "INSERT INTO file_version (view_id, path, valid_from, content_hash)
+         SELECT $1, 'src/batch-' || i || '.rs', $2, $3
+         FROM generate_series(1, $4::int) AS i",
+    )
+    .bind(fx.view.id)
+    .bind(g1)
+    .bind(hash.as_bytes().as_slice())
+    .bind(i32::try_from(content::BATCH_ROWS + 1).unwrap())
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    let profile = embeddings::register_profile(&mut conn, fx.org.id, &profile())
+        .await
+        .unwrap();
+    let vector_hash = ContentHash::of(b"synthetic unchanged language-upgrade vector");
+    embeddings::upsert_embeddings(
+        &mut conn,
+        &profile,
+        &[NewEmbedding {
+            prepared_input_hash: vector_hash,
+            vector: vec![1.0, 0.0, 0.0],
+        }],
+    )
+    .await
+    .unwrap();
+
+    migrate(&db.store).await.unwrap();
+    let upgraded = history(&mut conn).await;
+    assert_eq!(&upgraded[..before.len()], before.as_slice());
+    assert_eq!(upgraded.len(), before.len() + 2);
+    assert_eq!(upgraded.get(before.len()).unwrap().0, 14);
+    assert_eq!(upgraded.last().unwrap().0, 15);
+    let legacy_count: Option<i64> = sqlx::query_scalar(
+        "SELECT redacted_line_count FROM content WHERE organization_id = $1 AND hash = $2",
+    )
+    .bind(fx.org.id)
+    .bind(hash.as_bytes().as_slice())
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    assert_eq!(
+        legacy_count, None,
+        "upgrades do not load legacy bodies to infer counts"
+    );
+    let historical = content::file_history(&mut conn, fx.view.id, &path("src/probe.rs"), 10)
+        .await
+        .unwrap();
+    assert_eq!(historical.len(), 2);
+    assert_eq!(historical[0].language.as_deref(), Some("rust"));
+    assert_eq!(historical[1].language.as_deref(), Some("markdown"));
+    let unknown = content::file_at(
+        &mut conn,
+        GenerationPin {
+            view: fx.view.id,
+            generation: g2,
+        },
+        &path("unknown.bin"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(unknown.language, None);
+    let classified: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM file_version WHERE language_detection_version = 1",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    assert_eq!(classified, i64::try_from(content::BATCH_ROWS + 4).unwrap());
+    let unknown_before: (Option<String>, i16, String) = sqlx::query_as(
+        "SELECT language, language_detection_version, xmin::text FROM file_version
+         WHERE view_id = $1 AND path = 'unknown.bin'",
+    )
+    .bind(fx.view.id)
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    assert_eq!(unknown_before.0, None);
+    assert_eq!(unknown_before.1, 1);
+    migrate(&db.store).await.unwrap();
+    migrate(&db.store).await.unwrap();
+    let unknown_after: (Option<String>, i16, String) = sqlx::query_as(
+        "SELECT language, language_detection_version, xmin::text FROM file_version
+         WHERE view_id = $1 AND path = 'unknown.bin'",
+    )
+    .bind(fx.view.id)
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    assert_eq!(unknown_after, unknown_before);
+    assert_eq!(history(&mut conn).await, upgraded);
+    assert_eq!(
+        embeddings::get_embedding(&mut conn, profile.id, &vector_hash)
             .await
             .unwrap(),
         Some(vec![1.0, 0.0, 0.0])

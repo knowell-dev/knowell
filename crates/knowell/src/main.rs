@@ -71,6 +71,12 @@ pub(crate) struct GlobalArgs {
     /// current directory].
     #[arg(long = "workspace", value_name = "KNOWELL_TOML", global = true)]
     pub(crate) workspace_file: Option<PathBuf>,
+    /// Reuse bounded exact-source parse products across process starts (experimental).
+    #[arg(long, global = true)]
+    pub(crate) parse_cache: bool,
+    /// Most lexical spans per file (2-3 are bounded retrieval experiments).
+    #[arg(long, global = true, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=3))]
+    pub(crate) lexical_spans: u8,
     /// More log output on stderr (-v debug, -vv trace).
     #[arg(short = 'v', long = "verbose", action = ArgAction::Count, global = true)]
     verbose: u8,
@@ -188,7 +194,7 @@ fn main() -> ExitCode {
         Command::Context(_) => Ok(ExitCode::SUCCESS),
         Command::Config(cmd) => config_cmd::run(cmd, &mut out),
         Command::Secrets(cmd) => secrets_cmd::run(cmd, &mut out),
-        Command::Eval(cmd) => eval_cmd::run(cmd, &mut out),
+        Command::Eval(cmd) => eval_cmd::run(cmd, env.lexical_spans, &mut out),
     };
     match result {
         Ok(code) => code,
@@ -205,7 +211,7 @@ fn init_tracing(global: &GlobalArgs) {
         "error"
     } else {
         match global.verbose {
-            0 => "info,tantivy=warn",
+            0 => "info,tantivy=warn,sqlx::postgres::notice=warn",
             1 => "debug,tantivy=info,sqlx=info,hyper=info,h2=info,rustls=info",
             _ => "trace",
         }
@@ -225,9 +231,27 @@ fn init_tracing(global: &GlobalArgs) {
 #[cfg(test)]
 mod tests {
     use clap::CommandFactory as _;
+    use clap::Parser as _;
 
     #[test]
     fn command_tree_is_consistent() {
         super::Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn lexical_span_selection_reaches_shared_engine_settings_without_enabling_parse_cache() {
+        let default = super::Cli::try_parse_from(["know", "mcp"]).unwrap();
+        assert_eq!(default.global.lexical_spans, 1);
+        for spans in ["1", "2", "3"] {
+            let cli =
+                super::Cli::try_parse_from(["know", "mcp", "--lexical-spans", spans]).unwrap();
+            let settings = crate::tools::engine_settings(
+                std::path::Path::new("synthetic-home"),
+                cli.global.parse_cache,
+                cli.global.lexical_spans,
+            );
+            assert_eq!(settings.lexical_spans_per_file.to_string(), spans);
+            assert!(settings.parse_product_cache.is_none());
+        }
     }
 }

@@ -5,7 +5,7 @@ use std::cmp::Ordering;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 
-use knowell_core::{ContentHash, Name, RepoPath};
+use knowell_core::{Name, RepoPath};
 
 use crate::scope::Rejection;
 use crate::text::fold;
@@ -110,9 +110,10 @@ fn candidate_order(a: &Candidate, b: &Candidate) -> Ordering {
 /// 2. drop base-view candidates shadowed by the personal overlay;
 /// 3. keep at most `candidate_quota_per_project` per source and project;
 /// 4. group identical locations and score them with weighted RRF;
-/// 5. merge overlapping duplicates (same content, overlapping lines) into the
-///    better-ranked group, keeping each source's best rank;
-/// 6. order, apply the work-conserving result quota and the result limit.
+/// 5. merge overlapping duplicates of the same pinned file occurrence into
+///    the better-ranked group, keeping each source's best rank;
+/// 6. order the full fused shortlist; result quotas and the visible limit
+///    are applied after optional reranking.
 pub(crate) fn fuse(
     plan: &QueryPlan,
     scope: &QueryScope,
@@ -225,28 +226,30 @@ pub(crate) fn fuse(
     }
     let ordered = sort_groups(groups.into_values().collect(), &weights, k);
 
-    // 5. Merge overlapping duplicates into the better-ranked group.
+    // 5. Share ranking evidence only within one pinned occurrence. Equal
+    // bytes at another binding do not prove equal callers or configuration.
     let mut kept: Vec<Group> = Vec::new();
-    let mut by_hash: BTreeMap<ContentHash, Vec<usize>> = BTreeMap::new();
+    let mut by_file: BTreeMap<Location, Vec<usize>> = BTreeMap::new();
     for group in ordered {
-        let target = by_hash
-            .get(&group.location.content_hash)
-            .and_then(|indices| {
-                indices.iter().copied().find(|i| {
-                    kept.get(*i)
-                        .is_some_and(|keeper| keeper.location.overlaps(&group.location))
+        // The range-free key includes project, path, view, generation and
+        // content hash. This avoids scanning other copies of a common blob.
+        let mut file = group.location.clone();
+        file.range = None;
+        let target = by_file.get(&file).and_then(|indices| {
+            indices.iter().copied().find(|i| {
+                kept.get(*i).is_some_and(|keeper| {
+                    keeper.location.same_file(&group.location)
+                        && keeper.location.overlaps(&group.location)
                 })
-            });
+            })
+        });
         match target.and_then(|i| kept.get_mut(i)) {
             Some(keeper) => {
                 merge(keeper, group);
                 stats.merged_duplicates = stats.merged_duplicates.saturating_add(1);
             }
             None => {
-                by_hash
-                    .entry(group.location.content_hash)
-                    .or_default()
-                    .push(kept.len());
+                by_file.entry(file).or_default().push(kept.len());
                 kept.push(group);
             }
         }
@@ -254,10 +257,9 @@ pub(crate) fn fuse(
     let kept = sort_groups(kept, &weights, k);
     stats.fused = kept.len();
 
-    // 6. Result quota and limit.
-    let selected = apply_result_quota(kept, config, &mut stats);
+    // Rerankers must see candidates beyond the visible result limit.
     let results = (1u32..)
-        .zip(selected)
+        .zip(kept)
         .map(|(rank, group)| build_result(rank, group, plan, scope, &weights, k))
         .collect();
 
@@ -296,19 +298,19 @@ fn merge(keeper: &mut Group, other: Group) {
 /// Work-conserving fairness: each project's first `quota` results keep their
 /// place; the rest move behind every other project's results and fill the
 /// list only when nothing else is left.
-fn apply_result_quota(
-    groups: Vec<Group>,
+pub(crate) fn finalize_results(
+    results: Vec<SearchResult>,
     config: &FusionConfig,
     stats: &mut SearchStats,
-) -> Vec<Group> {
-    let total = groups.len();
+) -> Vec<SearchResult> {
+    let total = results.len();
     let mut selected = match config.result_quota_per_project {
-        None => groups,
+        None => results,
         Some(quota) => {
             let mut per_project: BTreeMap<Name, usize> = BTreeMap::new();
             let mut first = Vec::new();
             let mut deferred = Vec::new();
-            for group in groups {
+            for group in results {
                 let n = per_project
                     .entry(group.location.project.clone())
                     .or_insert(0);
@@ -326,6 +328,9 @@ fn apply_result_quota(
     };
     stats.truncated_by_limit = total.saturating_sub(config.result_limit);
     selected.truncate(config.result_limit);
+    for (rank, result) in (1u32..).zip(&mut selected) {
+        result.rank = rank;
+    }
     selected
 }
 

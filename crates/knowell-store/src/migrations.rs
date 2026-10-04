@@ -67,6 +67,9 @@ async fn run_locked(conn: &mut PgConnection, enable_vectors: bool) -> Result<(),
         .run(&mut *conn)
         .await
         .map_err(StoreError::Migrate)?;
+    // Classification batches commit independently so cancellation resumes at
+    // unfinished rows, while the session still holds the migration lock.
+    crate::content::backfill_file_languages(conn).await?;
     if enable_vectors {
         use sqlx::Connection;
         let mut tx = conn.begin().await?;

@@ -31,7 +31,7 @@ each other's view; a context pins one commit per project for its whole life.
 | Tool | Kind | Use it to | Key inputs | Returns |
 |---|---|---|---|---|
 | `open_workspace` | read | Start every session | `workspace?`, `views`, `working_directory?`, `summary_budget_tokens?` | `context_id`, view manifest, projects and roles, accepted rules, open tasks, recent decisions |
-| `search` | read | Find code, docs, contracts, memory | `query`, `kinds`, `projects`, `path_prefixes`, `languages`, `limit` | `hits` (with evidence and snippets), `memory_hits`, `query_class` |
+| `search` | read | Find code, docs, contracts, memory | `query`, `kinds`, `projects`, `path_prefixes`, `languages`, `limit`, `token_budget`, `include_snippets`, `include_diagnostics` | `hits` (with evidence and snippets), `memory_hits`, `query_class` |
 | `fetch` | read | Read exact versioned source | `ids` and/or `paths` (`project`, `path`, `lines?`), `context_lines` | `items` with content, evidence and `status` (current / changed / deleted) |
 | `inspect_symbol` | read | Definition, signature, doc, references, implementations, tests | `symbol` or `id`, `project?`, `include`, `limit` | `symbols` (several when ambiguous), `analysis` level |
 | `trace_flow` | read | Follow relations across projects | `id`, `symbol` or `contract`; `direction`, `max_depth` (1-5), `relations` | `nodes` and evidenced `edges`; may return a `job` |
@@ -81,12 +81,101 @@ Measure with `python scripts/buildlock.py cargo run -q -p knowell-mcp --example 
 
 ### Results
 
-Each successful call returns the full output as `structuredContent` and a short
-text rendering as its text content (ids, evidence, reasons, gaps, fenced
-untrusted text). The rendering is deliberately not a second copy of the JSON,
-to save the agent's context. Output schemas are advertised (compacted: no
-descriptions, enums as plain `enum` lists) so clients can validate results;
-they are not part of the size budget above.
+The default **source** mode returns successful read tools as one TextContent
+block, without `structuredContent` or a structured output schema. Source-returning
+tools show shared project/view/commit provenance, actual displayed source ranges,
+exact fetch handles and fenced code, documentation or tests. They omit repeated
+hashes, ranking signals and generic reference-resolution warnings. Real missing
+index, stale-version, acquisition-limit and budget limitations remain explicit.
+No generative model writes the response. Analytical tools retain their deliberate
+text views; write tools keep schema-valid typed receipts.
+
+`search` (default 4000 estimated tokens) and `build_context` in source mode budget
+the complete rendered response, including
+headers, IDs, fences and notes, at four UTF-8 bytes per estimated token, with an
+800,000-byte hard cap. It retains complete selected entries; an entry that does
+not fit is omitted explicitly rather than silently clipping a body or losing a
+late guard. The next omitted fetch ID is included when it fits. This is a
+model-agnostic byte estimate, not an assertion about a client's actual tokenizer.
+The query engine owns excerpt selection. `content_lines` and `snippet_lines`
+describe actual shown lines; `snippet_id`, when supplied, identifies the exact
+shown range separately from the original hit's ID. An extracted skeleton or
+contract summary is labelled as an extracted representation, not raw source.
+Partial source blocks include distinct exact continuation IDs, displayed as
+`More source: fetch ...`; fetching the displayed excerpt ID alone does not
+advance. Older engines without these handles are identified explicitly.
+Source scope headers use 12-digit commit prefixes unless two pins for the same
+project/view/layer share a prefix, in which case the full commits are shown.
+Full commit and file-content identities remain bound by fetch handles.
+
+Agent connections use `know mcp --output-mode source`. Source is also the
+`KnowellServer::new` and `serve_stdio` default. Existing running or installed
+clients require reconnection/configuration verification; changing this library
+does not rewrite their settings.
+
+Explicit **full** mode returns each successful call's typed output as
+`structuredContent` and the existing text rendering (ids, evidence, reasons,
+gaps and fenced untrusted text). Some clients expose the structured JSON to the
+model, so TextContent alone does not bound what the agent reads in full mode.
+
+Agent connections can explicitly select `know mcp --output-mode compact`.
+In **compact** mode, successful read tools return only `{"text": "..."}` as
+structured content, containing exactly the same rendering as TextContent.
+Each read tool advertises the corresponding schema with one required string
+field and no extra properties. `write_memory` and `save_checkpoint` keep their
+full typed receipts; errors, source resources and prompts are unchanged.
+
+Library users select the same mode with
+`KnowellServer::new(tools).with_output_mode(OutputMode::Compact)` and use
+`serve_stdio_with` or the configured Streamable HTTP router. `serve_stdio`,
+`KnowellServer::new` uses source mode; the standalone `tool_definition` and
+`tool_definitions` helpers retain full schemas for programmatic compatibility.
+The table above describes the full data model; compact mode
+renders it for agents instead of retaining its machine-readable fields.
+Programmatic clients needing those fields or search diagnostics should use
+full mode. Historical commit and blame IDs are displayed in full, including
+memory evidence and saved task manifests. Memory conflicts and successor IDs
+remain explicit. Task resumption renders every returned checkpoint in order,
+with the saved manifest and both paths and full commits for source renames.
+
+The mode is fixed for one server instance and its clones. Refresh the tool
+catalogue when changing it so a cached full schema is not reused for source or
+compact results. Structured output schemas in full/compact mode are compacted
+(no descriptions, enums as plain `enum` lists). Source read tools omit them
+because they return no structured content. They are not
+part of the size budget above. As with the existing full mode, TextContent
+uses the human rendering instead of duplicating serialized structured JSON.
+Compact mode reduces repeated metadata; it does not enforce a source-text
+budget or prove model-token, task-quality or latency improvements.
+
+Source rendering uses Markdown fences longer than any same-character run in
+the body, choosing backticks or tildes to minimize the delimiter. Source text is
+retained verbatim inside the fence; path and other header values are escaped
+to prevent hostile metadata from forging source blocks. Instruction-like source
+text is flagged, and all repository and memory text remains untrusted data.
+
+The full/compact search text shares source provenance within one response. A `v1`, `v2`, ...
+header identifies the full project, view, layer, commit, analysis tier and
+index state. Hits with different values get different headers, including
+commits whose first 12 digits coincide. Each hit still includes its complete
+fetchable `id`, path, full evidence range, file-hash prefix, retrieval reasons
+and fenced untrusted snippet. Semantic profiles are named once as `p1`, `p2`,
+...; these labels are local display references, not fetch ids. The structured
+output in full mode retains every evidence field on every hit.
+
+When the displayed snippet covers the full evidence range, search text avoids
+a duplicate `shown` range. Shorter snippets keep both ranges, and truncation
+is stated explicitly with a reminder to fetch the original id. The id always
+addresses the full evidence range.
+
+The deterministic `search_text_bytes_shrink_for_twelve_hits_with_shared_pin`
+unit fixture compares the former per-hit text layout with the shared-header
+layout, using 12 synthetic three-line Rust hits at one pin and one embedding
+profile. Its UTF-8 text sizes are **5,325 bytes before** and **4,267 bytes
+after**: **1,058 bytes (19.87%) less** with all ids, source bodies and fences
+retained. This measures text rendering only; it does not measure model tokens,
+client context usage, JSON size, retrieval quality or latency. Results vary
+with source length and the number of distinct pins and profiles.
 
 ## Evidence
 

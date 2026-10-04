@@ -9,7 +9,7 @@
 //!        ├─ ExactAdapter     (ExactSource)    symbols, paths, contract keys
 //!        ├─ LexicalAdapter   (LexicalSource)  BM25 per view, file hits mapped onto chunks
 //!        ├─ semantic()       (async)          pgvector `nearest` per profile, one list per profile
-//!        └─ GraphAdapter     (GraphExpander)  stored imports (callers, callees, tests)
+//!        └─ GraphAdapter     (GraphExpander)  explicit stored calls and tests
 //!        ▼
 //!   knowell_query::search_with_candidates ──▶ SearchResponse ──pack()──▶ ContextPack
 //!                                                         SnippetAdapter (SnippetSource)
@@ -19,19 +19,21 @@
 //! views, and those exist only for pinned (visible) projects, so graph
 //! expansion and context packing can never reach an unauthorised project.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Instant;
 
 use knowell_auth::UserId;
 use knowell_core::{ContentHash, LineRange, Name, RepoPath};
-use knowell_embed::Embedder;
+use knowell_embed::{Embedder, Usage};
 use knowell_index::{EmbeddingPlan, Overlay, TierSkip};
-use knowell_lexical::LexicalIndex;
+use knowell_lexical::{LexicalHit, LexicalIndex};
 use knowell_mcp::ToolError;
+use knowell_mcp::tools::{ContextSection, HitKind, SearchKind};
 use knowell_query::{
     Candidate, Component, Degradation, EdgeKind, EvidenceType as QEvidence, ExactSource,
-    ExactTarget, ExpandRequest, GraphExpander, GraphNode, Language, LexicalSource, Location,
-    MatchDetail, Neighbor, OverlayPin, PathFilter, PathGlob, PinnedView, PlanOptions,
+    ExactTarget, ExpandRequest, GraphExpander, GraphNode, Intent, Language, LexicalSource,
+    Location, MatchDetail, Neighbor, OverlayPin, PathFilter, PinnedView, PlanOptions,
     ProjectCoverage, ProjectPin, QueryPlan, QueryScope, Resolution as QResolution, SearchConfig,
     SearchResponse, Snippet, SnippetKind, SnippetRequest, SnippetSource, SourceError, SourceKind,
     SourceLists, SourceRequest, SourceStatus, TermKind, ViewId as QViewId, ViewManifest,
@@ -44,8 +46,7 @@ use knowell_store::views::{self, GenerationPin};
 use crate::engine::Engine;
 use crate::scope::{Pinned, PinnedProject};
 use crate::snapshot::{
-    self, ChunkEntry, Snapshot, SymbolEntry, best_chunk, slice_lines, symbol_entries, terms_of,
-    whole_file,
+    self, ChunkEntry, Snapshot, SymbolEntry, best_chunks, symbol_entries, terms_of, whole_file,
 };
 
 /// A personal overlay prepared for searching.
@@ -115,6 +116,172 @@ pub(crate) struct Filters {
     pub(crate) projects: Option<BTreeSet<Name>>,
     pub(crate) languages: Option<BTreeSet<Language>>,
     pub(crate) path_prefixes: Vec<String>,
+    pub(crate) kinds: Vec<SearchKind>,
+    pub(crate) sections: Vec<ContextSection>,
+}
+
+/// Retrieval work performed before fusion. Counts include repeated refill
+/// queries; embedding latency includes provider queueing and retry backoff.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RetrievalMetrics {
+    pub(crate) preparation_ms: u64,
+    pub(crate) source_hydration_ms: u64,
+    pub(crate) exact_ms: u64,
+    pub(crate) lexical_ms: u64,
+    pub(crate) semantic_ms: u64,
+    pub(crate) fusion_expansion_ms: u64,
+    pub(crate) prepared_views: usize,
+    pub(crate) lexical_queries: usize,
+    pub(crate) lexical_file_hits_examined: usize,
+    pub(crate) lexical_candidates: usize,
+    pub(crate) semantic_queries: usize,
+    pub(crate) semantic_neighbors_examined: usize,
+    pub(crate) embedding_calls: usize,
+    pub(crate) embedding_failures: usize,
+    pub(crate) embedding_usage: Usage,
+    pub(crate) exact_path_embedding_bypass: bool,
+}
+
+/// Admission happens before a source's quota. Otherwise out-of-scope or
+/// shadowed files can use every slot and hide valid lower-ranked evidence.
+fn candidate_allowed_in_sections(
+    scope: &QueryScope,
+    candidate: &Candidate,
+    kinds: &[SearchKind],
+    sections: &[ContextSection],
+) -> bool {
+    if scope
+        .projects
+        .as_ref()
+        .is_some_and(|projects| !projects.contains(&candidate.project))
+        || !scope.paths.admits(&candidate.path)
+        || scope.languages.as_ref().is_some_and(|languages| {
+            candidate
+                .language
+                .as_ref()
+                .is_none_or(|language| !languages.contains(language))
+        })
+    {
+        return false;
+    }
+    let Some(project) = scope.manifest.projects.get(&candidate.project) else {
+        return false;
+    };
+    let Some((pin, layer)) = project.view(&candidate.view) else {
+        return false;
+    };
+    if pin.generation != candidate.generation
+        || (layer == knowell_query::Layer::Base
+            && project
+                .overlay
+                .as_ref()
+                .is_some_and(|overlay| overlay.shadowed_paths.contains(&candidate.path)))
+    {
+        return false;
+    }
+    let hit_kind = if matches!(
+        candidate.detail,
+        MatchDetail::Exact {
+            target: ExactTarget::Contract,
+            ..
+        }
+    ) {
+        HitKind::Contract
+    } else {
+        crate::evidence::hit_kind(
+            &candidate.path,
+            candidate.language.as_ref().map(Language::as_str),
+            &[],
+        )
+    };
+    let kind = match hit_kind {
+        HitKind::Doc => SearchKind::Docs,
+        HitKind::Contract => SearchKind::Contracts,
+        _ => SearchKind::Code,
+    };
+    let section = match hit_kind {
+        HitKind::Test => ContextSection::Tests,
+        HitKind::Doc => ContextSection::Docs,
+        HitKind::Contract => ContextSection::Contracts,
+        _ => ContextSection::Code,
+    };
+    (kinds.is_empty() || kinds.contains(&kind))
+        && (sections.is_empty() || sections.contains(&section))
+}
+
+#[cfg(test)]
+fn candidate_allowed(scope: &QueryScope, candidate: &Candidate, kinds: &[SearchKind]) -> bool {
+    candidate_allowed_in_sections(scope, candidate, kinds, &[])
+}
+
+/// A bounded refill still cannot promise complete retrieval. If the bound
+/// is reached before enough admitted hits, the caller reports degradation.
+const MAX_LEXICAL_REFILL: usize = 4096;
+#[derive(Default)]
+struct LexicalScan {
+    hits: Vec<LexicalHit>,
+    queries: usize,
+    examined: usize,
+    capped: bool,
+}
+
+fn scoped_lexical_hits<E>(
+    mut search: impl FnMut(usize) -> Result<Vec<LexicalHit>, E>,
+    admitted: impl Fn(&LexicalHit) -> bool,
+    limit: usize,
+) -> Result<LexicalScan, E> {
+    if limit == 0 {
+        return Ok(LexicalScan::default());
+    }
+    let max = limit.max(MAX_LEXICAL_REFILL);
+    let mut fetch = limit;
+    let mut scan = LexicalScan::default();
+    loop {
+        let hits = search(fetch)?;
+        scan.queries = scan.queries.saturating_add(1);
+        scan.examined = scan.examined.saturating_add(hits.len());
+        let exhausted = hits.len() < fetch;
+        scan.hits = hits.into_iter().filter(&admitted).take(limit).collect();
+        if scan.hits.len() >= limit || exhausted {
+            break;
+        }
+        if fetch >= max {
+            scan.capped = true;
+            break;
+        }
+        fetch = fetch.saturating_mul(2).min(max);
+    }
+    Ok(scan)
+}
+
+/// A path-only request already answered by an exact full path needs no
+/// similarity lookup. A basename, mixed question, missing path or truncated
+/// plan keeps the normal semantic path.
+fn exact_path_answered(plan: &QueryPlan, exact: &SourceStatus) -> bool {
+    if plan.intent != Intent::PathOrFile || plan.truncated || !plan.expansions.is_empty() {
+        return false;
+    }
+    let [term] = plan.exact_terms.as_slice() else {
+        return false;
+    };
+    let query = plan.query.trim().replace('\\', "/");
+    let requested = query.trim_start_matches("./");
+    if term.kind != TermKind::Path || requested != term.text.trim_start_matches("./") {
+        return false;
+    }
+    let SourceStatus::Answered(candidates) = exact else {
+        return false;
+    };
+    candidates.iter().any(|candidate| {
+        candidate.path.as_str() == requested
+            && matches!(
+                candidate.detail,
+                MatchDetail::Exact {
+                    target: ExactTarget::Path,
+                    ..
+                }
+            )
+    })
 }
 
 /// Everything prepared for one query over a pinned manifest.
@@ -154,30 +321,28 @@ fn overlay_view_id(
         .map_err(|e| ToolError::internal(e.to_string()))
 }
 
-/// Path prefixes as include globs (`dir/` covers everything below `dir`;
-/// a partial segment matches files and directories starting with it).
-fn prefix_globs(prefixes: &[String]) -> Result<Vec<PathGlob>, ToolError> {
-    let mut globs = Vec::new();
+/// Normalizes literal prefixes once for lexical admission and SQL ANN filters.
+/// Wildcard characters remain literal source-path characters.
+fn normalize_prefixes(prefixes: &[String]) -> Result<Vec<String>, ToolError> {
+    let mut normalized = BTreeSet::new();
     for prefix in prefixes {
+        if prefix.chars().any(char::is_control) {
+            return Err(ToolError::invalid_input(
+                "`path_prefixes` must not contain control characters",
+            ));
+        }
         let prefix = prefix.trim();
         if prefix.is_empty() {
             continue;
         }
-        let patterns: Vec<String> = if prefix.ends_with('/') {
-            vec![prefix.to_owned()]
-        } else if prefix.contains('/') {
-            vec![format!("{prefix}*"), format!("{prefix}*/")]
-        } else {
-            vec![format!("{prefix}*/")]
-        };
-        for pattern in patterns {
-            globs.push(
-                PathGlob::new(pattern)
-                    .map_err(|e| ToolError::invalid_input(format!("path_prefixes: {e}")))?,
-            );
+        if RepoPath::new(prefix.strip_suffix('/').unwrap_or(prefix)).is_err() {
+            return Err(ToolError::invalid_input(
+                "`path_prefixes` must be relative, '/'-separated literal prefixes without empty, '.' or '..' components or control characters",
+            ));
         }
+        normalized.insert(prefix.to_owned());
     }
-    Ok(globs)
+    Ok(normalized.into_iter().collect())
 }
 
 /// Whether a path looks like a test file (by common naming conventions).
@@ -229,6 +394,7 @@ fn overlay_chunks(
                 lines: c.range,
                 kind: c.kind.as_str().to_owned(),
                 symbol_path: c.symbol_path,
+                structure: None,
             })
             .collect(),
         Err(_) => Vec::new(),
@@ -311,10 +477,99 @@ fn rank_and_limit(
     out
 }
 
+/// A lexical file hit may yield several source spans. Spend the first wave
+/// on distinct pinned files before their alternatives consume the same quota.
+fn rank_lexical_and_limit(
+    found: Vec<(f64, Candidate)>,
+    limit: usize,
+    per_project: Option<usize>,
+) -> Vec<Candidate> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let mut found: Vec<_> = found
+        .into_iter()
+        .map(|(score, candidate)| {
+            let mut file = candidate.location();
+            file.range = None;
+            (score, file, candidate)
+        })
+        .collect();
+    found.sort_by(|(sa, fa, a), (sb, fb, b)| {
+        sb.total_cmp(sa)
+            .then_with(|| fa.cmp(fb))
+            .then_with(|| lexical_order(a, b))
+            .then_with(|| a.location().cmp(&b.location()))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let mut seen = BTreeSet::new();
+    let mut files: BTreeMap<Location, VecDeque<Candidate>> = BTreeMap::new();
+    let mut file_order = Vec::new();
+    for (_, file, candidate) in found {
+        if !seen.insert(candidate.location()) {
+            continue;
+        }
+        if !files.contains_key(&file) {
+            file_order.push(file.clone());
+        }
+        files.entry(file).or_default().push_back(candidate);
+    }
+    let mut per: BTreeMap<Name, usize> = BTreeMap::new();
+    let mut out = Vec::new();
+    loop {
+        let mut advanced = false;
+        for file in &file_order {
+            if out.len() >= limit {
+                return out;
+            }
+            let Some(spans) = files.get_mut(file) else {
+                continue;
+            };
+            let Some(mut candidate) = spans.pop_front() else {
+                continue;
+            };
+            advanced = true;
+            let count = per.entry(candidate.project.clone()).or_default();
+            if per_project.is_some_and(|max| *count >= max) {
+                spans.clear();
+                continue;
+            }
+            *count = count.saturating_add(1);
+            candidate.source_rank = u32::try_from(out.len().saturating_add(1)).unwrap_or(u32::MAX);
+            out.push(candidate);
+        }
+        if !advanced {
+            break;
+        }
+    }
+    out
+}
+
+/// For spans of the same pinned file, preserve the local evidence before
+/// source position. Different files are tied by their complete file identity.
+fn lexical_order(a: &Candidate, b: &Candidate) -> std::cmp::Ordering {
+    match (&a.detail, &b.detail) {
+        (MatchDetail::Lexical { terms: a_terms }, MatchDetail::Lexical { terms: b_terms }) => {
+            b_terms
+                .len()
+                .cmp(&a_terms.len())
+                .then_with(|| b.symbol.is_some().cmp(&a.symbol.is_some()))
+                .then_with(|| {
+                    a.range
+                        .map_or(u32::MAX, |range| range.line_count())
+                        .cmp(&b.range.map_or(u32::MAX, |range| range.line_count()))
+                })
+        }
+        _ => std::cmp::Ordering::Equal,
+    }
+}
+
 /// Exact lookups over the pinned snapshots (and overlays): symbols, paths
 /// and contract keys.
 pub(crate) struct ExactAdapter<'a> {
     pub(crate) views: &'a [PreparedView],
+    pub(crate) kinds: &'a [SearchKind],
+    pub(crate) sections: &'a [ContextSection],
 }
 
 /// Whether a contract key matches a planned term: equal ignoring case, or
@@ -447,6 +702,33 @@ impl ExactSource for ExactAdapter<'_> {
                                 ));
                             }
                         }
+                        if let Some(overlay) = &view.overlay {
+                            for file in overlay.overlay.files() {
+                                if let Some(strength) = path_strength(&file.path, &term.text) {
+                                    found.push((
+                                        f64::from(strength),
+                                        Candidate {
+                                            id: format!("path:{}:{}", overlay.view, file.path),
+                                            project: view.project().clone(),
+                                            view: overlay.view.clone(),
+                                            generation: overlay.generation,
+                                            path: file.path.clone(),
+                                            range: None,
+                                            content_hash: file.content_hash,
+                                            symbol: None,
+                                            language: overlay.language(&file.path),
+                                            source: SourceKind::Exact,
+                                            source_rank: 1,
+                                            raw_score: f64::from(strength),
+                                            detail: MatchDetail::Exact {
+                                                term: term.text.clone(),
+                                                target: ExactTarget::Path,
+                                            },
+                                        },
+                                    ));
+                                }
+                            }
+                        }
                     }
                     TermKind::Route | TermKind::Phrase => {}
                 }
@@ -483,7 +765,7 @@ impl ExactSource for ExactAdapter<'_> {
                                 .symbol
                                 .and_then(|id| view.snapshot.symbol_by_id(id))
                                 .map(|s| s.local.clone()),
-                            language: None,
+                            language: view.language(&location.path),
                             source: SourceKind::Exact,
                             source_rank: 1,
                             raw_score: 7.0,
@@ -496,6 +778,9 @@ impl ExactSource for ExactAdapter<'_> {
                 }
             }
         }
+        found.retain(|(_, candidate)| {
+            candidate_allowed_in_sections(request.scope, candidate, self.kinds, self.sections)
+        });
         Ok(rank_and_limit(
             found,
             request.limit,
@@ -505,14 +790,53 @@ impl ExactSource for ExactAdapter<'_> {
 }
 
 /// BM25 over the Tantivy index of every pinned generation (and overlays),
-/// with file-level hits mapped onto the chunk that shares the most matched
-/// terms.
+/// with file-level hits mapped onto a bounded set of matching source spans.
 pub(crate) struct LexicalAdapter<'a> {
     pub(crate) views: &'a [PreparedView],
+    pub(crate) kinds: &'a [SearchKind],
+    pub(crate) sections: &'a [ContextSection],
+    pub(crate) spans_per_file: u8,
     pub(crate) failures: Mutex<Vec<Degradation>>,
+    pub(crate) metrics: Mutex<RetrievalMetrics>,
 }
 
 impl LexicalAdapter<'_> {
+    fn query<E>(
+        &self,
+        search: impl FnOnce() -> Result<Vec<LexicalHit>, E>,
+    ) -> Result<Vec<LexicalHit>, E> {
+        let mut metrics = self.metrics.lock().unwrap_or_else(PoisonError::into_inner);
+        metrics.lexical_queries = metrics.lexical_queries.saturating_add(1);
+        drop(metrics);
+        let hits = search()?;
+        let mut metrics = self.metrics.lock().unwrap_or_else(PoisonError::into_inner);
+        metrics.lexical_file_hits_examined = metrics
+            .lexical_file_hits_examined
+            .saturating_add(hits.len());
+        Ok(hits)
+    }
+
+    fn record_scan(&self, scan: &LexicalScan, project: &Name, overlay: bool, limit: usize) {
+        tracing::debug!(
+            queries = scan.queries,
+            examined = scan.examined,
+            "scoped lexical scan"
+        );
+        if scan.capped {
+            let layer = if overlay { " personal layer" } else { "" };
+            self.failures
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(Degradation::new(
+                    Component::Lexical,
+                    format!(
+                        "{project}{layer}: scoped lexical retrieval reached its {}-file bound; more matching files may exist",
+                        limit.max(MAX_LEXICAL_REFILL)
+                    ),
+                ));
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn candidate(
         project: &Name,
@@ -525,8 +849,16 @@ impl LexicalAdapter<'_> {
         score: f64,
         terms: Vec<String>,
     ) -> Candidate {
+        let terms = match chunk {
+            Some(chunk) => terms
+                .into_iter()
+                .filter(|term| chunk.terms.contains(term))
+                .collect(),
+            None => terms,
+        };
+        let span = chunk.map_or_else(|| "file".to_owned(), |chunk| chunk.lines.to_string());
         Candidate {
-            id: format!("lex:{view}:{path}"),
+            id: format!("lex:{view}:{path}:{span}"),
             project: project.clone(),
             view,
             generation,
@@ -558,31 +890,72 @@ impl LexicalSource for LexicalAdapter<'_> {
                 continue;
             }
             if let Ok(index) = &view.lexical {
-                match index.search(&query, request.limit) {
-                    Ok(hits) => {
+                let scan = scoped_lexical_hits(
+                    |fetch| self.query(|| index.search(&query, fetch)),
+                    |hit| {
+                        let Ok(path) = RepoPath::new(hit.id.as_str()) else {
+                            return false;
+                        };
+                        let Some(file) = view.snapshot.file(&path) else {
+                            return false;
+                        };
+                        let candidate = Self::candidate(
+                            view.project(),
+                            view.base_view.clone(),
+                            view.generation(),
+                            path.clone(),
+                            file.content_hash,
+                            view.language(&path),
+                            None,
+                            f64::from(hit.score),
+                            hit.matched_terms.clone(),
+                        );
+                        candidate_allowed_in_sections(
+                            request.scope,
+                            &candidate,
+                            self.kinds,
+                            self.sections,
+                        )
+                    },
+                    request.limit,
+                );
+                match scan {
+                    Ok(scan) => {
                         answered = answered.saturating_add(1);
-                        for hit in hits {
+                        self.record_scan(&scan, view.project(), false, request.limit);
+                        for hit in scan.hits {
                             let Ok(path) = RepoPath::new(hit.id.as_str()) else {
                                 continue;
                             };
                             let Some(file) = view.snapshot.file(&path) else {
                                 continue;
                             };
-                            let chunk = view.snapshot.best_chunk(&path, &hit.matched_terms);
-                            found.push((
-                                f64::from(hit.score),
-                                Self::candidate(
-                                    view.project(),
-                                    view.base_view.clone(),
-                                    view.generation(),
-                                    path.clone(),
-                                    file.content_hash,
-                                    view.language(&path),
-                                    chunk,
+                            let chunks = view.snapshot.best_chunks(
+                                &path,
+                                &hit.matched_terms,
+                                usize::from(self.spans_per_file),
+                            );
+                            let spans = if chunks.is_empty() {
+                                vec![None]
+                            } else {
+                                chunks.into_iter().map(Some).collect()
+                            };
+                            for chunk in spans {
+                                found.push((
                                     f64::from(hit.score),
-                                    hit.matched_terms,
-                                ),
-                            ));
+                                    Self::candidate(
+                                        view.project(),
+                                        view.base_view.clone(),
+                                        view.generation(),
+                                        path.clone(),
+                                        file.content_hash,
+                                        view.language(&path),
+                                        chunk,
+                                        f64::from(hit.score),
+                                        hit.matched_terms.clone(),
+                                    ),
+                                ));
+                            }
                         }
                     }
                     Err(error) => self
@@ -596,33 +969,78 @@ impl LexicalSource for LexicalAdapter<'_> {
                 }
             }
             if let Some(overlay) = &view.overlay {
-                match overlay.overlay.search(&query, request.limit) {
-                    Ok(hits) => {
-                        for hit in hits {
+                let scan = scoped_lexical_hits(
+                    |fetch| self.query(|| overlay.overlay.search(&query, fetch)),
+                    |hit| {
+                        let Ok(path) = RepoPath::new(hit.id.as_str()) else {
+                            return false;
+                        };
+                        let Some(file) = overlay.overlay.file(&path) else {
+                            return false;
+                        };
+                        let candidate = Self::candidate(
+                            view.project(),
+                            overlay.view.clone(),
+                            overlay.generation,
+                            path.clone(),
+                            file.content_hash,
+                            overlay.language(&path),
+                            None,
+                            f64::from(hit.score),
+                            hit.matched_terms.clone(),
+                        );
+                        candidate_allowed_in_sections(
+                            request.scope,
+                            &candidate,
+                            self.kinds,
+                            self.sections,
+                        )
+                    },
+                    request.limit,
+                );
+                match scan {
+                    Ok(scan) => {
+                        answered = answered.saturating_add(1);
+                        self.record_scan(&scan, view.project(), true, request.limit);
+                        for hit in scan.hits {
                             let Ok(path) = RepoPath::new(hit.id.as_str()) else {
                                 continue;
                             };
                             let Some(file) = overlay.overlay.file(&path) else {
                                 continue;
                             };
-                            let chunk = overlay
+                            let chunks = overlay
                                 .chunks
                                 .get(&path)
-                                .and_then(|c| best_chunk(c, &hit.matched_terms));
-                            found.push((
-                                f64::from(hit.score),
-                                Self::candidate(
-                                    view.project(),
-                                    overlay.view.clone(),
-                                    overlay.generation,
-                                    path.clone(),
-                                    file.content_hash,
-                                    overlay.language(&path),
-                                    chunk,
+                                .map(|chunks| {
+                                    best_chunks(
+                                        chunks,
+                                        &hit.matched_terms,
+                                        usize::from(self.spans_per_file),
+                                    )
+                                })
+                                .unwrap_or_default();
+                            let spans = if chunks.is_empty() {
+                                vec![None]
+                            } else {
+                                chunks.into_iter().map(Some).collect()
+                            };
+                            for chunk in spans {
+                                found.push((
                                     f64::from(hit.score),
-                                    hit.matched_terms,
-                                ),
-                            ));
+                                    Self::candidate(
+                                        view.project(),
+                                        overlay.view.clone(),
+                                        overlay.generation,
+                                        path.clone(),
+                                        file.content_hash,
+                                        overlay.language(&path),
+                                        chunk,
+                                        f64::from(hit.score),
+                                        hit.matched_terms.clone(),
+                                    ),
+                                ));
+                            }
                         }
                     }
                     Err(error) => self
@@ -641,7 +1059,11 @@ impl LexicalSource for LexicalAdapter<'_> {
                 "no lexical index is available for the pinned generations".to_owned(),
             ));
         }
-        Ok(rank_and_limit(
+        self.metrics
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .lexical_candidates = found.len();
+        Ok(rank_lexical_and_limit(
             found,
             request.limit,
             request.per_project_limit,
@@ -649,11 +1071,19 @@ impl LexicalSource for LexicalAdapter<'_> {
     }
 }
 
-/// Graph neighbours from the stored edges of the pinned snapshots: symbol
-/// `references` / `calls` (the indexer's reference resolution) give
-/// callers and callees of a symbol; file imports give file-level callers
-/// (importers) and callees (imported files). Callers in test files are
-/// reported as tests.
+/// Explicit stored relationship semantics, independent of path naming.
+/// Imports and references do not demonstrate a call or a test execution.
+fn graph_edge_kind(kind: &str, incoming: bool) -> Option<EdgeKind> {
+    match (kind, incoming) {
+        ("calls", true) => Some(EdgeKind::Caller),
+        ("calls", false) => Some(EdgeKind::Callee),
+        ("tests", true) => Some(EdgeKind::Test),
+        _ => None,
+    }
+}
+
+/// Graph neighbours with explicit stored call or test relationships. File
+/// imports remain structural metadata, not callers, callees or proof of tests.
 pub(crate) struct GraphAdapter<'a> {
     pub(crate) prepared: &'a Prepared,
 }
@@ -671,14 +1101,8 @@ impl GraphExpander for GraphAdapter<'_> {
         let snapshot = &view.snapshot;
         let wants = |kind: EdgeKind| request.edges.contains(&kind);
         let mut out = Vec::new();
-        let node_at = |path: &RepoPath| -> Option<GraphNode> {
-            Some(GraphNode {
-                location: view.base_location(path, None)?,
-                symbol: None,
-                language: view.language(path),
-            })
-        };
-        // Symbol-level relations (references, calls) of the node's symbol.
+        // The edge's stored relation supplies semantics; evidence strength and
+        // resolution remain separate and travel to the query layer.
         let symbol = request
             .node
             .symbol
@@ -699,16 +1123,45 @@ impl GraphExpander for GraphAdapter<'_> {
                 })
             };
             if wants(EdgeKind::Caller) || wants(EdgeKind::Test) {
-                for edge in snapshot.uses_of(id) {
+                for edge in snapshot
+                    .edges_into
+                    .get(&id)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|index| snapshot.other_edges.get(*index))
+                {
+                    let Some(kind) = graph_edge_kind(&edge.kind, true) else {
+                        continue;
+                    };
+                    if !wants(kind) {
+                        continue;
+                    }
                     let Some(node) = symbol_node(&edge.from) else {
                         continue;
                     };
-                    let kind = if is_test_path(&node.location.path) {
-                        EdgeKind::Test
-                    } else {
-                        EdgeKind::Caller
+                    out.push(Neighbor {
+                        node,
+                        edge: kind,
+                        evidence: map_evidence(edge.evidence),
+                        resolution: map_resolution(edge.resolution),
+                    });
+                }
+            }
+            if wants(EdgeKind::Callee) {
+                for edge in snapshot
+                    .edges_from
+                    .get(&id)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|index| snapshot.other_edges.get(*index))
+                {
+                    let Some(kind) = graph_edge_kind(&edge.kind, false) else {
+                        continue;
                     };
-                    if wants(kind) {
+                    if !wants(kind) {
+                        continue;
+                    }
+                    if let Some(node) = symbol_node(&edge.to) {
                         out.push(Neighbor {
                             node,
                             edge: kind,
@@ -716,52 +1169,6 @@ impl GraphExpander for GraphAdapter<'_> {
                             resolution: map_resolution(edge.resolution),
                         });
                     }
-                }
-            }
-            if wants(EdgeKind::Callee) {
-                for edge in snapshot.used_by(id) {
-                    if let Some(node) = symbol_node(&edge.to) {
-                        out.push(Neighbor {
-                            node,
-                            edge: EdgeKind::Callee,
-                            evidence: map_evidence(edge.evidence),
-                            resolution: map_resolution(edge.resolution),
-                        });
-                    }
-                }
-            }
-        }
-        if wants(EdgeKind::Callee) {
-            for edge in snapshot.imports_from(&location.path) {
-                if let snapshot::ImportTarget::File(to) = &edge.to
-                    && let Some(node) = node_at(to)
-                {
-                    out.push(Neighbor {
-                        node,
-                        edge: EdgeKind::Callee,
-                        evidence: map_evidence(edge.evidence),
-                        resolution: map_resolution(edge.resolution),
-                    });
-                }
-            }
-        }
-        if wants(EdgeKind::Caller) || wants(EdgeKind::Test) {
-            for edge in snapshot.imports_of(&location.path) {
-                let kind = if is_test_path(&edge.from) {
-                    EdgeKind::Test
-                } else {
-                    EdgeKind::Caller
-                };
-                if !wants(kind) {
-                    continue;
-                }
-                if let Some(node) = node_at(&edge.from) {
-                    out.push(Neighbor {
-                        node,
-                        edge: kind,
-                        evidence: map_evidence(edge.evidence),
-                        resolution: map_resolution(edge.resolution),
-                    });
                 }
             }
         }
@@ -784,15 +1191,86 @@ pub(crate) struct SnippetAdapter<'a> {
     pub(crate) prepared: &'a Prepared,
     pub(crate) texts: BTreeMap<ContentHash, Arc<str>>,
     pub(crate) max_lines: u32,
+    /// Query cues enable source-region acquisition rather than prefix clipping.
+    pub(crate) source_terms: Option<BTreeSet<String>>,
 }
 
 impl SnippetAdapter<'_> {
+    /// Actual acquisition extent, including an enclosing declaration when the
+    /// selected file's parser verifies one. Continuations address this extent,
+    /// so a window is never presented as a complete declaration.
+    pub(crate) fn source_extent(
+        &self,
+        location: &Location,
+        symbol: Option<&str>,
+    ) -> Option<LineRange> {
+        let (text, _, _) = self.text_of(location)?;
+        let total = snapshot::line_count(&text);
+        let full = location.range.or_else(|| whole_file(total))?;
+        if full.start() > total {
+            return None;
+        }
+        let mut cited = location.clone();
+        if location.range.is_none()
+            && full.line_count() > self.max_lines
+            && let Some(terms) = &self.source_terms
+        {
+            let window =
+                crate::source_region::source_region(&text, full, None, terms, self.max_lines);
+            if let Some(anchor) = crate::source_region::region_anchor(&text, window, terms) {
+                cited.range = Some(LineRange::new(anchor, anchor).unwrap_or(window));
+            }
+        }
+        let extent = self.body_extent(&cited, symbol).unwrap_or(full);
+        LineRange::new(extent.start(), extent.end().min(total)).ok()
+    }
+
+    /// Bounds from persisted coordinates or the selected file's parser, never
+    /// from a generated embedding header or a symbol's mutable current name.
+    fn body_extent(&self, location: &Location, symbol: Option<&str>) -> Option<LineRange> {
+        if let Some(found) = self.symbol_for(location, symbol) {
+            return Some(found.lines);
+        }
+        let range = location.range?;
+        let (view, is_overlay) = self.prepared.view_of(&location.project, &location.view)?;
+        if is_overlay {
+            return crate::source_region::enclosing_at(
+                view.overlay
+                    .as_ref()?
+                    .symbols
+                    .iter()
+                    .filter(|entry| entry.path == location.path && entry.lines.end() >= range.end())
+                    .map(|entry| entry.lines),
+                range.start(),
+            );
+        }
+        view.snapshot
+            .chunks
+            .get(&location.path)?
+            .iter()
+            .filter(|chunk| {
+                chunk.lines.start() <= range.start() && range.end() <= chunk.lines.end()
+            })
+            .filter_map(|chunk| chunk.structure.as_ref())
+            .flat_map(|structure| [structure.declaration.as_ref(), structure.enclosing.as_ref()])
+            .flatten()
+            .map(|region| region.lines)
+            .filter(|region| region.start() <= range.start() && range.end() <= region.end())
+            .min_by_key(|region| (region.line_count(), region.start(), region.end()))
+    }
+
     fn text_of(&self, location: &Location) -> Option<(Arc<str>, Option<&SymbolEntry>, bool)> {
         let (view, is_overlay) = self.prepared.view_of(&location.project, &location.view)?;
         if is_overlay {
             let overlay = view.overlay.as_ref()?;
             let file = overlay.overlay.file(&location.path)?;
+            if file.content_hash != location.content_hash {
+                return None;
+            }
             return Some((Arc::clone(&file.text), None, true));
+        }
+        if view.snapshot.file(&location.path)?.content_hash != location.content_hash {
+            return None;
         }
         let text = self.texts.get(&location.content_hash)?;
         Some((Arc::clone(text), None, false))
@@ -817,7 +1295,12 @@ impl SnippetAdapter<'_> {
         };
         let symbols: Vec<&SymbolEntry> = symbols.collect();
         if let Some(name) = symbol
-            && let Some(found) = symbols.iter().find(|s| s.local == name)
+            && let Some(found) = symbols.iter().find(|s| {
+                s.local == name
+                    && location.range.is_none_or(|range| {
+                        s.lines.start() <= range.start() && range.end() <= s.lines.end()
+                    })
+            })
         {
             return Some(found);
         }
@@ -840,8 +1323,33 @@ impl SnippetSource for SnippetAdapter<'_> {
             .range
             .or_else(|| whole_file(line_count))
             .ok_or_else(|| SourceError::Failed("empty line range".to_owned()))?;
+        if self.source_terms.is_some() && full.end() > line_count {
+            return Err(SourceError::Failed(
+                "source range is outside the pinned file".to_owned(),
+            ));
+        }
         match request.kind {
             SnippetKind::Body => {
+                if let Some(terms) = &self.source_terms {
+                    let declaration = self.source_extent(location, request.symbol);
+                    let retrieved = if location.range.is_none() {
+                        declaration.unwrap_or(full)
+                    } else {
+                        full
+                    };
+                    let range = crate::source_region::source_region(
+                        &text,
+                        retrieved,
+                        declaration,
+                        terms,
+                        self.max_lines,
+                    );
+                    return Ok(Some(Snippet {
+                        text: crate::source_region::slice_source_lines(&text, range),
+                        range,
+                        content_hash: location.content_hash,
+                    }));
+                }
                 let end = full
                     .end()
                     .min(
@@ -852,7 +1360,7 @@ impl SnippetSource for SnippetAdapter<'_> {
                 let range = LineRange::new(full.start(), end.max(full.start()))
                     .map_err(|e| SourceError::Failed(e.to_string()))?;
                 Ok(Some(Snippet {
-                    text: slice_lines(&text, range),
+                    text: crate::source_region::slice_source_lines(&text, range),
                     range,
                     content_hash: location.content_hash,
                 }))
@@ -904,9 +1412,76 @@ impl SnippetSource for SnippetAdapter<'_> {
 pub(crate) struct SearchRun {
     pub(crate) response: SearchResponse,
     pub(crate) prepared: Prepared,
+    pub(crate) retrieval: RetrievalMetrics,
+}
+
+/// Cheap acquisition cues, not a proof that a natural-language task has all
+/// its evidence. A larger fused pool reuses the same lexical/vector candidates.
+fn should_widen_source_pool(response: &SearchResponse, bound: usize) -> bool {
+    if response.results.len() >= bound || response.stats.truncated_by_limit == 0 {
+        return false;
+    }
+    let files: BTreeSet<_> = response
+        .results
+        .iter()
+        .map(|result| {
+            (
+                &result.location.project,
+                &result.location.view,
+                &result.location.path,
+            )
+        })
+        .collect();
+    let requested = crate::source_region::region_terms(&response.plan.query);
+    let matched: BTreeSet<_> = response
+        .results
+        .iter()
+        .flat_map(|result| &result.why)
+        .flat_map(|reason| match reason {
+            knowell_query::Reason::ExactMatch { term, .. } => terms_of(term),
+            knowell_query::Reason::LexicalTerms { terms } => terms_of(&terms.join(" ")),
+            _ => BTreeSet::new(),
+        })
+        .collect();
+    source_pool_needs_more(
+        response.results.len(),
+        bound,
+        files.len(),
+        !requested.is_subset(&matched),
+    )
+}
+
+fn source_pool_needs_more(returned: usize, bound: usize, files: usize, missing_cues: bool) -> bool {
+    returned < bound
+        && (returned < bound.min(32) || files.saturating_mul(2) < returned || missing_cues)
 }
 
 impl Engine {
+    /// Source-free metadata, cached separately from complete graph snapshots.
+    pub(crate) async fn metadata_snapshot_of(
+        &self,
+        project: &PinnedProject,
+    ) -> Result<Arc<Snapshot>, ToolError> {
+        let pin = project.pin();
+        let cell = self.inner.snapshots.metadata_cell(pin);
+        let inner = &self.inner;
+        let snapshot = cell
+            .get_or_try_init(|| async {
+                snapshot::build_metadata(
+                    &inner.store,
+                    inner.organization,
+                    project.entry.name.clone(),
+                    project.entry.id,
+                    pin,
+                )
+                .await
+                .map(Arc::new)
+            })
+            .await
+            .map_err(ToolError::from)?;
+        Ok(Arc::clone(snapshot))
+    }
+
     /// Loads (or reuses) the snapshot of a pinned project.
     pub(crate) async fn snapshot_of(
         &self,
@@ -924,7 +1499,10 @@ impl Engine {
                     project.entry.name.clone(),
                     project.entry.id,
                     pin,
-                    inner.indexer.config().parse_limits,
+                    snapshot::ParseOptions {
+                        limits: inner.indexer.config().parse_limits,
+                        products: inner.parse_products.clone(),
+                    },
                 )
                 .await
                 .map(Arc::new)
@@ -975,6 +1553,7 @@ impl Engine {
         &self,
         pinned: &Pinned,
         filters: &Filters,
+        metadata_only: bool,
     ) -> Result<Prepared, ToolError> {
         let mut views = Vec::new();
         let mut degraded = Vec::new();
@@ -982,17 +1561,38 @@ impl Engine {
         manifest.not_indexed = pinned.not_indexed.clone();
         let chunk_options = self.inner.indexer.config().chunking;
         for (name, project) in &pinned.projects {
-            let snapshot = self.snapshot_of(project).await?;
+            if filters
+                .projects
+                .as_ref()
+                .is_some_and(|projects| !projects.contains(name))
+            {
+                continue;
+            }
+            let snapshot = if metadata_only {
+                self.metadata_snapshot_of(project).await?
+            } else {
+                self.snapshot_of(project).await?
+            };
             let lexical = self.lexical_for(project).await;
             if let Err(reason) = &lexical {
                 degraded.push(Degradation::new(Component::Lexical, reason.clone()));
             }
             let base_view = base_view_id(project.view)?;
+            let mut languages: BTreeSet<_> = snapshot
+                .languages()
+                .keys()
+                .filter_map(|language| Language::new(language).ok())
+                .collect();
             let overlay = match &project.overlay {
                 Some(o) => {
                     let mut symbols = Vec::new();
                     let mut chunks = BTreeMap::new();
                     for file in o.overlay.files() {
+                        // Only prepared, admitted files add capabilities; a new code
+                        // language still lacks call/test analysis in the personal layer.
+                        if let Ok(language) = Language::new(file.parsed.language.as_str()) {
+                            languages.insert(language);
+                        }
                         let base = symbols.len();
                         symbols.extend(symbol_entries(&file.path, &file.parsed, base));
                         chunks.insert(file.path.clone(), overlay_chunks(file, &chunk_options));
@@ -1015,11 +1615,6 @@ impl Engine {
                 }
                 None => None,
             };
-            let languages = snapshot
-                .languages()
-                .keys()
-                .filter_map(|l| Language::new(l).ok())
-                .collect();
             let commit = project
                 .commit
                 .as_deref()
@@ -1058,14 +1653,14 @@ impl Engine {
                 overlay,
             });
         }
-        let include = prefix_globs(&filters.path_prefixes)?;
         let scope = QueryScope {
             workspace: pinned.workspace.name.clone(),
             projects: filters.projects.clone(),
             languages: filters.languages.clone(),
             paths: PathFilter {
-                include,
+                include: Vec::new(),
                 exclude: Vec::new(),
+                prefixes: filters.path_prefixes.clone(),
             },
             domain: None,
             manifest,
@@ -1148,7 +1743,9 @@ impl Engine {
         &self,
         plan: &QueryPlan,
         prepared: &Prepared,
+        filters: &Filters,
         limit: usize,
+        metrics: &mut RetrievalMetrics,
     ) -> (SourceStatus, Vec<Degradation>) {
         let mut notes = Vec::new();
         let mut failures = Vec::new();
@@ -1221,8 +1818,19 @@ impl Engine {
         }
         let mut lists: Vec<Vec<Candidate>> = Vec::new();
         for (profile_id, views) in groups {
-            match self.semantic_group(plan, profile_id, &views, limit).await {
-                Ok(list) => lists.push(list),
+            match self
+                .semantic_group(plan, profile_id, &views, prepared, filters, limit, metrics)
+                .await
+            {
+                Ok((list, capped)) => {
+                    lists.push(list);
+                    if capped {
+                        notes.push(Degradation::new(
+                            Component::Semantic,
+                            "scoped semantic retrieval reached its 1000-neighbor bound; more matching evidence may exist",
+                        ));
+                    }
+                }
                 Err(reason) => failures.push(reason),
             }
         }
@@ -1262,13 +1870,17 @@ impl Engine {
 
     /// One profile's nearest-neighbour search over `views` (all served by
     /// that profile at their pinned generations).
+    #[allow(clippy::too_many_arguments)]
     async fn semantic_group(
         &self,
         plan: &QueryPlan,
         profile_id: ProfileId,
         views: &[&PreparedView],
+        prepared: &Prepared,
+        filters: &Filters,
         limit: usize,
-    ) -> Result<Vec<Candidate>, String> {
+        metrics: &mut RetrievalMetrics,
+    ) -> Result<(Vec<Candidate>, bool), String> {
         let provider = self
             .provider_of(profile_id)
             .await?
@@ -1291,80 +1903,138 @@ impl Engine {
             return Err("the embedding profile is not registered".to_owned());
         };
         drop(conn);
-        let vector = embedder
-            .embed_query(&plan.semantic_text())
-            .await
-            .map_err(|e| format!("embedding the query with `{provider}`: {e}"))?;
-        let pins: Vec<GenerationPin> = views.iter().map(|v| v.pinned.pin()).collect();
-        let k = u32::try_from(limit.clamp(1, 1000)).unwrap_or(100);
-        let options = NearestOptions {
-            k,
-            ef_search: Some(k.max(embeddings::DEFAULT_EF_SEARCH)),
-            scope: Some(pins.clone()),
+        metrics.embedding_calls = metrics.embedding_calls.saturating_add(1);
+        let embedded = embedder.embed_query_with_usage(&plan.semantic_text()).await;
+        let (vector, usage) = match embedded {
+            Ok(embedded) => embedded,
+            Err(error) => {
+                metrics.embedding_failures = metrics.embedding_failures.saturating_add(1);
+                return Err(format!("embedding the query with `{provider}`: {error}"));
+            }
         };
+        metrics.embedding_usage.merge(&usage);
+        let pins: Vec<GenerationPin> = views.iter().map(|v| v.pinned.pin()).collect();
+        let max = usize::try_from(embeddings::MAX_K).unwrap_or(1000);
+        let mut k = u32::try_from(limit.clamp(1, max)).unwrap_or(100);
         let mut conn = self
             .inner
             .store
             .acquire()
             .await
             .map_err(|e| format!("store: {e}"))?;
-        let neighbors = embeddings::nearest(&mut conn, &profile, vector.as_slice(), &options)
-            .await
-            .map_err(|e| format!("vector search: {e}"))?;
-        let hashes: Vec<ContentHash> = neighbors.iter().map(|n| n.prepared_input_hash).collect();
-        // Per-path chunk inputs (the embedding input includes the path, so
-        // identical content at two paths has two inputs); generations indexed
-        // before per-path inputs existed fall back to content-level rows.
-        let mut locations =
-            content::locate_chunk_inputs(&mut conn, self.inner.organization, &pins, &hashes)
+        loop {
+            let options = NearestOptions {
+                k,
+                ef_search: Some(k.max(embeddings::DEFAULT_EF_SEARCH)),
+                scope: Some(pins.clone()),
+                path_prefixes: filters.path_prefixes.clone(),
+                languages: filters
+                    .languages
+                    .as_ref()
+                    .map(|languages| {
+                        languages
+                            .iter()
+                            .map(|language| language.as_str().to_owned())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            };
+            metrics.semantic_queries = metrics.semantic_queries.saturating_add(1);
+            let neighbors = embeddings::nearest(&mut conn, &profile, vector.as_slice(), &options)
                 .await
-                .map_err(|e| format!("store: {e}"))?;
-        if locations.is_empty() && !hashes.is_empty() {
-            locations =
-                content::locate_prepared_inputs(&mut conn, self.inner.organization, &pins, &hashes)
+                .map_err(|e| format!("vector search: {e}"))?;
+            metrics.semantic_neighbors_examined = metrics
+                .semantic_neighbors_examined
+                .saturating_add(neighbors.len());
+            let exhausted = neighbors.len() < usize::try_from(k).unwrap_or(usize::MAX);
+            let hashes: Vec<ContentHash> =
+                neighbors.iter().map(|n| n.prepared_input_hash).collect();
+            // Per-path chunk inputs (the embedding input includes the path, so
+            // identical content at two paths has two inputs); generations indexed
+            // before per-path inputs existed fall back to content-level rows.
+            let mut locations =
+                content::locate_chunk_inputs(&mut conn, self.inner.organization, &pins, &hashes)
                     .await
                     .map_err(|e| format!("store: {e}"))?;
-        }
-        let mut by_hash: BTreeMap<ContentHash, Vec<&content::ChunkLocation>> = BTreeMap::new();
-        for location in &locations {
-            by_hash
-                .entry(location.chunk.prepared_input_hash)
-                .or_default()
-                .push(location);
-        }
-        let mut list = Vec::new();
-        for neighbor in &neighbors {
-            for location in by_hash
-                .get(&neighbor.prepared_input_hash)
-                .into_iter()
-                .flatten()
-            {
-                let Some(view) = views.iter().find(|v| v.pinned.pin() == location.pin) else {
-                    continue;
-                };
-                list.push(Candidate {
-                    id: format!(
-                        "vec:{}:{}:{}",
-                        view.base_view, location.path, location.chunk.ordinal
-                    ),
-                    project: view.project().clone(),
-                    view: view.base_view.clone(),
-                    generation: view.generation(),
-                    path: location.path.clone(),
-                    range: Some(location.chunk.lines),
-                    content_hash: location.chunk.content_hash,
-                    symbol: location.chunk.symbol_path.clone(),
-                    language: view.language(&location.path),
-                    source: SourceKind::Semantic,
-                    source_rank: u32::try_from(list.len().saturating_add(1)).unwrap_or(u32::MAX),
-                    raw_score: 1.0 - neighbor.distance,
-                    detail: MatchDetail::Semantic {
-                        profile: profile.name.to_string(),
-                    },
-                });
+            let located: BTreeSet<_> = locations
+                .iter()
+                .map(|location| location.chunk.prepared_input_hash)
+                .collect();
+            let missing: Vec<_> = hashes
+                .iter()
+                .filter(|hash| !located.contains(*hash))
+                .copied()
+                .collect();
+            if !missing.is_empty() {
+                let legacy = content::locate_prepared_inputs(
+                    &mut conn,
+                    self.inner.organization,
+                    &pins,
+                    &missing,
+                )
+                .await
+                .map_err(|e| format!("store: {e}"))?;
+                locations.extend(legacy);
             }
+            let mut by_hash: BTreeMap<ContentHash, Vec<&content::ChunkLocation>> = BTreeMap::new();
+            for location in &locations {
+                by_hash
+                    .entry(location.chunk.prepared_input_hash)
+                    .or_default()
+                    .push(location);
+            }
+            let mut list = Vec::new();
+            for neighbor in &neighbors {
+                for location in by_hash
+                    .get(&neighbor.prepared_input_hash)
+                    .into_iter()
+                    .flatten()
+                {
+                    let Some(view) = views.iter().find(|v| v.pinned.pin() == location.pin) else {
+                        continue;
+                    };
+                    let candidate = Candidate {
+                        id: format!(
+                            "vec:{}:{}:{}",
+                            view.base_view, location.path, location.chunk.ordinal
+                        ),
+                        project: view.project().clone(),
+                        view: view.base_view.clone(),
+                        generation: view.generation(),
+                        path: location.path.clone(),
+                        range: Some(location.chunk.lines),
+                        content_hash: location.chunk.content_hash,
+                        symbol: location.chunk.symbol_path.clone(),
+                        language: view.language(&location.path),
+                        source: SourceKind::Semantic,
+                        source_rank: u32::try_from(list.len().saturating_add(1))
+                            .unwrap_or(u32::MAX),
+                        raw_score: 1.0 - neighbor.distance,
+                        detail: MatchDetail::Semantic {
+                            profile: profile.name.to_string(),
+                        },
+                    };
+                    if candidate_allowed_in_sections(
+                        &prepared.scope,
+                        &candidate,
+                        &filters.kinds,
+                        &filters.sections,
+                    ) {
+                        list.push(candidate);
+                    }
+                }
+            }
+            if list.len() >= limit || exhausted || k >= embeddings::MAX_K {
+                let capped = list.len() < limit && !exhausted && k >= embeddings::MAX_K;
+                list.truncate(limit);
+                for (rank, candidate) in list.iter_mut().enumerate() {
+                    candidate.source_rank =
+                        u32::try_from(rank.saturating_add(1)).unwrap_or(u32::MAX);
+                }
+                return Ok((list, capped));
+            }
+            k = k.saturating_mul(2).min(embeddings::MAX_K);
         }
-        Ok(list)
     }
 
     /// Runs the whole pipeline for `query` over a pinned manifest.
@@ -1377,9 +2047,58 @@ impl Engine {
         expand: bool,
         rerank: bool,
     ) -> Result<SearchRun, ToolError> {
-        let prepared = self.prepare(pinned, filters).await?;
+        self.run_search_policy(pinned, filters, query, limit, expand, rerank, false)
+            .await
+    }
+
+    /// Retrieval for source responses. Candidate admission is widened inside
+    /// one retrieved pool, so widening never repeats an embedding request.
+    pub(crate) async fn run_source_search(
+        &self,
+        pinned: &Pinned,
+        filters: &Filters,
+        query: &str,
+        limit: usize,
+    ) -> Result<SearchRun, ToolError> {
+        self.run_search_policy(pinned, filters, query, limit, true, false, true)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_search_policy(
+        &self,
+        pinned: &Pinned,
+        filters: &Filters,
+        query: &str,
+        limit: usize,
+        expand: bool,
+        rerank: bool,
+        source_policy: bool,
+    ) -> Result<SearchRun, ToolError> {
+        let preparation_started = Instant::now();
+        let mut filters = filters.clone();
+        filters.path_prefixes = normalize_prefixes(&filters.path_prefixes)?;
+        let mut prepared = self.prepare(pinned, &filters, source_policy).await?;
+        let mut retrieval = RetrievalMetrics {
+            preparation_ms: u64::try_from(preparation_started.elapsed().as_millis())
+                .unwrap_or(u64::MAX),
+            prepared_views: prepared.views.len(),
+            ..Default::default()
+        };
         let mut config: SearchConfig = self.inner.settings.search.clone();
-        config.fusion.result_limit = limit.clamp(1, 1000);
+        let result_limit = limit.clamp(1, if source_policy { 64 } else { 1000 });
+        config.fusion.result_limit = if source_policy {
+            result_limit.min(16)
+        } else {
+            result_limit
+        };
+        if source_policy {
+            config.fusion.candidate_limit = config
+                .fusion
+                .candidate_limit
+                .max(result_limit.saturating_mul(2))
+                .min(256);
+        }
         config.expansion.enabled = expand && config.expansion.enabled;
         config.rerank.enabled = rerank;
         let plan =
@@ -1393,23 +2112,32 @@ impl Engine {
             per_project_limit: config.fusion.candidate_quota_per_project,
         };
         let mut extra = prepared.degraded.clone();
+        let exact_started = Instant::now();
         let exact = if !searched || weights.exact <= 0.0 {
             SourceStatus::NotConsulted
         } else {
             let adapter = ExactAdapter {
                 views: &prepared.views,
+                kinds: &filters.kinds,
+                sections: &filters.sections,
             };
             match adapter.search_exact(&request) {
                 Ok(list) => SourceStatus::Answered(list),
                 Err(error) => SourceStatus::Failed(error),
             }
         };
+        retrieval.exact_ms = u64::try_from(exact_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let lexical_started = Instant::now();
         let lexical = if !searched || weights.lexical <= 0.0 {
             SourceStatus::NotConsulted
         } else {
             let adapter = LexicalAdapter {
                 views: &prepared.views,
+                kinds: &filters.kinds,
+                sections: &filters.sections,
+                spans_per_file: self.inner.settings.lexical_spans_per_file,
                 failures: Mutex::new(Vec::new()),
+                metrics: Mutex::new(RetrievalMetrics::default()),
             };
             let status = match adapter.search_lexical(&request) {
                 Ok(list) => SourceStatus::Answered(list),
@@ -1421,17 +2149,37 @@ impl Engine {
                     .into_inner()
                     .unwrap_or_else(PoisonError::into_inner),
             );
+            let lexical = adapter
+                .metrics
+                .into_inner()
+                .unwrap_or_else(PoisonError::into_inner);
+            retrieval.lexical_queries = lexical.lexical_queries;
+            retrieval.lexical_file_hits_examined = lexical.lexical_file_hits_examined;
+            retrieval.lexical_candidates = lexical.lexical_candidates;
             status
         };
-        let semantic = if !searched || weights.semantic <= 0.0 {
-            SourceStatus::NotConsulted
-        } else {
-            let (status, notes) = self
-                .semantic(&plan, &prepared, config.fusion.candidate_limit)
-                .await;
-            extra.extend(notes);
-            status
-        };
+        retrieval.lexical_ms =
+            u64::try_from(lexical_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        retrieval.exact_path_embedding_bypass = exact_path_answered(&plan, &exact);
+        let semantic_started = Instant::now();
+        let semantic =
+            if !searched || weights.semantic <= 0.0 || retrieval.exact_path_embedding_bypass {
+                SourceStatus::NotConsulted
+            } else {
+                let (status, notes) = self
+                    .semantic(
+                        &plan,
+                        &prepared,
+                        &filters,
+                        config.fusion.candidate_limit,
+                        &mut retrieval,
+                    )
+                    .await;
+                extra.extend(notes);
+                status
+            };
+        retrieval.semantic_ms =
+            u64::try_from(semantic_started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let lists = SourceLists {
             exact,
             lexical,
@@ -1440,21 +2188,101 @@ impl Engine {
         let graph = GraphAdapter {
             prepared: &prepared,
         };
+        let fusion_started = Instant::now();
         let mut response = knowell_query::search_with_candidates(
             &plan,
             &prepared.scope,
-            lists,
+            lists.clone(),
             Some(&graph),
             None,
             &config,
         )
         .map_err(|e| ToolError::invalid_input(e.to_string()))?;
+        while source_policy && should_widen_source_pool(&response, result_limit) {
+            config.fusion.result_limit = config
+                .fusion
+                .result_limit
+                .saturating_mul(2)
+                .min(result_limit);
+            response = knowell_query::search_with_candidates(
+                &plan,
+                &prepared.scope,
+                lists.clone(),
+                Some(&graph),
+                None,
+                &config,
+            )
+            .map_err(|error| ToolError::invalid_input(error.to_string()))?;
+        }
+        retrieval.fusion_expansion_ms =
+            u64::try_from(fusion_started.elapsed().as_millis()).unwrap_or(u64::MAX);
         for degradation in extra {
             if !response.degraded.contains(&degradation) {
                 response.degraded.push(degradation);
             }
         }
-        Ok(SearchRun { response, prepared })
+        if source_policy {
+            let hydration_started = Instant::now();
+            self.hydrate_source_results(&mut prepared, &response)
+                .await?;
+            retrieval.source_hydration_ms =
+                u64::try_from(hydration_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        }
+        tracing::debug!(metrics = ?retrieval, "search retrieval work");
+        Ok(SearchRun {
+            response,
+            prepared,
+            retrieval,
+        })
+    }
+
+    /// Only result and expanded paths need source bodies. Metadata and graph
+    /// tools retain their own complete build path; hydration cannot widen scope.
+    async fn hydrate_source_results(
+        &self,
+        prepared: &mut Prepared,
+        response: &SearchResponse,
+    ) -> Result<(), ToolError> {
+        let mut by_view: BTreeMap<(Name, QViewId), BTreeSet<RepoPath>> = BTreeMap::new();
+        let locations = knowell_query::task_source_locations(response, 64)
+            .map_err(|error| ToolError::internal(error.to_string()))?;
+        for location in locations {
+            if let Some((view, false)) = prepared.view_of(&location.project, &location.view)
+                && prepared.scope.paths.admits(&location.path)
+                && view
+                    .snapshot
+                    .file(&location.path)
+                    .is_some_and(|file| file.content_hash == location.content_hash)
+            {
+                by_view
+                    .entry((location.project.clone(), location.view.clone()))
+                    .or_default()
+                    .insert(location.path.clone());
+            }
+        }
+        for view in &mut prepared.views {
+            let Some(paths) = by_view.remove(&(view.project().clone(), view.base_view.clone()))
+            else {
+                continue;
+            };
+            let paths: Vec<_> = paths.into_iter().collect();
+            view.snapshot = Arc::new(
+                snapshot::hydrate_paths(
+                    &self.inner.store,
+                    &self.inner.texts,
+                    self.inner.organization,
+                    &view.snapshot,
+                    &paths,
+                    snapshot::ParseOptions {
+                        limits: self.inner.indexer.config().parse_limits,
+                        products: self.inner.parse_products.clone(),
+                    },
+                )
+                .await
+                .map_err(ToolError::from)?,
+            );
+        }
+        Ok(())
     }
 
     /// Texts of every result and expanded item, for snippets and packing.
@@ -1462,21 +2290,36 @@ impl Engine {
         &self,
         run: &SearchRun,
     ) -> Result<BTreeMap<ContentHash, Arc<str>>, ToolError> {
+        let locations: Vec<_> = run
+            .response
+            .results
+            .iter()
+            .map(|result| &result.location)
+            .chain(run.response.expanded.iter().map(|item| &item.location))
+            .collect();
+        self.texts_of_locations(&run.prepared, &locations).await
+    }
+
+    /// Reads the same bounded candidate admission used by Source packing.
+    /// Unselected graph neighbors must not cause source transfer or parsing.
+    pub(crate) async fn source_texts_for(
+        &self,
+        run: &SearchRun,
+    ) -> Result<BTreeMap<ContentHash, Arc<str>>, ToolError> {
+        let locations = knowell_query::task_source_locations(&run.response, 64)
+            .map_err(|error| ToolError::internal(error.to_string()))?;
+        self.texts_of_locations(&run.prepared, &locations).await
+    }
+
+    async fn texts_of_locations(
+        &self,
+        prepared: &Prepared,
+        locations: &[&Location],
+    ) -> Result<BTreeMap<ContentHash, Arc<str>>, ToolError> {
         let mut hashes = BTreeSet::new();
-        for result in &run.response.results {
-            if let Some((_, false)) = run
-                .prepared
-                .view_of(&result.location.project, &result.location.view)
-            {
-                hashes.insert(result.location.content_hash);
-            }
-        }
-        for item in &run.response.expanded {
-            if let Some((_, false)) = run
-                .prepared
-                .view_of(&item.location.project, &item.location.view)
-            {
-                hashes.insert(item.location.content_hash);
+        for location in locations {
+            if let Some((_, false)) = prepared.view_of(&location.project, &location.view) {
+                hashes.insert(location.content_hash);
             }
         }
         let mut out = BTreeMap::new();
@@ -1505,6 +2348,22 @@ pub(crate) fn snippets<'a>(
         prepared: &run.prepared,
         texts,
         max_lines,
+        source_terms: None,
+    }
+}
+
+/// A body-only region adapter that preserves short declarations and searches
+/// long ones around the query and retrieved span. No generative model runs.
+pub(crate) fn source_snippets<'a>(
+    run: &'a SearchRun,
+    texts: BTreeMap<ContentHash, Arc<str>>,
+    max_lines: u32,
+) -> SnippetAdapter<'a> {
+    SnippetAdapter {
+        prepared: &run.prepared,
+        texts,
+        max_lines,
+        source_terms: Some(crate::source_region::region_terms(&run.response.plan.query)),
     }
 }
 
@@ -1577,16 +2436,547 @@ mod tests {
     }
 
     #[test]
-    fn prefixes_become_globs() {
-        let globs = prefix_globs(&["src/pay".into(), "docs/".into(), "lib".into()]).unwrap();
+    fn prefixes_are_literal_and_match_sql_starts_with() {
+        let prefixes = normalize_prefixes(&[
+            " src/pay ".into(),
+            "docs/".into(),
+            "lib".into(),
+            "README".into(),
+            "src/star*/".into(),
+            "src/question?/".into(),
+            "src/%_/".into(),
+            "docs/".into(),
+        ])
+        .unwrap();
+        let filter = PathFilter {
+            prefixes: prefixes.clone(),
+            ..PathFilter::default()
+        };
         let p = |s| RepoPath::new(s).unwrap();
-        let admits = |path: &RepoPath| globs.iter().any(|g| g.matches(path));
-        assert!(admits(&p("src/payments/a.ts")));
-        assert!(admits(&p("src/pay.ts")));
-        assert!(admits(&p("docs/x.md")));
-        assert!(admits(&p("lib/a.rs")));
-        assert!(!admits(&p("src/billing/a.ts")));
-        assert!(!admits(&p("other/lib/a.rs")));
-        assert!(prefix_globs(&["/abs".into()]).is_err());
+        for path in [
+            "src/payments/a.ts",
+            "src/pay.ts",
+            "docs/x.md",
+            "lib/a.rs",
+            "library.rs",
+            "README.md",
+            "src/star*/file.rs",
+            "src/question?/file.rs",
+            "src/%_/file.rs",
+            "src/billing/a.ts",
+            "other/lib/a.rs",
+            "nested/README.md",
+            "src/starZZ/file.rs",
+            "src/questionZ/file.rs",
+            "src/XX/file.rs",
+            "docs",
+        ] {
+            let path = p(path);
+            assert_eq!(
+                filter.admits(&path),
+                prefixes
+                    .iter()
+                    .any(|prefix| path.as_str().starts_with(prefix)),
+                "{path}"
+            );
+        }
+        assert!(filter.admits(&p("README.md")));
+        assert!(!filter.admits(&p("src/starZZ/file.rs")));
+        assert_eq!(
+            prefixes
+                .iter()
+                .filter(|prefix| prefix.as_str() == "docs/")
+                .count(),
+            1
+        );
+        for prefix in [
+            "/abs",
+            "../outside",
+            "src//",
+            "src/./file",
+            "src\\file",
+            "src/\n",
+        ] {
+            assert!(normalize_prefixes(&[prefix.into()]).is_err(), "{prefix:?}");
+        }
+    }
+
+    fn candidate(path: &str, language: Option<&str>, detail: MatchDetail) -> Candidate {
+        Candidate {
+            id: format!("candidate:{path}"),
+            project: Name::new("sample").unwrap(),
+            view: QViewId::new("main").unwrap(),
+            generation: 1,
+            path: RepoPath::new(path).unwrap(),
+            range: None,
+            content_hash: ContentHash::of(b"synthetic"),
+            symbol: None,
+            language: language.map(|language| Language::new(language).unwrap()),
+            source: detail.kind(),
+            source_rank: 1,
+            raw_score: 1.0,
+            detail,
+        }
+    }
+
+    fn test_scope() -> QueryScope {
+        let mut manifest = ViewManifest::new(Name::new("sample-workspace").unwrap());
+        manifest.projects.insert(
+            Name::new("sample").unwrap(),
+            ProjectPin {
+                base: PinnedView {
+                    view: QViewId::new("main").unwrap(),
+                    generation: 1,
+                    commit: None,
+                },
+                overlay: None,
+                coverage: ProjectCoverage::default(),
+            },
+        );
+        QueryScope::all(manifest)
+    }
+
+    fn lexical_detail() -> MatchDetail {
+        MatchDetail::Lexical {
+            terms: vec!["decode".into()],
+        }
+    }
+
+    fn lexical_span(path: &str, start: u32, end: u32, terms: &[&str]) -> Candidate {
+        let mut candidate = candidate(
+            path,
+            Some("rust"),
+            MatchDetail::Lexical {
+                terms: terms.iter().map(|term| (*term).into()).collect(),
+            },
+        );
+        candidate.id = format!("lex:{path}:{start}:{end}");
+        candidate.range = Some(LineRange::new(start, end).unwrap());
+        candidate
+    }
+
+    #[test]
+    fn lexical_waves_preserve_file_breadth_under_the_global_quota() {
+        let found = vec![
+            (
+                10.0,
+                lexical_span("src/a.rs", 10, 12, &["decode", "header", "objects"]),
+            ),
+            (
+                10.0,
+                lexical_span("src/a.rs", 30, 32, &["decode", "header"]),
+            ),
+            (10.0, lexical_span("src/a.rs", 50, 52, &["decode"])),
+            (9.0, lexical_span("src/b.rs", 10, 12, &["decode"])),
+            (8.0, lexical_span("src/c.rs", 10, 12, &["decode"])),
+        ];
+        let first_wave = rank_lexical_and_limit(found.clone(), 3, None);
+        assert_eq!(
+            first_wave
+                .iter()
+                .map(|hit| hit.id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "lex:src/a.rs:10:12",
+                "lex:src/b.rs:10:12",
+                "lex:src/c.rs:10:12"
+            ]
+        );
+        let all = rank_lexical_and_limit(found, 5, None);
+        assert_eq!(
+            all.iter().map(|hit| hit.id.as_str()).collect::<Vec<_>>(),
+            [
+                "lex:src/a.rs:10:12",
+                "lex:src/b.rs:10:12",
+                "lex:src/c.rs:10:12",
+                "lex:src/a.rs:30:32",
+                "lex:src/a.rs:50:52"
+            ]
+        );
+        assert_eq!(
+            all.iter().map(|hit| hit.source_rank).collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5]
+        );
+    }
+
+    #[test]
+    fn lexical_tied_files_use_file_identity_before_local_evidence() {
+        let weak = lexical_span("src/a.rs", 10, 11, &["decode"]);
+        let best = lexical_span("src/a.rs", 30, 34, &["decode", "header"]);
+        let mut other = lexical_span("src/b.rs", 10, 11, &["decode", "header", "objects"]);
+        other.symbol = Some("decode_all".into());
+        let hits = rank_lexical_and_limit(vec![(7.0, other), (7.0, weak), (7.0, best)], 3, None);
+        assert_eq!(
+            hits.iter().map(|hit| hit.id.as_str()).collect::<Vec<_>>(),
+            [
+                "lex:src/a.rs:30:34",
+                "lex:src/b.rs:10:11",
+                "lex:src/a.rs:10:11"
+            ]
+        );
+    }
+
+    #[test]
+    fn lexical_local_span_order_is_stable_and_duplicates_do_not_spend_quota() {
+        let short = lexical_span("src/a.rs", 10, 11, &["decode"]);
+        let best = lexical_span("src/a.rs", 30, 34, &["decode", "header"]);
+        let mut symbol = lexical_span("src/a.rs", 60, 64, &["decode"]);
+        symbol.symbol = Some("decode_object".into());
+        let mut found = vec![
+            (7.0, short),
+            (7.0, symbol),
+            (7.0, best.clone()),
+            (7.0, best),
+        ];
+        let forward = rank_lexical_and_limit(found.clone(), 3, None);
+        found.reverse();
+        assert_eq!(forward, rank_lexical_and_limit(found, 3, None));
+        assert_eq!(
+            forward
+                .iter()
+                .map(|hit| hit.id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "lex:src/a.rs:30:34",
+                "lex:src/a.rs:60:64",
+                "lex:src/a.rs:10:11"
+            ]
+        );
+    }
+
+    #[test]
+    fn lexical_waves_keep_project_limits_and_contiguous_ranks() {
+        let mut outside = lexical_span("src/c.rs", 10, 11, &["decode"]);
+        outside.project = Name::new("second").unwrap();
+        let found = vec![
+            (10.0, lexical_span("src/a.rs", 10, 11, &["decode"])),
+            (10.0, lexical_span("src/a.rs", 30, 31, &["decode"])),
+            (9.0, lexical_span("src/b.rs", 10, 11, &["decode"])),
+            (8.0, outside),
+        ];
+        let hits = rank_lexical_and_limit(found.clone(), 4, Some(1));
+        assert_eq!(
+            hits.iter().map(|hit| hit.id.as_str()).collect::<Vec<_>>(),
+            ["lex:src/a.rs:10:11", "lex:src/c.rs:10:11"]
+        );
+        assert_eq!(
+            hits.iter().map(|hit| hit.source_rank).collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert!(rank_lexical_and_limit(found.clone(), 0, None).is_empty());
+        assert!(rank_lexical_and_limit(found, 4, Some(0)).is_empty());
+    }
+
+    #[test]
+    fn lexical_file_waves_separate_generations_and_content_hashes() {
+        let original = lexical_span("src/a.rs", 10, 11, &["decode"]);
+        let extra = lexical_span("src/a.rs", 30, 31, &["decode"]);
+        let mut newer = original.clone();
+        newer.id = "newer".into();
+        newer.generation = 2;
+        let mut changed = original.clone();
+        changed.id = "changed".into();
+        changed.content_hash = ContentHash::of(b"changed synthetic");
+        let hits = rank_lexical_and_limit(
+            vec![(7.0, extra), (7.0, newer), (7.0, changed), (7.0, original)],
+            3,
+            None,
+        );
+        let stamps: BTreeSet<_> = hits
+            .iter()
+            .map(|hit| (hit.generation, hit.content_hash))
+            .collect();
+        assert_eq!(stamps.len(), 3);
+        assert!(
+            hits.iter()
+                .all(|hit| hit.range == Some(LineRange::new(10, 11).unwrap()))
+        );
+    }
+
+    #[test]
+    fn exact_ranking_keeps_its_score_and_location_order() {
+        let detail = MatchDetail::Exact {
+            term: "decode".into(),
+            target: ExactTarget::Symbol,
+        };
+        let mut first = candidate("src/a.rs", Some("rust"), detail.clone());
+        first.id = "first".into();
+        first.range = Some(LineRange::new(10, 11).unwrap());
+        let mut second = first.clone();
+        second.id = "second".into();
+        second.range = Some(LineRange::new(30, 31).unwrap());
+        let other = candidate("src/b.rs", Some("rust"), detail);
+        let hits = rank_and_limit(vec![(6.0, other), (7.0, second), (7.0, first)], 2, None);
+        assert_eq!(
+            hits.iter().map(|hit| hit.id.as_str()).collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+    }
+
+    #[test]
+    fn source_admission_checks_scope_version_and_shadowing_before_quota() {
+        let mut scope = test_scope();
+        scope.paths.prefixes = normalize_prefixes(&["src/".into()]).unwrap();
+        scope.languages = Some([Language::new("rust").unwrap()].into());
+        let base = candidate("src/decoder.rs", Some("rust"), lexical_detail());
+        assert!(candidate_allowed(&scope, &base, &[]));
+        let wrong_path = candidate("docs/decoder.md", Some("rust"), lexical_detail());
+        assert!(!candidate_allowed(&scope, &wrong_path, &[]));
+        let unknown_language = candidate("src/decoder.rs", None, lexical_detail());
+        assert!(!candidate_allowed(&scope, &unknown_language, &[]));
+        let mut stale = base.clone();
+        stale.generation = 0;
+        assert!(!candidate_allowed(&scope, &stale, &[]));
+        let mut unauthorized = base.clone();
+        unauthorized.project = Name::new("outside").unwrap();
+        assert!(!candidate_allowed(&scope, &unauthorized, &[]));
+        scope
+            .manifest
+            .projects
+            .get_mut(&base.project)
+            .unwrap()
+            .overlay = Some(OverlayPin {
+            pin: PinnedView {
+                view: QViewId::new("personal").unwrap(),
+                generation: 2,
+                commit: None,
+            },
+            shadowed_paths: [base.path.clone()].into(),
+        });
+        assert!(!candidate_allowed(&scope, &base, &[]));
+        let mut overlay = base;
+        overlay.view = QViewId::new("personal").unwrap();
+        overlay.generation = 2;
+        assert!(candidate_allowed(&scope, &overlay, &[]));
+    }
+
+    #[test]
+    fn source_kind_filters_match_the_public_search_categories() {
+        let scope = test_scope();
+        let doc = candidate("docs/reader.md", Some("markdown"), lexical_detail());
+        let code = candidate("src/reader.rs", Some("rust"), lexical_detail());
+        let test_doc = candidate("tests/reader.md", Some("markdown"), lexical_detail());
+        let contract = candidate(
+            "api.yml",
+            Some("yaml"),
+            MatchDetail::Exact {
+                term: "GET /documents".into(),
+                target: ExactTarget::Contract,
+            },
+        );
+        assert!(candidate_allowed(&scope, &doc, &[SearchKind::Docs]));
+        assert!(!candidate_allowed(&scope, &code, &[SearchKind::Docs]));
+        assert!(candidate_allowed(&scope, &code, &[SearchKind::Code]));
+        assert!(candidate_allowed(&scope, &test_doc, &[SearchKind::Code]));
+        assert!(!candidate_allowed(&scope, &test_doc, &[SearchKind::Docs]));
+        assert!(candidate_allowed(
+            &scope,
+            &contract,
+            &[SearchKind::Contracts]
+        ));
+        assert!(!candidate_allowed(&scope, &contract, &[SearchKind::Code]));
+    }
+
+    #[test]
+    fn context_sections_are_admitted_before_source_quotas() {
+        let scope = test_scope();
+        let doc = candidate("docs/reader.md", Some("markdown"), lexical_detail());
+        let code = candidate("src/reader.rs", Some("rust"), lexical_detail());
+        let test = candidate("tests/reader.rs", Some("rust"), lexical_detail());
+        let contract = candidate(
+            "api.yml",
+            Some("yaml"),
+            MatchDetail::Exact {
+                term: "GET /documents".into(),
+                target: ExactTarget::Contract,
+            },
+        );
+        let allowed = |candidate, sections: &[ContextSection]| {
+            candidate_allowed_in_sections(&scope, candidate, &[], sections)
+        };
+        assert!(allowed(&doc, &[ContextSection::Docs]));
+        assert!(!allowed(&code, &[ContextSection::Docs]));
+        assert!(allowed(&test, &[ContextSection::Tests]));
+        assert!(!allowed(&code, &[ContextSection::Tests]));
+        assert!(!allowed(&test, &[ContextSection::Code]));
+        assert!(allowed(&contract, &[ContextSection::Contracts]));
+        assert!(!allowed(&doc, &[ContextSection::Memory]));
+        assert!(allowed(&doc, &[ContextSection::Docs, ContextSection::Code]));
+        assert!(allowed(
+            &code,
+            &[ContextSection::Docs, ContextSection::Code]
+        ));
+    }
+
+    #[test]
+    fn graph_relationships_require_explicit_semantics() {
+        assert_eq!(graph_edge_kind("calls", true), Some(EdgeKind::Caller));
+        assert_eq!(graph_edge_kind("calls", false), Some(EdgeKind::Callee));
+        assert_eq!(graph_edge_kind("tests", true), Some(EdgeKind::Test));
+        assert_eq!(graph_edge_kind("tests", false), None);
+        for kind in [
+            "imports",
+            "references",
+            "implements",
+            "documents",
+            "unknown",
+        ] {
+            assert_eq!(graph_edge_kind(kind, true), None);
+            assert_eq!(graph_edge_kind(kind, false), None);
+        }
+    }
+
+    #[test]
+    fn lexical_refill_reaches_a_valid_file_beyond_the_first_result_window() {
+        let index = LexicalIndex::create_in_ram().unwrap();
+        let mut writer = index.writer().unwrap();
+        for path in ["a/one.rs", "a/two.rs", "a/three.rs", "z/target.rs"] {
+            writer
+                .add(knowell_lexical::LexicalDoc {
+                    id: path,
+                    path,
+                    text: "fn decode() {}",
+                })
+                .unwrap();
+        }
+        writer.commit().unwrap();
+        let scan = scoped_lexical_hits(
+            |fetch| index.search("decode", fetch),
+            |hit| hit.path.starts_with("z/"),
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            scan.hits
+                .iter()
+                .map(|hit| hit.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["z/target.rs"]
+        );
+        assert!(scan.queries > 1);
+        assert!(!scan.capped);
+    }
+
+    #[test]
+    fn lexical_refill_is_bounded_and_does_not_hide_partial_coverage() {
+        let mut requested = Vec::new();
+        let scan = scoped_lexical_hits(
+            |fetch| {
+                requested.push(fetch);
+                Ok::<_, ()>(
+                    (0..fetch)
+                        .map(|id| LexicalHit {
+                            id: format!("src/{id}.rs"),
+                            path: format!("src/{id}.rs"),
+                            score: 1.0,
+                            matched_terms: vec!["decode".into()],
+                        })
+                        .collect(),
+                )
+            },
+            |_| false,
+            1,
+        )
+        .unwrap();
+        assert!(scan.hits.is_empty());
+        assert!(scan.capped);
+        assert_eq!(requested.last(), Some(&MAX_LEXICAL_REFILL));
+        assert!(requested.len() <= 14);
+        let mut called = false;
+        let empty = scoped_lexical_hits(
+            |_| {
+                called = true;
+                Ok::<_, ()>(Vec::new())
+            },
+            |_| true,
+            0,
+        )
+        .unwrap();
+        assert!(!called);
+        assert!(empty.hits.is_empty());
+        let failed = scoped_lexical_hits(|_| Err::<Vec<LexicalHit>, _>("unavailable"), |_| true, 1);
+        assert!(matches!(failed, Err("unavailable")));
+    }
+
+    #[test]
+    fn lexical_span_reasons_and_ids_describe_the_returned_source_span() {
+        let project = Name::new("sample").unwrap();
+        let view = QViewId::new("main").unwrap();
+        let path = RepoPath::new("src/reader.rs").unwrap();
+        let chunk = |start, text: &str| ChunkEntry {
+            lines: LineRange::new(start, start + 1).unwrap(),
+            bytes: u64::try_from(text.len()).unwrap(),
+            kind: "function".into(),
+            symbol_path: Some(format!("decode_{start}")),
+            terms: terms_of(text),
+            structure: None,
+        };
+        let a = chunk(10, "decode header");
+        let b = chunk(30, "decode objects");
+        let make = |chunk| {
+            LexicalAdapter::candidate(
+                &project,
+                view.clone(),
+                1,
+                path.clone(),
+                ContentHash::of(b"synthetic"),
+                Some(Language::new("rust").unwrap()),
+                Some(chunk),
+                7.0,
+                vec!["decode".into(), "header".into(), "objects".into()],
+            )
+        };
+        let first = make(&a);
+        let second = make(&b);
+        assert_ne!(first.id, second.id);
+        assert_eq!(
+            first.detail,
+            MatchDetail::Lexical {
+                terms: vec!["decode".into(), "header".into()]
+            }
+        );
+        assert_eq!(
+            second.detail,
+            MatchDetail::Lexical {
+                terms: vec!["decode".into(), "objects".into()]
+            }
+        );
+        assert_eq!(first.range, Some(a.lines));
+        assert_eq!(second.range, Some(b.lines));
+    }
+
+    #[test]
+    fn only_answered_full_path_queries_skip_semantic_embedding() {
+        let exact = SourceStatus::Answered(vec![candidate(
+            "src/decoder.rs",
+            Some("rust"),
+            MatchDetail::Exact {
+                term: "src/decoder.rs".into(),
+                target: ExactTarget::Path,
+            },
+        )]);
+        let plan = |query| knowell_query::plan(query, &knowell_query::Glossary::default());
+        assert!(exact_path_answered(&plan("src/decoder.rs"), &exact));
+        assert!(exact_path_answered(&plan("src\\decoder.rs"), &exact));
+        assert!(exact_path_answered(&plan("./src/decoder.rs"), &exact));
+        for query in [
+            "decoder.rs",
+            "how does src/decoder.rs decode files?",
+            "src/missing.rs",
+            "decodeReader",
+        ] {
+            assert!(!exact_path_answered(&plan(query), &exact), "{query}");
+        }
+        assert!(!exact_path_answered(
+            &plan("src/decoder.rs"),
+            &SourceStatus::Answered(Vec::new())
+        ));
+        assert!(!exact_path_answered(
+            &plan("src/decoder.rs"),
+            &SourceStatus::NotConsulted
+        ));
+        let mut truncated = plan("src/decoder.rs");
+        truncated.truncated = true;
+        assert!(!exact_path_answered(&truncated, &exact));
     }
 }

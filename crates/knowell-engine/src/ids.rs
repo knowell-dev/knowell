@@ -2,8 +2,9 @@
 //!
 //! An id names an exact file version (the first 16 hex digits of its BLAKE3
 //! content hash) and a line range, plus the commit of the view it came from
-//! for display. `fetch` resolves it against the context's view: the same
-//! version is `current`; another version of the same path is `changed` (with
+//! to bind historical fetches to retained generation metadata. `fetch` resolves
+//! it against the context's view: the same snapshot and version is `current`;
+//! another version of the same path is `changed` (with
 //! the id of the current range); a missing path is `deleted`.
 //!
 //! Paths too long for the 512-byte id limit are replaced by `~` and the
@@ -56,6 +57,15 @@ impl SourceRef {
     pub(crate) fn names_version(&self, hash: &ContentHash) -> bool {
         hash_digest(hash) == self.hash16
     }
+
+    /// Whether the retained full commit matches this id's commit prefix.
+    /// A prefix alone is insufficient to manufacture historical provenance.
+    pub(crate) fn names_commit(&self, commit: Option<&str>) -> bool {
+        match commit {
+            Some(commit) => commit.starts_with(&self.commit12),
+            None => self.commit12 == NO_COMMIT,
+        }
+    }
 }
 
 fn hash_digest(hash: &ContentHash) -> String {
@@ -87,6 +97,32 @@ pub(crate) fn source_id(
         )
     };
     ResultId::new(text).map_err(|e| ToolError::internal(format!("result id: {e}")))
+}
+
+/// Fetchable, disjoint source ranges omitted before or after an emitted region.
+/// Handles retain the same commit and body identity as the shown source.
+pub(crate) fn source_continuations(
+    project: &Name,
+    commit: Option<&str>,
+    hash: &ContentHash,
+    path: &RepoPath,
+    shown: LineRange,
+    extent: LineRange,
+) -> Result<Vec<ResultId>, ToolError> {
+    let mut ids = Vec::new();
+    if extent.start() < shown.start()
+        && let Some(end) = shown.start().checked_sub(1)
+        && let Ok(range) = LineRange::new(extent.start(), end.min(extent.end()))
+    {
+        ids.push(source_id(project, commit, hash, path, range)?);
+    }
+    if shown.end() < extent.end()
+        && let Some(start) = shown.end().checked_add(1)
+        && let Ok(range) = LineRange::new(start.max(extent.start()), extent.end())
+    {
+        ids.push(source_id(project, commit, hash, path, range)?);
+    }
+    Ok(ids)
 }
 
 /// Whether every byte is printable ASCII without spaces (the id alphabet).
@@ -194,6 +230,9 @@ mod tests {
         assert_eq!(parsed.project.as_str(), "api");
         assert_eq!(parsed.lines, lines);
         assert!(parsed.names_version(&hash));
+        assert!(parsed.names_commit(Some(&commit)));
+        assert!(!parsed.names_commit(Some(&"b".repeat(40))));
+        assert!(!parsed.names_commit(None));
         assert!(parsed.path.matches(&RepoPath::new("src/c.ts").unwrap()));
         // A path with a space cannot appear verbatim: it is hashed.
         let id = source_id(&name("api"), None, &hash, &path, lines).unwrap();
@@ -201,6 +240,8 @@ mod tests {
         assert!(matches!(parsed.path, PathRef::Hashed(_)));
         assert!(parsed.path.matches(&path));
         assert_eq!(parsed.commit12, "none");
+        assert!(parsed.names_commit(None));
+        assert!(!parsed.names_commit(Some(&commit)));
     }
 
     #[test]

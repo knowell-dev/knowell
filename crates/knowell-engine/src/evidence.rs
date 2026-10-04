@@ -2,6 +2,8 @@
 //! `Evidence` (project, ref, layer, commit, path, lines, content hash, why,
 //! freshness, index state) and gaps that explain empty or partial answers.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use knowell_core::{LineRange, Name, RepoPath, TrackTarget};
 use knowell_mcp::tools::{HitKind, QueryClass};
 use knowell_mcp::{
@@ -10,7 +12,7 @@ use knowell_mcp::{
 };
 use knowell_query::{
     Component, CoverageGap, Degradation, EdgeKind, EmptyReason, ExactTarget, GraphStep, Intent,
-    Location, Reason, ScoreBreakdown, SearchResponse, SourceKind,
+    Location, Omission, OmitReason, Reason, ScoreBreakdown, SearchResponse, SourceKind,
 };
 
 use crate::ids::source_id;
@@ -127,8 +129,7 @@ fn label(location: &Location, symbol: Option<&str>) -> String {
 
 fn relation(edge: EdgeKind) -> RelationKind {
     match edge {
-        // Caller/callee edges currently come from stored file imports.
-        EdgeKind::Caller | EdgeKind::Callee => RelationKind::Imports,
+        EdgeKind::Caller | EdgeKind::Callee => RelationKind::Calls,
         EdgeKind::Test => RelationKind::Tests,
         EdgeKind::Doc => RelationKind::Documents,
         EdgeKind::Type | EdgeKind::Contract => RelationKind::References,
@@ -284,19 +285,59 @@ pub(crate) fn degradation_gaps(degraded: &[Degradation]) -> Vec<Gap> {
         .collect()
 }
 
-/// Gaps for analysis the searched views lack.
+/// One gap per project for analysis the searched views lack, with sorted,
+/// deduplicated language names.
 pub(crate) fn coverage_gaps(gaps: &[CoverageGap]) -> Vec<Gap> {
-    gaps.iter()
-        .map(|CoverageGap::NoReferenceResolution { project, language }| {
+    let mut languages_by_project: BTreeMap<&Name, BTreeSet<&str>> = BTreeMap::new();
+    for CoverageGap::NoReferenceResolution { project, language } in gaps {
+        languages_by_project
+            .entry(project)
+            .or_default()
+            .insert(language.as_str());
+    }
+    languages_by_project
+        .into_iter()
+        .map(|(project, languages)| {
+            let languages = languages.into_iter().collect::<Vec<_>>().join(", ");
             Gap::for_project(
                 GapReason::NoReferenceResolutionForLanguage,
                 project.clone(),
                 format!(
-                    "references in {language} are matched structurally (imports) only; missing callers do not mean there are none"
+                    "references in {languages}: reference resolution unavailable; missing call or test relations do not prove absence"
                 ),
             )
         })
         .collect()
+}
+
+/// Source acquisition failures are distinct from retrieval finding no matches.
+/// Provider/parser error strings are deliberately excluded from public notices.
+pub(crate) fn source_omission_gaps(omitted: &[Omission]) -> Vec<Gap> {
+    let mut missing = 0usize;
+    let mut stale = 0usize;
+    let mut failed = 0usize;
+    for omission in omitted {
+        match omission.reason {
+            OmitReason::NoSnippet => missing = missing.saturating_add(1),
+            OmitReason::StaleContent { .. } => stale = stale.saturating_add(1),
+            OmitReason::SnippetFailed { .. } => failed = failed.saturating_add(1),
+            _ => {}
+        }
+    }
+    let mut gaps = Vec::new();
+    for (count, explanation) in [
+        (missing, "the pinned source body was unavailable"),
+        (stale, "the source body did not match the pinned version"),
+        (failed, "source acquisition or range validation failed"),
+    ] {
+        if count > 0 {
+            gaps.push(Gap::new(
+                GapReason::NotFound,
+                format!("{count} retrieved source regions were omitted because {explanation}; this is a source acquisition omission, not an empty search"),
+            ));
+        }
+    }
+    gaps
 }
 
 /// Gaps explaining an empty search.
@@ -402,6 +443,177 @@ mod tests {
         }
     }
 
+    fn missing_references(project: &str, language: &str) -> CoverageGap {
+        CoverageGap::NoReferenceResolution {
+            project: Name::new(project).unwrap(),
+            language: knowell_query::Language::new(language).unwrap(),
+        }
+    }
+
+    #[test]
+    fn source_failures_describe_acquisition_omissions_without_absence_or_raw_errors() {
+        let reasons = [
+            OmitReason::NoSnippet,
+            OmitReason::StaleContent {
+                expected: ContentHash::of(b"pinned synthetic source"),
+                found: ContentHash::of(b"different synthetic source"),
+            },
+            OmitReason::SnippetFailed {
+                message: "untrusted internal error must not leak".into(),
+            },
+        ];
+        for reason in reasons {
+            let omitted = vec![Omission {
+                origin: knowell_query::Origin::Result { rank: 1 },
+                location: location("src/fixture.rs"),
+                symbol: None,
+                kind: Some(knowell_query::SnippetKind::Body),
+                reason,
+            }];
+            let gaps = source_omission_gaps(&omitted);
+            assert_eq!(gaps.len(), 1);
+            assert_eq!(gaps.first().unwrap().reason, GapReason::NotFound);
+            assert!(
+                gaps.first()
+                    .unwrap()
+                    .message
+                    .contains("source acquisition omission")
+            );
+            assert!(
+                !gaps
+                    .first()
+                    .unwrap()
+                    .message
+                    .contains("no evidence was found")
+            );
+            assert!(
+                !gaps
+                    .first()
+                    .unwrap()
+                    .message
+                    .contains("untrusted internal error")
+            );
+        }
+        assert!(source_omission_gaps(&[]).is_empty());
+    }
+
+    #[test]
+    fn coverage_gaps_group_all_languages_for_a_project() {
+        let gaps = coverage_gaps(&[
+            missing_references("api", "rust"),
+            missing_references("api", "markdown"),
+            missing_references("api", "toml"),
+            missing_references("api", "c++"),
+        ]);
+        assert_eq!(
+            gaps,
+            vec![Gap::for_project(
+                GapReason::NoReferenceResolutionForLanguage,
+                Name::new("api").unwrap(),
+                "references in c++, markdown, rust, toml: reference resolution unavailable; missing call or test relations do not prove absence",
+            )],
+        );
+    }
+
+    #[test]
+    fn coverage_gaps_deduplicate_and_sort_independent_of_input_order() {
+        let input = vec![
+            missing_references("api", "typescript"),
+            missing_references("api", "c#"),
+            missing_references("api", "rust"),
+            missing_references("api", " TypeScript "),
+            missing_references("api", "c#"),
+        ];
+        let forward = coverage_gaps(&input);
+        let mut reversed = input;
+        reversed.reverse();
+        assert_eq!(coverage_gaps(&reversed), forward);
+        assert_eq!(
+            forward,
+            vec![Gap::for_project(
+                GapReason::NoReferenceResolutionForLanguage,
+                Name::new("api").unwrap(),
+                "references in c#, rust, typescript: reference resolution unavailable; missing call or test relations do not prove absence",
+            )],
+        );
+    }
+
+    #[test]
+    fn coverage_gaps_keep_projects_and_their_languages_separate() {
+        let gaps = coverage_gaps(&[
+            missing_references("web", "typescript"),
+            missing_references("api", "rust"),
+            missing_references("web", "rust"),
+            missing_references("api", "rust"),
+        ]);
+        assert_eq!(
+            gaps,
+            vec![
+                Gap::for_project(
+                    GapReason::NoReferenceResolutionForLanguage,
+                    Name::new("api").unwrap(),
+                    "references in rust: reference resolution unavailable; missing call or test relations do not prove absence",
+                ),
+                Gap::for_project(
+                    GapReason::NoReferenceResolutionForLanguage,
+                    Name::new("web").unwrap(),
+                    "references in rust, typescript: reference resolution unavailable; missing call or test relations do not prove absence",
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn coverage_gaps_are_empty_without_missing_analysis() {
+        assert!(coverage_gaps(&[]).is_empty());
+    }
+
+    #[test]
+    fn coverage_gaps_reduce_serialized_volume_without_losing_limitations() {
+        let input: Vec<_> = [
+            "c",
+            "cmake",
+            "c++",
+            "css",
+            "html",
+            "javascript",
+            "markdown",
+            "python",
+            "rust",
+            "text",
+            "toml",
+            "yaml",
+        ]
+        .into_iter()
+        .map(|language| missing_references("sample", language))
+        .collect();
+        let previous: Vec<_> = input
+            .iter()
+            .map(|CoverageGap::NoReferenceResolution { project, language }| {
+                Gap::for_project(
+                    GapReason::NoReferenceResolutionForLanguage,
+                    project.clone(),
+                    format!(
+                        "references in {language} are matched structurally (imports) only; missing callers do not mean there are none"
+                    ),
+                )
+            })
+            .collect();
+        let aggregated = coverage_gaps(&input);
+        assert_eq!(
+            aggregated,
+            vec![Gap::for_project(
+                GapReason::NoReferenceResolutionForLanguage,
+                Name::new("sample").unwrap(),
+                "references in c, c++, cmake, css, html, javascript, markdown, python, rust, text, toml, yaml: reference resolution unavailable; missing call or test relations do not prove absence",
+            )],
+        );
+        assert!(
+            serde_json::to_vec(&aggregated).unwrap().len()
+                < serde_json::to_vec(&previous).unwrap().len()
+        );
+    }
+
     #[test]
     fn hit_kinds_follow_paths_and_languages() {
         let p = |s: &str| RepoPath::new(s).unwrap();
@@ -445,7 +657,7 @@ mod tests {
         assert_eq!(hops.len(), 1);
         assert_eq!(hops[0].from, "api:A.f");
         assert_eq!(hops[0].to, "api:src/b.ts");
-        assert_eq!(hops[0].relation, RelationKind::Imports);
+        assert_eq!(hops[0].relation, RelationKind::Calls);
         assert_eq!(hops[0].evidence_type, EvidenceType::SyntacticObservation);
     }
 }

@@ -152,6 +152,8 @@ async fn serve(
 
     let deps = EngineDeps {
         home: env.home.clone(),
+        parse_cache: env.parse_cache,
+        lexical_spans: env.lexical_spans,
         engine: engine.clone(),
         store: store.clone(),
         workspace_files: config.workspace_files.clone(),

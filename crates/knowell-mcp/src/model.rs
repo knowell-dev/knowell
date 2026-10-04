@@ -29,7 +29,7 @@ pub struct Target {
     #[schemars(description = "")]
     pub workspace: Option<Name>,
     /// Project to ref (with workspace); ref is branch:x, tag:x, commit:sha or worktree.
-    #[schemars(description = "project to ref (with workspace)")]
+    #[schemars(description = "project to ref; with workspace")]
     #[serde(default, skip_serializing_if = "Vec::is_empty", with = "view_map")]
     #[schemars(schema_with = "view_map::schema")]
     pub views: Vec<ViewPin>,

@@ -14,10 +14,14 @@
 //!          │ exact terms        │ 3 drop: malformed, unpinned, filtered,   │ score breakdown         │ budget, citations,
 //!          │ glossary           │   shadowed by overlay, over quota        │ expanded items          │ omitted,
 //!          │ (classifier hook)  │ 4 weighted RRF + overlap de-duplication  │ degraded / coverage     │ uncertainties
-//!          │                    │ 5 result quota per project, limit        │ empty explanation       │
-//!          │                    │ 6 rerank short list (optional, off)      │                         │
+//!          │                    │ 5 rerank short list (optional, off)      │ empty explanation       │
+//!          │                    │ 6 result quota per project, limit        │                         │
 //!          │                    │ 7 graph expansion (bounded)              │                         │
 //! ```
+//!
+//! [`pack_task`] defaults to query-sensitive source bodies with bounded
+//! complementary selection. The skeleton-first [`pack`] API and explicit
+//! research comparators remain available for reproducible comparisons.
 //!
 //! Principles carried into the API:
 //!
@@ -75,6 +79,7 @@ mod pack;
 mod plan;
 mod rerank;
 mod scope;
+mod task_pack;
 mod text;
 
 pub use candidate::{
@@ -112,4 +117,8 @@ pub use plan::{
 pub use rerank::{RerankItem, Reranker};
 pub use scope::{
     OverlayPin, PathFilter, PinnedView, ProjectCoverage, ProjectPin, QueryScope, ViewManifest,
+};
+pub use task_pack::{
+    EvidenceRole, RoleEvidence, TaskContextPack, TaskPackOptions, TaskSelectionReport,
+    TaskSelectionStrategy, pack_task, pack_task_with, task_source_locations,
 };

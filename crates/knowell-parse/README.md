@@ -26,6 +26,7 @@ let outline = skeleton(&parsed, &text)?;             // bodies elided
 | `chunks(&ParsedFile, &str, &ChunkOptions) -> Result<Vec<Chunk>, ParseError>` | Meaningful units for embedding. |
 | `prepared_input(&Chunk, &ChunkContext) -> PreparedInput` | Exact embedding input (`title`, `text`, `hash`). |
 | `ChunkContext::for_chunk(project, &ParsedFile, &Chunk)` | Derives the container signature and doc for a chunk. |
+| `Chunk::is_exact_source(&str) -> bool` | Whether chunk text equals its contiguous source bytes; false for elisions, joined regions or invalid UTF-8 ranges. |
 | `skeleton(&ParsedFile, &str) -> Result<String, ParseError>` | Declarations with bodies elided. |
 | `Language::detect(&RepoPath, &str)`, `Language::tier()` | Detection by file name, extension, shebang, `.h` sniffing. |
 | `PARSER_VERSION`, `PREPARED_FORMAT_VERSION` | Cache-invalidation versions (see below). |

@@ -13,7 +13,7 @@ use knowell_mcp::{
     ToolError, ViewLayer,
 };
 use knowell_parse::Language as ParseLanguage;
-use knowell_store::jobs;
+use knowell_store::{content, jobs};
 use time::format_description::well_known::Rfc3339;
 
 use super::memory::{conflict_map, memory_error, task_summary};
@@ -101,8 +101,16 @@ impl Engine {
             }
             let languages = match pinned.projects.get(&entry.name) {
                 Some(project) => {
-                    let snapshot = self.snapshot_of(project).await?;
-                    let mut counts: Vec<(String, u64)> = snapshot.languages().into_iter().collect();
+                    let mut conn = self.inner.store.acquire().await.map_err(store_tool)?;
+                    let mut counts: Vec<(String, u64)> = content::file_languages_at(
+                        &mut conn,
+                        self.inner.organization,
+                        project.pin(),
+                    )
+                    .await
+                    .map_err(store_tool)?
+                    .into_iter()
+                    .collect();
                     counts.sort_by(|(la, a), (lb, b)| b.cmp(a).then_with(|| la.cmp(lb)));
                     counts
                         .into_iter()

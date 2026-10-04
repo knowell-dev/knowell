@@ -2,14 +2,15 @@
 //! citations, omissions, uncertainties, determinism.
 
 use knowell_query::{
-    Candidate, ContextPack, EdgeKind, EvidenceType, Glossary, OmitReason, Origin, QueryPlan,
-    Resolution, SearchConfig, SearchResponse, SnippetKind, SourceError, SourceKind, Sources,
-    Uncertainty, pack, pack_with, plan, search,
+    Candidate, CommitId, ContextPack, EdgeKind, EvidenceRole, EvidenceType, Glossary, OmitReason,
+    Origin, QueryPlan, Resolution, SearchConfig, SearchResponse, SnippetKind, SourceError,
+    SourceKind, Sources, TaskPackOptions, TaskSelectionStrategy, Uncertainty, pack, pack_task_with,
+    pack_with, plan, search,
 };
 
 use crate::common::{
-    COMMIT, FakeGraph, FakeSnippets, FakeSource, Words, blob, graph_node, hit, neighbor,
-    no_expansion, scope,
+    COMMIT, FakeGraph, FakeSnippets, FakeSource, Words, blob, graph_node, hit, name, neighbor,
+    no_expansion, pinned, scope, view,
 };
 
 use SnippetKind::{Body, Skeleton};
@@ -153,6 +154,175 @@ fn a_body_containing_other_packed_text_covers_it() {
     assert_eq!(covered, [(5, 8)]);
     assert_eq!(pack.used_tokens, 24);
     assert!(pack.omitted.is_empty(), "covered text is not missing");
+}
+
+#[test]
+fn equal_body_text_at_other_bindings_keeps_distinct_citations_and_costs() {
+    let body = "pub fn apply() {\n    next();\n}";
+    for (project, path) in [("api", "src/alternate.rs"), ("web", "src/apply.rs")] {
+        let mut first = hit(SourceKind::Lexical, 1, "api", "src/apply.rs", (1, 3));
+        first.content_hash = blob(body);
+        let mut second = hit(SourceKind::Lexical, 2, project, path, (1, 3));
+        second.content_hash = first.content_hash;
+        let mut query_scope = scope(&["api", "web"]);
+        if project == "web" {
+            second.view = view("release");
+            second.generation = 7;
+            let pin = &mut query_scope
+                .manifest
+                .projects
+                .get_mut(&name("web"))
+                .unwrap()
+                .base;
+            *pin = pinned("release", 7);
+            pin.commit = Some(CommitId::new("abcdef0123456789abcdef0123456789abcdef01").unwrap());
+        }
+        let lexical = FakeSource::answering(vec![first.clone(), second.clone()]);
+        let response = search(
+            &behaviour(),
+            &query_scope,
+            &Sources {
+                lexical: Some(&lexical),
+                ..Sources::default()
+            },
+            &no_expansion(),
+        )
+        .unwrap();
+        assert_eq!(response.results.len(), 2);
+        let mut snippets = FakeSnippets::default();
+        for result in &response.results {
+            snippets.set(&result.location, Skeleton, (1, 1), "pub fn apply()");
+            snippets.set(&result.location, Body, (1, 3), body);
+        }
+        let packed = pack_with(&response, 1000, &snippets, &Words);
+        assert_eq!(packed.items.len(), 2);
+        assert!(packed.omitted.is_empty());
+        assert!(
+            packed
+                .items
+                .iter()
+                .all(|item| item.kind == Body && item.text == body && item.covers.is_empty())
+        );
+        for candidate in [first, second] {
+            let item = packed
+                .items
+                .iter()
+                .find(|item| {
+                    item.citation.project == candidate.project
+                        && item.citation.path == candidate.path
+                })
+                .unwrap();
+            assert_eq!(item.citation.view, candidate.view);
+            assert_eq!(item.citation.generation, candidate.generation);
+            assert_eq!(item.citation.content_hash, candidate.content_hash);
+            assert_eq!(item.citation.range, candidate.range.unwrap());
+            assert_eq!(
+                item.citation.commit,
+                query_scope
+                    .manifest
+                    .projects
+                    .get(&candidate.project)
+                    .unwrap()
+                    .base
+                    .commit
+            );
+        }
+        assert_eq!(
+            packed.used_tokens,
+            packed.items.iter().map(|item| item.tokens).sum::<u32>()
+        );
+        assert!(packed.used_tokens <= packed.budget_tokens);
+    }
+}
+
+#[test]
+fn identical_body_bytes_at_distinct_call_bindings_support_both_emitted_roles() {
+    // `next` binds differently in each module. The source adapter supplies
+    // resolved occurrence-level call evidence independently of shared bytes.
+    let body = "pub fn apply() {\n    next();\n}";
+    let mut subject = hit(SourceKind::Lexical, 1, "api", "src/pipeline/b.rs", (1, 3));
+    subject.content_hash = blob(body);
+    subject.symbol = Some("B::apply".to_owned());
+    let mut caller = graph_node("api", "src/pipeline/a.rs", (1, 3), "A::apply");
+    caller.location.content_hash = subject.content_hash;
+    let mut graph = FakeGraph::default();
+    graph.add(
+        "B::apply",
+        neighbor(
+            caller,
+            EdgeKind::Caller,
+            EvidenceType::SemanticallyResolved,
+            Resolution::Resolved,
+        ),
+    );
+    let lexical = FakeSource::answering(vec![subject]);
+    let mut config = SearchConfig::default();
+    config.expansion.max_depth = 1;
+    let response = search(
+        &plan("who calls B::apply", &Glossary::default()),
+        &scope(&["api"]),
+        &Sources {
+            lexical: Some(&lexical),
+            graph: Some(&graph),
+            ..Sources::default()
+        },
+        &config,
+    )
+    .unwrap();
+    assert_eq!(response.results.len(), 1);
+    assert_eq!(response.expanded.len(), 1);
+    let mut snippets = FakeSnippets::default();
+    snippets.set(&response.results[0].location, Body, (1, 3), body);
+    snippets.set(&response.expanded[0].location, Body, (1, 3), body);
+    let ordinary = pack_with(&response, 1000, &snippets, &Words);
+    assert_eq!(ordinary.items.len(), 2);
+    assert!(
+        ordinary
+            .items
+            .iter()
+            .all(|item| item.kind == Body && item.covers.is_empty())
+    );
+    let selected = pack_task_with(
+        &response,
+        1000,
+        &snippets,
+        &Words,
+        &TaskPackOptions {
+            strategy: TaskSelectionStrategy::BoundedBundles,
+            desired_roles: vec![EvidenceRole::Implementation, EvidenceRole::Caller],
+            ..TaskPackOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(selected.pack.items.len(), 2);
+    assert_eq!(selected.selection.selected_candidates, 2);
+    assert_eq!(
+        selected.selection.covered_roles,
+        [EvidenceRole::Implementation, EvidenceRole::Caller]
+    );
+    assert!(selected.selection.missing_roles.is_empty());
+    let calls = selected
+        .selection
+        .role_evidence
+        .iter()
+        .find(|evidence| evidence.role == EvidenceRole::Caller)
+        .unwrap();
+    assert_eq!(calls.citations.len(), 2);
+    let paths: std::collections::BTreeSet<_> = calls
+        .citations
+        .iter()
+        .map(|citation| citation.path.as_str())
+        .collect();
+    assert_eq!(paths, ["src/pipeline/a.rs", "src/pipeline/b.rs"].into());
+    for citation in &calls.citations {
+        assert!(
+            selected
+                .pack
+                .items
+                .iter()
+                .any(|item| item.kind == Body && &item.citation == citation)
+        );
+    }
 }
 
 #[test]

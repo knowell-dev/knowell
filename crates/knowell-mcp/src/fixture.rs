@@ -1610,6 +1610,10 @@ impl FixtureTools {
                 id,
                 kind: candidate.chunk.spec.kind,
                 title: candidate.chunk.spec.title.to_owned(),
+                snippet_lines: include_snippets.then_some(evidence.lines),
+                snippet_id: None,
+                snippet_truncated: false,
+                continuation_ids: vec![],
                 evidence,
                 snippet: include_snippets
                     .then(|| UntrustedText::repository(candidate.chunk.text.clone())),
@@ -1653,6 +1657,10 @@ impl FixtureTools {
                     id,
                     kind: HitKind::Contract,
                     title: contract.key.clone(),
+                    snippet_lines: None,
+                    snippet_id: None,
+                    snippet_truncated: false,
+                    continuation_ids: vec![],
                     evidence,
                     snippet: None,
                 });
@@ -1737,6 +1745,17 @@ impl FixtureTools {
         }
         Ok(SearchOutput {
             query_class: classify_query(&input.query, exact_symbol),
+            diagnostics: None,
+            budget: input.token_budget.map(|requested| TokenBudget {
+                requested,
+                used: hits
+                    .iter()
+                    .filter_map(|hit| hit.snippet.as_ref().map(UntrustedText::text))
+                    .chain(memory_hits.iter().map(|hit| hit.record.body.text()))
+                    .fold(0u32, |total, text| {
+                        total.saturating_add(estimate_tokens(text))
+                    }),
+            }),
             hits,
             memory_hits,
             more_available: total > limit,
@@ -2342,6 +2361,17 @@ impl FixtureTools {
     }
 
     fn do_build_context(&self, input: BuildContextInput) -> Result<BuildContextOutput, ToolError> {
+        if input.selection_strategy.is_some_and(|strategy| {
+            !matches!(
+                strategy,
+                crate::tools::ContextSelectionStrategy::Rank
+                    | crate::tools::ContextSelectionStrategy::Source
+            )
+        }) {
+            return Err(ToolError::invalid_input(
+                "experimental source selection requires the live engine",
+            ));
+        }
         let (data, mut state) = self.parts()?;
         let resolved = resolve(data, &mut state, &input.target)?;
         if let Some(job_id) = &input.job_id {
@@ -2443,6 +2473,9 @@ impl FixtureTools {
                     evidence: Some(evidence),
                     memory_id: None,
                     content,
+                    content_lines: None,
+                    content_truncated: false,
+                    continuation_ids: vec![],
                 },
             ));
         }
@@ -2480,6 +2513,9 @@ impl FixtureTools {
                         evidence: contract.participants.first().map(|p| p.evidence.clone()),
                         memory_id: None,
                         content,
+                        content_lines: None,
+                        content_truncated: false,
+                        continuation_ids: vec![],
                     },
                 ));
             }
@@ -2514,6 +2550,9 @@ impl FixtureTools {
                     evidence: None,
                     memory_id: Some(record.id.clone()),
                     content,
+                    content_lines: None,
+                    content_truncated: false,
+                    continuation_ids: vec![],
                 },
             ));
         }
@@ -2553,6 +2592,7 @@ impl FixtureTools {
         Ok(BuildContextOutput {
             entries,
             budget: TokenBudget { requested, used },
+            selection: None,
             uncertainties,
             job: None,
             gaps,
@@ -3665,6 +3705,7 @@ fn fetched_item(
         .ok_or_else(|| ToolError::internal("fixture view has no evidence"))?;
     let id = result_id(&evidence.project, &evidence.commit, &file.path, range)?;
     Ok(FetchedItem {
+        continuation_ids: vec![],
         id,
         language: Some(file.language.to_owned()),
         content: UntrustedText::repository(slice_lines(file.content, range)),

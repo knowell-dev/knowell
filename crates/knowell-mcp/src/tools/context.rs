@@ -50,6 +50,14 @@ pub struct BuildContextInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(description = "Collect a pending pack")]
     pub job_id: Option<JobId>,
+    /// Source selection. Omitted uses complementary source packing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "default source; others are comparators")]
+    pub selection_strategy: Option<ContextSelectionStrategy>,
+    /// Revisable evidence needs for experimental selection, not a completeness claim.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(description = "")]
+    pub desired_roles: Vec<ContextRole>,
 }
 
 impl Validate for BuildContextInput {
@@ -80,7 +88,17 @@ impl Validate for BuildContextInput {
             limits::MAX_LIST_ITEMS,
             limits::MAX_SYMBOL_CHARS,
         )?;
-        check_len("include", self.include.len(), limits::MAX_LIST_ITEMS)
+        check_len("include", self.include.len(), limits::MAX_LIST_ITEMS)?;
+        check_len(
+            "desired_roles",
+            self.desired_roles.len(),
+            limits::MAX_LIST_ITEMS,
+        )?;
+        super::check_unique("desired_roles", &self.desired_roles)?;
+        if self.selection_strategy.is_none() && !self.desired_roles.is_empty() {
+            return Err(invalid("`desired_roles` requires `selection_strategy`"));
+        }
+        Ok(())
     }
 }
 
@@ -121,6 +139,99 @@ pub struct BuildContextOutput {
     /// What is missing from the pack, and why.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gaps: Vec<Gap>,
+    /// Experimental selection diagnostics and a source-backed inspection path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<ContextSelectionReport>,
+}
+
+/// Source selection strategy. Comparator variants are explicit; none certifies
+/// task completeness.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextSelectionStrategy {
+    /// Adaptive complementary source packing without generated descriptions.
+    #[default]
+    #[schemars(description = "")]
+    Source,
+    /// Existing rank-ordered packing.
+    #[schemars(description = "")]
+    Rank,
+    /// Relevance and diversity selection.
+    #[schemars(description = "")]
+    Mmr,
+    /// Prefer additional supported evidence roles.
+    #[schemars(description = "")]
+    RoleCoverage,
+    /// Evaluate bounded complementary source groups.
+    #[schemars(description = "")]
+    BoundedBundles,
+}
+
+/// A soft evidence need. A missing role remains unknown, not absent.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextRole {
+    /// An authoritative entry-point location.
+    #[schemars(description = "")]
+    Entry,
+    /// Implementation body.
+    #[schemars(description = "")]
+    Implementation,
+    /// Supported incoming call evidence.
+    #[schemars(description = "")]
+    Caller,
+    /// Supported outgoing call evidence.
+    #[schemars(description = "")]
+    Callee,
+    /// Test evidence.
+    #[schemars(description = "")]
+    Test,
+    /// Authoritative configuration dependency.
+    #[schemars(description = "")]
+    Config,
+    /// Contract evidence.
+    #[schemars(description = "")]
+    Contract,
+    /// Documentation.
+    #[schemars(description = "")]
+    Doc,
+    /// Supported surrounding relations.
+    #[schemars(description = "")]
+    Surroundings,
+}
+
+/// Source-backed steps and bounded selection work for a context pack.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ContextSelectionReport {
+    /// Comparator used.
+    pub strategy: ContextSelectionStrategy,
+    /// Candidates considered by the selector.
+    pub considered_candidates: u32,
+    /// Candidates outside the selector's explicit cap.
+    pub omitted_by_candidate_limit: u32,
+    /// Source-set evaluations performed.
+    pub evaluations: u32,
+    /// Whether further set evaluation was prevented by the work limit.
+    pub evaluation_budget_exhausted: bool,
+    /// Selected source candidates.
+    pub selected_candidates: u32,
+    /// Roles supported by actual shown source bodies.
+    pub covered_roles: Vec<ContextRole>,
+    /// Requested roles without sufficient shown support.
+    pub missing_roles: Vec<ContextRole>,
+    /// Inspection steps pointing at actual fetchable entries.
+    pub steps: Vec<ContextRoadmapStep>,
+}
+
+/// A supported part of the task's inspection path; the agent decides the action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ContextRoadmapStep {
+    /// Evidence role supported by these entries.
+    pub role: ContextRole,
+    /// Fetchable ids of the actual shown sources supporting the role.
+    pub source_ids: Vec<ResultId>,
 }
 
 /// Token budget accounting, in estimated tokens (a model-agnostic estimate,
@@ -152,6 +263,17 @@ pub struct ContextEntry {
     pub memory_id: Option<MemoryId>,
     /// The content (untrusted).
     pub content: UntrustedText,
+    /// Actual contiguous source lines in `content`, when known. Unlike
+    /// `evidence.lines`, this describes what is displayed, not the fetch handle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_lines: Option<knowell_core::LineRange>,
+    /// The source body is a partial excerpt of the fetchable evidence range.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub content_truncated: bool,
+    /// Exact pinned source ranges continuing a displayed excerpt. These are
+    /// fetch handles, not inferred claims that a task has been covered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub continuation_ids: Vec<ResultId>,
     /// Estimated tokens of `content`.
     pub estimated_tokens: u32,
 }

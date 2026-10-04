@@ -1,6 +1,6 @@
 //! `search`, `fetch` and `inspect_symbol`.
 
-use knowell_core::Name;
+use knowell_core::{LineRange, Name};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -51,10 +51,19 @@ pub struct SearchInput {
     #[schemars(range(min = 1, max = 100))]
     #[schemars(description = "default 10")]
     pub limit: Option<u32>,
+    /// Whole source-mode response budget, in estimated tokens (default 4000).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 256, max = 200000))]
+    #[schemars(description = "default 4000; whole source response")]
+    pub token_budget: Option<u32>,
     /// Include snippets of the matched lines (default true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(description = "default true")]
     pub include_snippets: Option<bool>,
+    /// Include measured retrieval counters and embedding usage (default false).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "default false")]
+    pub include_diagnostics: Option<bool>,
 }
 
 impl Validate for SearchInput {
@@ -84,7 +93,13 @@ impl Validate for SearchInput {
         for language in &self.languages {
             check_text("languages", language, 64)?;
         }
-        check_limit(self.limit, 100)
+        check_limit(self.limit, 100)?;
+        check_range(
+            "token_budget",
+            self.token_budget,
+            limits::MIN_TOKEN_BUDGET,
+            limits::MAX_TOKEN_BUDGET,
+        )
     }
 }
 
@@ -121,6 +136,68 @@ pub struct SearchOutput {
     /// Why the result is empty or incomplete.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gaps: Vec<Gap>,
+    /// Opt-in measured counters; omitted in normal agent output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<SearchDiagnostics>,
+    /// Requested and estimated source-response budget, when supplied by the
+    /// engine. Source rendering also charges headers, fences, IDs and notes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<super::TokenBudget>,
+}
+
+/// Measured work for one search. Counts are diagnostic, not quality scores.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SearchDiagnostics {
+    /// Total tool time in whole milliseconds, including scope and source reads.
+    pub elapsed_ms: u64,
+    /// Snapshot/index preparation time in whole milliseconds.
+    pub preparation_ms: u64,
+    /// Pinned project views prepared for this search.
+    pub prepared_views: u64,
+    /// Exact-source lookup time in whole milliseconds.
+    pub exact_ms: u64,
+    /// Lexical retrieval and refill time in whole milliseconds.
+    pub lexical_ms: u64,
+    /// Embedding and ANN retrieval/refill time in whole milliseconds.
+    pub semantic_ms: u64,
+    /// Fusion and graph expansion time in whole milliseconds.
+    pub fusion_expansion_ms: u64,
+    /// Text acquisition for shown snippets in whole milliseconds.
+    pub snippet_read_ms: u64,
+    /// Lexical index probes, including bounded refill attempts.
+    pub lexical_queries: u64,
+    /// File hits examined across lexical probes, including repeated hits.
+    pub lexical_file_hits: u64,
+    /// Lexical span candidates generated across probes.
+    pub lexical_spans: u64,
+    /// ANN probes across profiles and refill attempts.
+    pub semantic_queries: u64,
+    /// ANN neighbors examined across probes.
+    pub semantic_neighbors: u64,
+    /// Query embedding operations started, including failed operations.
+    pub embedding_calls: u64,
+    /// Query embedding operations that failed; their usage is unknown.
+    pub embedding_failures: u64,
+    /// A found exact path allowed the query embedding to be skipped.
+    pub exact_path_embedding_bypassed: bool,
+    /// Usage returned by successful query embeddings, absent if none ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<QueryEmbeddingUsage>,
+}
+
+/// Query embedding usage; provider reports and estimates remain distinguishable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct QueryEmbeddingUsage {
+    /// Input tokens reported by the provider or estimated when unavailable.
+    pub input_tokens: u64,
+    /// Whether any input token count was estimated.
+    pub tokens_estimated: bool,
+    /// Initial requests, excluding retries.
+    pub requests: u32,
+    /// Additional attempts.
+    pub retries: u32,
+    /// Provider operation time in whole milliseconds; includes queue/backoff.
+    pub operation_ms: u64,
 }
 
 /// How a query was classified before searching.
@@ -157,6 +234,20 @@ pub struct SearchHit {
     /// The matched lines (untrusted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snippet: Option<UntrustedText>,
+    /// Actual source lines displayed in `snippet`, not the full fetch range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snippet_lines: Option<LineRange>,
+    /// Fetchable identity of the actual displayed source range, when it differs
+    /// from the original hit's range. The original hit `id` remains unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snippet_id: Option<ResultId>,
+    /// Whether the displayed snippet is shorter than the full evidence range.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub snippet_truncated: bool,
+    /// Exact pinned ranges adjacent to the displayed source that can be read
+    /// with `fetch`. Fetching the displayed snippet ID alone does not advance.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub continuation_ids: Vec<ResultId>,
 }
 
 /// Kind of a source hit.
@@ -261,6 +352,9 @@ pub struct FetchedItem {
     /// Id of the same range in the context's current view, when it changed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_id: Option<ResultId>,
+    /// Exact remaining ranges of the requested pinned source, when limited.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub continuation_ids: Vec<ResultId>,
 }
 
 /// Whether a fetched version is still current in the context's view.

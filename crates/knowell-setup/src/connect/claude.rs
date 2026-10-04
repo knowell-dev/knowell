@@ -34,7 +34,7 @@ pub(super) fn plan(
     };
     if add {
         notes.push(
-            "the SessionStart hook runs `context --session-start`; its output is added to the session context"
+            "the default SessionStart hook runs `context --session-start` directly without a shell; its output is added to the session context (hook_command is an explicit shell override)"
                 .into(),
         );
         if opts.scope == Scope::Project {
@@ -50,7 +50,23 @@ pub(super) fn plan(
         apply_server(&p, before, entry)
     })?;
     let p = settings.clone();
-    let hook = opts.hook_command_line();
+    let hook = if !add {
+        Value::Null
+    } else {
+        match &opts.hook_command {
+            Some(command) => json!({
+                "type": "command",
+                "command": command,
+                "statusMessage": HOOK_STATUS,
+            }),
+            None => json!({
+                "type": "command",
+                "command": opts.command,
+                "args": opts.hook_args()?,
+                "statusMessage": HOOK_STATUS,
+            }),
+        }
+    };
     let settings_edit = plan_file(settings, move |before| apply_hook(&p, before, &hook, add))?;
     Ok(vec![mcp_edit, settings_edit, markdown_edit(memory, add)?])
 }
@@ -70,13 +86,13 @@ fn conflict(path: &Path, what: &str) -> SetupError {
 fn apply_hook(
     path: &Path,
     before: Option<&str>,
-    command: &str,
+    hook: &Value,
     add: bool,
 ) -> Result<Option<String>, SetupError> {
     let mut root = parse_object(path, before)?;
     let unchanged = || Ok(before.map(str::to_owned));
 
-    if add && ours(&root) == [Some(command.to_owned())] {
+    if add && ours(&root) == [hook] {
         return unchanged();
     }
 
@@ -122,13 +138,7 @@ fn apply_hook(
         let Value::Array(groups) = groups else {
             return Err(conflict(path, "`hooks.SessionStart` is not an array"));
         };
-        groups.push(json!({
-            "hooks": [{
-                "type": "command",
-                "command": command,
-                "statusMessage": HOOK_STATUS,
-            }]
-        }));
+        groups.push(json!({ "hooks": [hook] }));
     } else {
         if !removed {
             return unchanged();
@@ -152,9 +162,8 @@ fn apply_hook(
     Ok(Some(render(root)))
 }
 
-/// Commands of all Knowell hook entries found (`None` for an entry without
-/// a command string).
-fn ours(root: &Object) -> Vec<Option<String>> {
+/// Complete Knowell hook entries; argument changes must replace the old entry too.
+fn ours(root: &Object) -> Vec<&Value> {
     root.get("hooks")
         .and_then(|h| h.get("SessionStart"))
         .and_then(Value::as_array)
@@ -164,7 +173,6 @@ fn ours(root: &Object) -> Vec<Option<String>> {
                 .filter_map(|g| g.get("hooks").and_then(Value::as_array))
                 .flatten()
                 .filter(|h| is_ours(h))
-                .map(|h| h.get("command").and_then(Value::as_str).map(str::to_owned))
                 .collect()
         })
         .unwrap_or_default()

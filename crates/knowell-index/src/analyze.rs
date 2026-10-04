@@ -21,7 +21,7 @@ use knowell_parse::{
     ChunkContext, ChunkOptions, Degradation, ParseLimits, ParsedFile, PreparedInput, chunks,
     parse_with, prepared_input,
 };
-use knowell_store::content::NewChunk;
+use knowell_store::content::{ChunkKey, ChunkStructure, NewChunk, SourceRange};
 use knowell_store::graph::{NewEdge, NodeRef};
 use knowell_store::symbols::NewSymbol;
 use knowell_store::{EvidenceType, ProjectId, Resolution, SymbolId};
@@ -67,6 +67,7 @@ pub(crate) struct AnalyseOptions {
 #[derive(Debug, Clone)]
 pub(crate) struct AnalysedChunk {
     pub(crate) row: NewChunk,
+    pub(crate) structure: ChunkStructure,
     pub(crate) input: PreparedInput,
 }
 
@@ -133,6 +134,15 @@ pub(crate) fn analyse(
                     };
                     let context = ChunkContext::for_chunk(project, &parsed, chunk);
                     let input = prepared_input(chunk, &context);
+                    let symbol = chunk.symbol.and_then(|index| parsed.symbols.get(index));
+                    let enclosing = symbol
+                        .and_then(|symbol| symbol.parent)
+                        .and_then(|index| parsed.symbols.get(index));
+                    let source_range = |symbol: &knowell_parse::Symbol| SourceRange {
+                        lines: symbol.range,
+                        start_byte: symbol.byte_range.start as u64,
+                        end_byte: symbol.byte_range.end as u64,
+                    };
                     out_chunks.push(AnalysedChunk {
                         row: NewChunk {
                             content_hash,
@@ -144,6 +154,19 @@ pub(crate) fn analyse(
                             kind: chunk.kind.as_str().to_owned(),
                             symbol_path: chunk.symbol_path.clone(),
                             prepared_input_hash: input.hash,
+                        },
+                        structure: ChunkStructure {
+                            key: ChunkKey {
+                                content_hash,
+                                parser_version: parser_version.clone(),
+                                ordinal,
+                            },
+                            parent_ordinal: chunk
+                                .parent
+                                .and_then(|parent| u32::try_from(parent).ok()),
+                            declaration: symbol.map(source_range),
+                            enclosing: enclosing.map(source_range),
+                            source_exact: chunk.is_exact_source(&text),
                         },
                         input,
                     });
@@ -599,5 +622,77 @@ mod tests {
         options.generated = GeneratedPolicy::Full;
         let full = analyse("p", &path, hash, text, &options, &cancel);
         assert!(full.embed);
+    }
+
+    #[test]
+    fn split_chunks_keep_declaration_enclosing_and_continuation_ranges() {
+        let mut text = String::from("export class Service {\n  run(value: number) {\n");
+        for i in 0..40 {
+            text.push_str(&format!("    const step{i} = value + {i};\n"));
+        }
+        text.push_str(
+            "    if (value < 0) { throw new Error('negative'); }\n    return value;\n  }\n}\n",
+        );
+        let text: Arc<str> = Arc::from(text);
+        let hash = ContentHash::of(text.as_bytes());
+        let options = AnalyseOptions {
+            chunking: ChunkOptions {
+                target_chars: 256,
+                min_chars: 0,
+                overlap_chars: 0,
+            },
+            limits: ParseLimits::default(),
+            generated: GeneratedPolicy::Full,
+            identifiers: false,
+        };
+        let file = analyse(
+            "synthetic",
+            &p("src/service.ts"),
+            hash,
+            text.clone(),
+            &options,
+            &AtomicBool::new(false),
+        );
+        let method_chunks: Vec<_> = file
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.row.symbol_path.as_deref() == Some("Service.run"))
+            .collect();
+        assert!(
+            method_chunks.len() > 1,
+            "large methods must have continuation pieces"
+        );
+        let method = file
+            .parsed
+            .symbols
+            .iter()
+            .find(|symbol| symbol.qualified_name == "Service.run")
+            .unwrap();
+        let parent = file.parsed.symbols.get(method.parent.unwrap()).unwrap();
+        for chunk in &method_chunks {
+            let structure = &chunk.structure;
+            assert_eq!(structure.declaration.unwrap().lines, method.range);
+            assert_eq!(structure.enclosing.unwrap().lines, parent.range);
+            assert_eq!(
+                structure.declaration.unwrap().start_byte,
+                method.byte_range.start as u64
+            );
+            assert_eq!(
+                structure.declaration.unwrap().end_byte,
+                method.byte_range.end as u64
+            );
+            assert!(
+                structure
+                    .parent_ordinal
+                    .is_some_and(|ordinal| ordinal < structure.key.ordinal)
+            );
+            assert!(structure.source_exact);
+        }
+        assert!(
+            file.chunks
+                .iter()
+                .any(|chunk| !chunk.structure.source_exact),
+            "elided container headers must remain distinguishable from source"
+        );
     }
 }

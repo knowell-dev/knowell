@@ -7,7 +7,7 @@
 //! answer `503 engine_unavailable` — never invented data.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -18,7 +18,9 @@ use knowell_embed::{
     AnyEmbedder, GeminiConfig, GeminiEmbedder, OllamaConfig, OllamaEmbedder,
     OpenAiCompatibleConfig, OpenAiCompatibleEmbedder,
 };
-use knowell_engine::{AccessResolver, Engine, EngineSettings, StoreAccess};
+use knowell_engine::{
+    AccessResolver, Engine, EngineSettings, ParseProductCacheSettings, StoreAccess,
+};
 use knowell_index::{IndexerConfig, Priority, Worker, WorkerConfig};
 use knowell_mcp::tools::{
     AnalyzeImpactInput, AnalyzeImpactOutput, BuildContextInput, BuildContextOutput, ContractsInput,
@@ -41,11 +43,25 @@ pub(crate) const ENGINE_WIRED: bool = true;
 pub(crate) const NOT_WIRED: &str =
     "the Knowell engine has no database; run `know init`, then `know doctor`";
 
+/// Keeps cold-parse reuse and lexical span counts explicit across local and MCP engines.
+pub(crate) fn engine_settings(home: &Path, parse_cache: bool, lexical_spans: u8) -> EngineSettings {
+    EngineSettings {
+        lexical_spans_per_file: lexical_spans,
+        parse_product_cache: parse_cache
+            .then(|| ParseProductCacheSettings::new(home.join("cache"))),
+        ..EngineSettings::default()
+    }
+}
+
 /// Everything the engine needs from the binary.
 #[derive(Debug, Clone)]
 pub(crate) struct EngineDeps {
     /// `$KNOWELL_HOME`.
     pub(crate) home: PathBuf,
+    /// Opt-in to persisted exact-source parse products.
+    pub(crate) parse_cache: bool,
+    /// Most lexical spans per pinned file, from 1 through 3.
+    pub(crate) lexical_spans: u8,
     /// The engine configuration in effect (after command-line overrides).
     pub(crate) engine: EngineConfig,
     /// An open, migrated store, or `None` (no database configured/reachable).
@@ -79,7 +95,11 @@ pub(crate) async fn build_engine(
     });
     let mut builder = Engine::builder(store, indexer_config)
         .engine_config(&deps.engine)
-        .settings(EngineSettings::default())
+        .settings(engine_settings(
+            &deps.home,
+            deps.parse_cache,
+            deps.lexical_spans,
+        ))
         .access(access);
     for (name, embedder) in embedders(&deps.engine, &workspaces) {
         builder = builder.embedder(name, embedder);

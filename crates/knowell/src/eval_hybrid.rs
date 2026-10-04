@@ -14,7 +14,7 @@ use knowell_embed::{
     AnyEmbedder, Budget, Embedder, FakeEmbedder, GEMINI_EMBEDDING_MODEL, GeminiConfig,
     GeminiEmbedder,
 };
-use knowell_engine::{Access, Engine, HybridRetriever};
+use knowell_engine::{Access, Engine, EngineSettings, HybridRetriever};
 use knowell_eval::{Fixture, Report};
 use knowell_index::{GitConfigMode, IndexerConfig, Priority, SyncOutcome};
 use knowell_store::{PgConnectOptions, Store, StoreOptions};
@@ -56,6 +56,7 @@ impl LiveOptions {
 pub(crate) struct LiveEvidence {
     model: &'static str,
     dimensions: u32,
+    lexical_spans_per_file: u8,
     request_dimension_field: &'static str,
     all_returned_dimensions_validated: bool,
     token_budget: u64,
@@ -80,10 +81,11 @@ pub(crate) struct LiveEvidence {
 impl LiveEvidence {
     pub(crate) fn markdown(&self) -> String {
         format!(
-            "\n## Live embedding conditions\n\nModel: `{}`; dimensions: {}; all returned dimensions validated.\n\nRequest field: `{}`. Fresh database and vector cache; serial indexing; default engine weights, retrieval quotas and chunking. Input accounting: {} tokens (provider counts where available, estimates otherwise); budget: {} tokens; estimated cost: ${:.6} at ${:.2}/million text tokens. No provider or job retries. These are accounting estimates, not a provider billing guarantee.\n\nProvider rate caps: {} input request units/minute, {} estimated tokens/minute; batch caps: {} inputs, {} estimated tokens. Rate buckets initially hold one minute of capacity and refill continuously.\n\nIndexed inputs: {}; elapsed: {:.2} seconds; OS/architecture: {}/{}; PostgreSQL: {}; pgvector: {}. Latency includes cold indexing and all three retrievers; it is not search p95.\n",
+            "\n## Live embedding conditions\n\nModel: `{}`; dimensions: {}; all returned dimensions validated.\n\nRequest field: `{}`. Fresh database and vector cache; serial indexing; default engine weights, retrieval quotas and chunking; lexical spans per pinned file: {}. Input accounting: {} tokens (provider counts where available, estimates otherwise); budget: {} tokens; estimated cost: ${:.6} at ${:.2}/million text tokens. No provider or job retries. These are accounting estimates, not a provider billing guarantee.\n\nProvider rate caps: {} input request units/minute, {} estimated tokens/minute; batch caps: {} inputs, {} estimated tokens. Rate buckets initially hold one minute of capacity and refill continuously.\n\nIndexed inputs: {}; elapsed: {:.2} seconds; OS/architecture: {}/{}; PostgreSQL: {}; pgvector: {}. Latency includes cold indexing and all three retrievers; it is not search p95.\n",
             self.model,
             self.dimensions,
             self.request_dimension_field,
+            self.lexical_spans_per_file,
             self.accounted_input_tokens,
             self.token_budget,
             self.cost_estimate_usd,
@@ -109,6 +111,7 @@ pub(crate) fn measure(
     fixture: &Fixture,
     reference: &str,
     live: Option<&LiveOptions>,
+    lexical_spans: u8,
     run: impl FnOnce(&HybridRetriever) -> anyhow::Result<Report>,
 ) -> anyhow::Result<(Report, Option<LiveEvidence>)> {
     let reference = SecretRef::from_str(reference)?;
@@ -131,7 +134,15 @@ pub(crate) fn measure(
         .execute(&mut connection)
         .await
         .map_err(|_| anyhow!("cannot create the evaluation database; the role needs CREATEDB"))?;
-        let result = evaluate(root, fixture, admin.database(&database), live, run).await;
+        let result = evaluate(
+            root,
+            fixture,
+            admin.database(&database),
+            live,
+            lexical_spans,
+            run,
+        )
+        .await;
         let cleanup = sqlx::query(sqlx::AssertSqlSafe(format!(
             "DROP DATABASE \"{database}\" WITH (FORCE)"
         )))
@@ -153,10 +164,11 @@ async fn evaluate(
     fixture: &Fixture,
     options: PgConnectOptions,
     live: Option<&LiveOptions>,
+    lexical_spans: u8,
     run: impl FnOnce(&HybridRetriever) -> anyhow::Result<Report>,
 ) -> anyhow::Result<(Report, Option<LiveEvidence>)> {
     let store = Store::connect_with(options, &StoreOptions::default()).await?;
-    let result = build_and_measure(root, fixture, &store, live, run).await;
+    let result = build_and_measure(root, fixture, &store, live, lexical_spans, run).await;
     store.close().await;
     result
 }
@@ -166,6 +178,7 @@ async fn build_and_measure(
     fixture: &Fixture,
     store: &Store,
     live: Option<&LiveOptions>,
+    lexical_spans: u8,
     run: impl FnOnce(&HybridRetriever) -> anyhow::Result<Report>,
 ) -> anyhow::Result<(Report, Option<LiveEvidence>)> {
     let started = Instant::now();
@@ -245,6 +258,10 @@ async fn build_and_measure(
     config.jobs.max_attempts = 1;
     let engine = Engine::builder(store.clone(), config)
         .engine_config(&engine_config)
+        .settings(EngineSettings {
+            lexical_spans_per_file: lexical_spans,
+            ..EngineSettings::default()
+        })
         .embedder(provider, Arc::new(embedder))
         .workspace(resolved.clone())
         .build()
@@ -290,6 +307,7 @@ async fn build_and_measure(
             Some(LiveEvidence {
                 model: GEMINI_EMBEDDING_MODEL,
                 dimensions,
+                lexical_spans_per_file: engine.settings().lexical_spans_per_file,
                 request_dimension_field: "requests[].outputDimensionality",
                 all_returned_dimensions_validated: true,
                 token_budget: options.max_tokens,
@@ -394,6 +412,7 @@ mod tests {
                 &fixture,
                 "env:KNOWELL_TEST_DATABASE_URL",
                 Some(&options),
+                1,
                 |hybrid| Ok(knowell_eval::run(&corpus, &queries, &[hybrid], 10)?),
             )
             .unwrap();
@@ -404,6 +423,7 @@ mod tests {
                 &fixture,
                 "env:KNOWELL_TEST_DATABASE_URL",
                 Some(&options),
+                1,
                 |hybrid| Ok(knowell_eval::run(&corpus, &queries, &[hybrid], 10)?),
             );
             assert!(refused.is_err());
@@ -416,6 +436,12 @@ mod tests {
         assert!(result.0.retriever("hybrid").is_some());
         let evidence = result.1.unwrap();
         assert_eq!(evidence.dimensions, 768);
+        assert_eq!(evidence.lexical_spans_per_file, 1);
+        assert!(
+            evidence
+                .markdown()
+                .contains("lexical spans per pinned file: 1")
+        );
         assert!(evidence.all_returned_dimensions_validated);
         assert!(evidence.accounted_input_tokens > 0 && evidence.indexed_inputs > 0);
         assert_eq!(evidence.provider_retries, 0);

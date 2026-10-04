@@ -126,7 +126,11 @@ pub(crate) enum RetrieverArg {
     Hybrid,
 }
 
-pub(crate) fn run(cmd: EvalCommand, out: &mut Output) -> anyhow::Result<ExitCode> {
+pub(crate) fn run(
+    cmd: EvalCommand,
+    lexical_spans: u8,
+    out: &mut Output,
+) -> anyhow::Result<ExitCode> {
     match cmd {
         EvalCommand::Generate {
             out: dir,
@@ -169,6 +173,7 @@ pub(crate) fn run(cmd: EvalCommand, out: &mut Output) -> anyhow::Result<ExitCode
             database_url,
         } => {
             let opts = RunOptions {
+                lexical_spans,
                 bm25_coordination,
                 spec: FixtureSpec {
                     seed,
@@ -197,6 +202,7 @@ pub(crate) fn run(cmd: EvalCommand, out: &mut Output) -> anyhow::Result<ExitCode
             let live = crate::eval_hybrid::LiveOptions::new(&api_key_ref, dimensions, max_tokens)?;
             run_eval(
                 RunOptions {
+                    lexical_spans,
                     database_url: Some(database_url),
                     live: Some(live),
                     bm25_coordination: None,
@@ -219,6 +225,7 @@ pub(crate) fn run(cmd: EvalCommand, out: &mut Output) -> anyhow::Result<ExitCode
 }
 
 struct RunOptions {
+    lexical_spans: u8,
     live: Option<crate::eval_hybrid::LiveOptions>,
     database_url: Option<String>,
     bm25_coordination: Option<f32>,
@@ -234,6 +241,9 @@ struct RunOptions {
 
 fn run_eval(opts: RunOptions, out: &mut Output) -> anyhow::Result<ExitCode> {
     let hybrid = opts.retrievers.contains(&RetrieverArg::Hybrid);
+    if !hybrid && opts.lexical_spans != 1 {
+        bail!("--lexical-spans requires --retriever hybrid for evaluation");
+    }
     if hybrid && opts.database_url.is_none() {
         bail!("hybrid requires --database-url with an env:NAME or file:/path reference");
     }
@@ -274,20 +284,21 @@ fn run_eval(opts: RunOptions, out: &mut Output) -> anyhow::Result<ExitCode> {
     );
 
     let (report, evidence) = match &opts.database_url {
-        Some(reference) => {
-            crate::eval_hybrid::measure(root, &fixture, reference, opts.live.as_ref(), |hybrid| {
-                measure(&fixture, &walked.corpus, &queries, &opts, Some(hybrid))
-            })?
-        }
+        Some(reference) => crate::eval_hybrid::measure(
+            root,
+            &fixture,
+            reference,
+            opts.live.as_ref(),
+            opts.lexical_spans,
+            |hybrid| measure(&fixture, &walked.corpus, &queries, &opts, Some(hybrid)),
+        )?,
         None => (
             measure(&fixture, &walked.corpus, &queries, &opts, None)?,
             None,
         ),
     };
-    let mut markdown = report.to_markdown();
-    if let Some(evidence) = &evidence {
-        markdown.push_str(&evidence.markdown());
-    }
+    let engine_spans = hybrid.then_some(opts.lexical_spans);
+    let mut markdown = render_report_markdown(&report, evidence.as_ref(), engine_spans);
     let mut regressed = false;
     if let Some(path) = &opts.baseline {
         let text = std::fs::read_to_string(path).with_context(|| {
@@ -305,20 +316,7 @@ fn run_eval(opts: RunOptions, out: &mut Output) -> anyhow::Result<ExitCode> {
     }
 
     if let Some(path) = &opts.json {
-        let text = match &evidence {
-            Some(evidence) => {
-                let mut value = serde_json::to_value(&report)?;
-                let object = value
-                    .as_object_mut()
-                    .context("evaluation report is not an object")?;
-                object.insert(
-                    "live_embedding_conditions".into(),
-                    serde_json::to_value(evidence)?,
-                );
-                serde_json::to_string_pretty(&value)?
-            }
-            None => report.to_json()?,
-        };
+        let text = render_report_json(&report, evidence.as_ref(), engine_spans)?;
         std::fs::write(path, text).with_context(|| format!("cannot write {}", path.display()))?;
     }
     match &opts.markdown {
@@ -332,6 +330,56 @@ fn run_eval(opts: RunOptions, out: &mut Output) -> anyhow::Result<ExitCode> {
         return Ok(ExitCode::FAILURE);
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn render_report_markdown(
+    report: &Report,
+    evidence: Option<&crate::eval_hybrid::LiveEvidence>,
+    engine_spans: Option<u8>,
+) -> String {
+    let mut markdown = report.to_markdown();
+    if let Some(spans) = engine_spans {
+        let mode = if spans == 1 {
+            "default"
+        } else {
+            "explicit experiment"
+        };
+        markdown.push_str(&format!(
+            "\n## Engine retrieval conditions\n\nLexical spans per pinned file: {spans} ({mode}). Default engine weights, retrieval quotas and chunking; spans share the existing candidate quotas and use file-first waves.\n"
+        ));
+    }
+    if let Some(evidence) = evidence {
+        markdown.push_str(&evidence.markdown());
+    }
+    markdown
+}
+
+fn render_report_json(
+    report: &Report,
+    evidence: Option<&crate::eval_hybrid::LiveEvidence>,
+    engine_spans: Option<u8>,
+) -> anyhow::Result<String> {
+    if evidence.is_none() && engine_spans.is_none() {
+        // Standalone grep/BM25 reports retain the existing baseline format.
+        return Ok(report.to_json()?);
+    }
+    let mut value = serde_json::to_value(report)?;
+    let object = value
+        .as_object_mut()
+        .context("evaluation report is not an object")?;
+    if let Some(spans) = engine_spans {
+        object.insert(
+            "engine_retrieval".into(),
+            serde_json::json!({ "lexical_spans_per_file": spans }),
+        );
+    }
+    if let Some(evidence) = evidence {
+        object.insert(
+            "live_embedding_conditions".into(),
+            serde_json::to_value(evidence)?,
+        );
+    }
+    Ok(serde_json::to_string_pretty(&value)?)
 }
 
 fn measure(
@@ -383,4 +431,48 @@ fn append(path: &Path, text: &str) -> anyhow::Result<()> {
     file.write_all(text.as_bytes())
         .with_context(|| format!("cannot write {}", path.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
+
+    use super::*;
+
+    #[test]
+    fn engine_span_reports_record_default_and_experimental_conditions() {
+        let report = Report::from_json(include_str!(
+            "../../../eval/baselines/synthetic-small-hybrid.json"
+        ))
+        .unwrap();
+        let original = report.to_json().unwrap();
+        assert_eq!(render_report_json(&report, None, None).unwrap(), original);
+        assert_eq!(
+            render_report_markdown(&report, None, None),
+            report.to_markdown()
+        );
+        for spans in [1, 2, 3] {
+            let text = render_report_json(&report, None, Some(spans)).unwrap();
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(value["engine_retrieval"]["lexical_spans_per_file"], spans);
+            assert!(value.get("live_embedding_conditions").is_none());
+            assert_eq!(
+                Report::from_json(&text).unwrap().to_json().unwrap(),
+                original
+            );
+            assert_eq!(
+                render_report_json(&report, None, Some(spans)).unwrap(),
+                text
+            );
+            let mode = if spans == 1 {
+                "default"
+            } else {
+                "explicit experiment"
+            };
+            assert!(
+                render_report_markdown(&report, None, Some(spans))
+                    .contains(&format!("Lexical spans per pinned file: {spans} ({mode})"))
+            );
+        }
+    }
 }

@@ -42,6 +42,7 @@ let watch = indexer.watch(shutdown.clone())?;
     ▼
  index.symbols (T1) ── parse changed files (knowell-parse)
     │   content-level chunks + per-path prepared inputs (chunk_input)
+    │   source hierarchy: declaration/enclosing ranges, parent ordinal, exact-source flag
     │   symbols (path-qualified), definitions, references (conservative, see below)
     │   syntactic edges: file defines symbol, container contains member, file imports
     │   renamed files: rename_symbol keeps symbol ids
@@ -62,6 +63,14 @@ latest seen commit is still the target; otherwise the build is obsolete, `g` is 
 with the reason, and the job ends quietly (it is not retried). Every store write is fenced
 by the store as well. T2 checks instead that `g` is still the active generation, at its
 start and before every provider batch.
+
+T1 writes optional source hierarchy immediately after content-level chunks. Split
+declarations keep their full declaration range and immediate enclosing symbol; continuation
+pieces retain their earlier parent chunk ordinal. A byte comparison identifies whether
+the embedding chunk is contiguous source, so synthetic container headers and joined
+top-level regions are never mistaken for literal source. This metadata does not change
+prepared embedding inputs or call a provider. Older indexed content remains explicitly
+without hierarchy until it is analyzed again.
 
 If pgvector storage is unavailable, registration reports T2 as unavailable with
 installation guidance. T0, T1 and T3 still run; no embedding inputs are sent.
@@ -391,3 +400,10 @@ Embeddings use a counting wrapper around
 ```sh
 python scripts/buildlock.py cargo test -p knowell-index
 ```
+
+Lexical generation updates share recognized immutable Tantivy segment components
+with hard links when the filesystem permits it, copying as a fallback. Metadata is
+always copied, locks/completion markers are not inherited, and mutable metadata
+never shares an inode between generations. Debug counters distinguish shared bytes
+from copied bytes. This reduces repeated segment copying; it does not establish
+billion-line capacity or eliminate compaction and retention costs.

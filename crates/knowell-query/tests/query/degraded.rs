@@ -4,10 +4,10 @@
 use std::cell::Cell;
 
 use knowell_query::{
-    ABSENCE_NOTE, Candidate, CoverageGap, EmptyReason, Glossary, Intent, IntentClassifier,
-    OverlayPin, PlanOptions, ProjectCoverage, QueryError, QueryPlan, QueryScope, SearchConfig,
-    SearchResponse, SourceError, SourceKind, SourceLists, SourceStatus, Sources, plan, plan_with,
-    search, search_with_candidates,
+    ABSENCE_NOTE, Candidate, CoverageGap, EdgeKind, EmptyReason, Glossary, Intent,
+    IntentClassifier, OverlayPin, PlanOptions, ProjectCoverage, QueryError, QueryPlan, QueryScope,
+    SearchConfig, SearchResponse, SourceError, SourceKind, SourceLists, SourceStatus, Sources,
+    plan, plan_with, search, search_with_candidates,
 };
 
 use crate::common::{FakeReranker, FakeSource, hit, lang, name, no_expansion, path, pinned, scope};
@@ -230,6 +230,223 @@ fn impact_without_reference_resolution_says_so() {
 }
 
 #[test]
+fn rust_test_only_expansion_reports_missing_relation_analysis() {
+    let mut query_scope = scope(&["api"]);
+    query_scope
+        .manifest
+        .projects
+        .get_mut(&name("api"))
+        .unwrap()
+        .coverage = ProjectCoverage {
+        languages: [lang("rust"), lang("markdown")].into(),
+        reference_resolution: Default::default(),
+    };
+    let lexical = FakeSource::answering(vec![hit(Lexical, 1, "api", "src/probe.rs", (1, 3))]);
+    let sources = Sources {
+        lexical: Some(&lexical),
+        ..Sources::default()
+    };
+    let path_plan = plan("src/probe.rs", &Glossary::default());
+    assert_eq!(path_plan.intent, Intent::PathOrFile);
+    let mut config = SearchConfig::default();
+    config.expansion.edges.path_or_file = vec![EdgeKind::Test];
+    let response = search(&path_plan, &query_scope, &sources, &config).unwrap();
+    assert_eq!(response.results.len(), 1);
+    assert!(response.expanded.is_empty());
+    assert_eq!(
+        response.coverage_gaps,
+        [CoverageGap::NoReferenceResolution {
+            project: name("api"),
+            language: lang("rust"),
+        }]
+    );
+    config.expansion.enabled = false;
+    assert!(
+        search(&path_plan, &query_scope, &sources, &config)
+            .unwrap()
+            .coverage_gaps
+            .is_empty()
+    );
+}
+
+#[test]
+fn document_only_test_expansion_does_not_report_missing_code_analysis() {
+    let mut query_scope = scope(&["api"]);
+    query_scope
+        .manifest
+        .projects
+        .get_mut(&name("api"))
+        .unwrap()
+        .coverage = ProjectCoverage {
+        languages: [lang("markdown"), lang("toml")].into(),
+        reference_resolution: Default::default(),
+    };
+    let mut document = hit(Lexical, 1, "api", "docs/guide.md", (1, 3));
+    document.language = Some(lang("markdown"));
+    let lexical = FakeSource::answering(vec![document]);
+    let sources = Sources {
+        lexical: Some(&lexical),
+        ..Sources::default()
+    };
+    let mut config = SearchConfig::default();
+    config.expansion.edges.path_or_file = vec![EdgeKind::Test];
+    let response = search(
+        &plan("docs/guide.md", &Glossary::default()),
+        &query_scope,
+        &sources,
+        &config,
+    )
+    .unwrap();
+    assert_eq!(response.results.len(), 1);
+    assert!(response.coverage_gaps.is_empty());
+}
+
+#[test]
+fn mixed_document_and_code_languages_emit_only_relevant_reference_gaps() {
+    let mut query_scope = scope(&["api"]);
+    query_scope
+        .manifest
+        .projects
+        .get_mut(&name("api"))
+        .unwrap()
+        .coverage = ProjectCoverage {
+        languages: [
+            "typescript",
+            "rust",
+            "markdown",
+            "toml",
+            "yaml",
+            "json",
+            "css",
+            "html",
+            "text",
+            "protobuf",
+            "graphql",
+            "xml",
+            "hcl",
+            "ini",
+            "dockerfile",
+            "makefile",
+            "cmake",
+        ]
+        .map(lang)
+        .into(),
+        reference_resolution: [lang("rust")].into(),
+    };
+    let lexical = FakeSource::answering(vec![hit(Lexical, 1, "api", "src/pay.ts", (1, 9))]);
+    let sources = Sources {
+        lexical: Some(&lexical),
+        ..Sources::default()
+    };
+    let expected = CoverageGap::NoReferenceResolution {
+        project: name("api"),
+        language: lang("typescript"),
+    };
+    let relation_search = search(
+        &behaviour(),
+        &query_scope,
+        &sources,
+        &SearchConfig::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        relation_search.coverage_gaps.as_slice(),
+        std::slice::from_ref(&expected)
+    );
+    let content_search = search(&behaviour(), &query_scope, &sources, &no_expansion()).unwrap();
+    assert!(content_search.coverage_gaps.is_empty());
+    // Impact questions still require reference analysis even with graph
+    // expansion disabled: suppressing document noise must not hide this gap.
+    let impact = plan("who calls submitOrder", &Glossary::default());
+    assert_eq!(impact.intent, Intent::Impact);
+    let intrinsic = search(&impact, &query_scope, &sources, &no_expansion()).unwrap();
+    assert_eq!(intrinsic.coverage_gaps, [expected]);
+    query_scope.languages = Some([lang("markdown"), lang("yaml")].into());
+    let documents = search(&impact, &query_scope, &sources, &no_expansion()).unwrap();
+    assert!(documents.coverage_gaps.is_empty());
+}
+
+#[test]
+fn callable_language_names_and_aliases_preserve_missing_analysis_warnings() {
+    let impact = plan("who calls submitOrder", &Glossary::default());
+    for language in [
+        "rust",
+        "typescript",
+        "tsx",
+        "javascript",
+        "jsx",
+        "python",
+        "go",
+        "java",
+        "kotlin",
+        "csharp",
+        "c#",
+        "dart",
+        "swift",
+        "php",
+        "ruby",
+        "c",
+        "cpp",
+        "c++",
+        "scala",
+        "bash",
+        "lua",
+        "perl",
+        "r",
+        "elixir",
+        "erlang",
+        "haskell",
+        "ocaml",
+        "clojure",
+        "zig",
+        "objc",
+        "powershell",
+        "batch",
+        "groovy",
+        "vue",
+        "svelte",
+    ] {
+        let mut query_scope = scope(&["api"]);
+        query_scope
+            .manifest
+            .projects
+            .get_mut(&name("api"))
+            .unwrap()
+            .coverage = ProjectCoverage {
+            languages: [lang(language)].into(),
+            reference_resolution: Default::default(),
+        };
+        let response = search_with_candidates(
+            &impact,
+            &query_scope,
+            SourceLists {
+                exact: SourceStatus::Answered(Vec::new()),
+                lexical: SourceStatus::Answered(Vec::new()),
+                semantic: SourceStatus::Answered(Vec::new()),
+            },
+            None,
+            None,
+            &no_expansion(),
+        )
+        .unwrap();
+        assert_eq!(
+            response.coverage_gaps,
+            [CoverageGap::NoReferenceResolution {
+                project: name("api"),
+                language: lang(language),
+            }],
+            "{language}"
+        );
+        assert!(
+            reasons(&response).contains(&EmptyReason::NoReferenceResolutionForLanguage {
+                project: name("api"),
+                language: lang(language),
+            })
+        );
+    }
+}
+
+#[test]
 fn rerank_is_off_by_default_and_reports_when_missing() {
     let lexical = FakeSource::answering(vec![
         hit(Lexical, 1, "api", "src/a.rs", (1, 2)),
@@ -328,6 +545,128 @@ fn bad_reranker_output_keeps_fused_order() {
                 .any(|d| d.component == knowell_query::Component::Rerank)
         );
     }
+}
+
+#[test]
+fn reranker_can_promote_a_candidate_beyond_the_visible_limit() {
+    let lexical = FakeSource::answering(vec![
+        hit(Lexical, 1, "api", "src/a.rs", (1, 2)),
+        hit(Lexical, 2, "api", "src/b.rs", (1, 2)),
+        hit(Lexical, 3, "api", "src/c.rs", (1, 2)),
+    ]);
+    let reranker = FakeReranker {
+        scores: Ok(vec![0.1, 0.2, 0.9]),
+        calls: Cell::new(0),
+    };
+    let sources = Sources {
+        lexical: Some(&lexical),
+        reranker: Some(&reranker),
+        ..Sources::default()
+    };
+    let mut config = no_expansion();
+    config.rerank.enabled = true;
+    config.rerank.top_n = 3;
+    config.fusion.result_limit = 1;
+    let response = search(&behaviour(), &scope(&["api"]), &sources, &config).unwrap();
+    assert_eq!(response.results[0].location.path.as_str(), "src/c.rs");
+    assert_eq!(response.results[0].rank, 1);
+    assert_eq!(response.stats.fused, 3);
+    assert_eq!(response.stats.truncated_by_limit, 2);
+    assert!(
+        response
+            .degraded
+            .iter()
+            .all(|d| d.component != knowell_query::Component::Rerank)
+    );
+}
+
+#[test]
+fn final_project_quota_remains_work_conserving_after_rerank() {
+    let lexical = FakeSource::answering(vec![
+        hit(Lexical, 1, "api", "src/a.rs", (1, 2)),
+        hit(Lexical, 2, "api", "src/b.rs", (1, 2)),
+        hit(Lexical, 3, "ui", "src/c.rs", (1, 2)),
+    ]);
+    let reranker = FakeReranker {
+        scores: Ok(vec![0.8, 0.9, 0.1]),
+        calls: Cell::new(0),
+    };
+    let sources = Sources {
+        lexical: Some(&lexical),
+        reranker: Some(&reranker),
+        ..Sources::default()
+    };
+    let mut config = no_expansion();
+    config.rerank.enabled = true;
+    config.rerank.top_n = 3;
+    config.fusion.result_limit = 2;
+    config.fusion.result_quota_per_project = Some(1);
+    let response = search(&behaviour(), &scope(&["api", "ui"]), &sources, &config).unwrap();
+    let order: Vec<_> = response
+        .results
+        .iter()
+        .map(|r| (r.location.path.as_str(), r.rank))
+        .collect();
+    assert_eq!(order, [("src/b.rs", 1), ("src/c.rs", 2)]);
+    assert_eq!(response.stats.deferred_by_quota, 1);
+    assert_eq!(response.stats.truncated_by_limit, 1);
+    config.fusion.result_limit = 3;
+    let response = search(&behaviour(), &scope(&["api", "ui"]), &sources, &config).unwrap();
+    assert_eq!(response.results[2].location.path.as_str(), "src/a.rs");
+    assert_eq!(response.results[2].rank, 3);
+    assert_eq!(response.stats.truncated_by_limit, 0);
+}
+
+#[test]
+fn disabled_or_empty_expansion_does_not_emit_unrelated_reference_gaps() {
+    let mut query_scope = scope(&["api"]);
+    query_scope
+        .manifest
+        .projects
+        .get_mut(&name("api"))
+        .unwrap()
+        .coverage
+        .reference_resolution
+        .clear();
+    let lexical = FakeSource::answering(vec![hit(Lexical, 1, "api", "src/a.rs", (1, 2))]);
+    let sources = Sources {
+        lexical: Some(&lexical),
+        ..Sources::default()
+    };
+    for mode in 0..3 {
+        let mut config = SearchConfig::default();
+        match mode {
+            0 => config.expansion.enabled = false,
+            1 => config.expansion.seeds = 0,
+            _ => config.expansion.node_budget = 0,
+        }
+        let response = search(&behaviour(), &query_scope, &sources, &config).unwrap();
+        assert!(response.coverage_gaps.is_empty());
+    }
+    let empty = FakeSource::answering(vec![]);
+    let response = search(
+        &behaviour(),
+        &query_scope,
+        &Sources {
+            lexical: Some(&empty),
+            ..Sources::default()
+        },
+        &SearchConfig::default(),
+    )
+    .unwrap();
+    assert!(response.coverage_gaps.is_empty());
+    let response = search(
+        &behaviour(),
+        &query_scope,
+        &sources,
+        &SearchConfig::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        response.coverage_gaps.len(),
+        1,
+        "requested call expansion still reports absent analysis"
+    );
 }
 
 #[test]

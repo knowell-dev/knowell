@@ -185,14 +185,19 @@ impl<E: Embedder + 'static> Inner<E> {
         // is recorded separately below.
         let mut claimed: BTreeSet<ContentHash> = BTreeSet::new();
         let mut rows = Vec::new();
+        let mut structures = Vec::new();
         for file in analysed.values() {
             if file.chunks.is_empty() || !claimed.insert(file.content_hash) {
                 continue;
             }
             rows.extend(file.chunks.iter().map(|c| c.row.clone()));
+            structures.extend(file.chunks.iter().map(|c| c.structure.clone()));
         }
         for batch in rows.chunks(CHUNK_BATCH) {
             content::upsert_chunks(&mut conn, ctx.organization, batch).await?;
+        }
+        for batch in structures.chunks(CHUNK_BATCH) {
+            content::upsert_chunk_structures(&mut conn, ctx.organization, batch).await?;
         }
         Counters::add(&self.stats.chunks_written, rows.len() as u64);
         self.write_chunk_inputs(&mut conn, pin, analysed.values())

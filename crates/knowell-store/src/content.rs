@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use knowell_core::{ContentHash, LineRange, RepoPath};
+use knowell_parse::Language;
 use sqlx::{Connection, PgConnection};
 use time::OffsetDateTime;
 
@@ -16,6 +17,17 @@ use crate::hierarchy::stored_path;
 use crate::ids::{OrganizationId, ViewId};
 use crate::types::{from_i32, from_i64, hash_bytes, hash_from_bytes, to_i32, to_i64};
 use crate::views::{GenerationPin, lock_building};
+
+mod metadata;
+mod structure;
+pub use metadata::{
+    FileMetadata, files_metadata_at_page, files_metadata_in_paths, get_content_bounded,
+    retained_source_commit_collision,
+};
+pub use structure::{
+    ChunkKey, ChunkStructure, SourceRange, chunk_structures, chunk_structures_of,
+    upsert_chunk_structures,
+};
 
 /// Rows per bulk statement. Keeps bind payloads well below protocol limits
 /// while amortising round trips.
@@ -29,7 +41,7 @@ pub struct NewContent {
     pub hash: ContentHash,
     /// Size of the original content in bytes.
     pub size_bytes: u64,
-    /// Detected language, if any (e.g. `rust`).
+    /// Legacy blob language hint (e.g. `rust`), not a path's authoritative language.
     pub language: Option<String>,
     /// Redacted text; `None` when the content is not kept as text.
     pub redacted_text: Option<String>,
@@ -44,7 +56,7 @@ pub struct Content {
     pub hash: ContentHash,
     /// Size of the original content in bytes.
     pub size_bytes: u64,
-    /// Detected language.
+    /// Legacy blob language hint; use [`FileVersion::language`] for an occurrence.
     pub language: Option<String>,
     /// Redacted text.
     pub redacted_text: Option<String>,
@@ -114,6 +126,9 @@ pub struct FileVersion {
     pub path: RepoPath,
     /// Content during the range.
     pub content_hash: ContentHash,
+    /// Language detected from this path and its tenant's redacted source.
+    /// `None` means an ambiguous path has no available redacted source to detect from.
+    pub language: Option<String>,
     /// Previous path, when this version started with a rename.
     pub renamed_from: Option<RepoPath>,
     /// First generation that has this version.
@@ -144,17 +159,30 @@ pub async fn upsert_contents(
         let mut sizes = Vec::with_capacity(batch.len());
         let mut languages = Vec::with_capacity(batch.len());
         let mut texts = Vec::with_capacity(batch.len());
+        let mut line_counts = Vec::with_capacity(batch.len());
         for c in batch {
             hashes.push(hash_bytes(&c.hash));
             sizes.push(to_i64(c.size_bytes, "content size")?);
             languages.push(c.language.as_deref());
             texts.push(c.redacted_text.as_deref());
+            line_counts.push(
+                c.redacted_text
+                    .as_deref()
+                    .map(|text| {
+                        let lines = u32::try_from(text.lines().count()).map_err(|_| {
+                            StoreError::invalid("content line count exceeds the supported range")
+                        })?;
+                        Ok::<_, StoreError>(i64::from(lines))
+                    })
+                    .transpose()?,
+            );
         }
         inserted += sqlx::query(
-            "INSERT INTO content (organization_id, hash, size_bytes, language, redacted_text)
-             SELECT $1, t.hash, t.size, t.language, t.body
-             FROM unnest($2::bytea[], $3::bigint[], $4::text[], $5::text[])
-                  AS t(hash, size, language, body)
+            "INSERT INTO content (organization_id, hash, size_bytes, language, redacted_text,
+                                  redacted_line_count)
+             SELECT $1, t.hash, t.size, t.language, t.body, t.line_count
+             FROM unnest($2::bytea[], $3::bigint[], $4::text[], $5::text[], $6::bigint[])
+                  AS t(hash, size, language, body, line_count)
              ON CONFLICT (organization_id, hash) DO NOTHING",
         )
         .bind(organization)
@@ -162,6 +190,7 @@ pub async fn upsert_contents(
         .bind(&sizes)
         .bind(&languages)
         .bind(&texts)
+        .bind(&line_counts)
         .execute(&mut *conn)
         .await?
         .rows_affected();
@@ -227,6 +256,79 @@ pub async fn redacted_texts(
     Ok(out)
 }
 
+/// Reads stored blobs in hash order, deduplicating the request and batching
+/// statements by [`BATCH_ROWS`]. Missing hashes are absent, never substituted.
+pub async fn get_contents(
+    conn: &mut PgConnection,
+    organization: OrganizationId,
+    hashes: &[ContentHash],
+) -> Result<Vec<Content>, StoreError> {
+    let unique: Vec<Vec<u8>> = hashes
+        .iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(hash_bytes)
+        .collect();
+    let mut out = Vec::new();
+    for batch in unique.chunks(BATCH_ROWS) {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            hash: Vec<u8>,
+            size_bytes: i64,
+            language: Option<String>,
+            redacted_text: Option<String>,
+            created_at: OffsetDateTime,
+        }
+        let rows = sqlx::query_as::<_, Row>(
+            "SELECT hash, size_bytes, language, redacted_text, created_at
+             FROM content WHERE organization_id = $1 AND hash = ANY($2::bytea[])
+             ORDER BY hash",
+        )
+        .bind(organization)
+        .bind(batch)
+        .fetch_all(&mut *conn)
+        .await?;
+        for row in rows {
+            out.push(Content {
+                organization,
+                hash: hash_from_bytes(&row.hash)?,
+                size_bytes: from_i64(row.size_bytes, "content size")?,
+                language: row.language,
+                redacted_text: row.redacted_text,
+                created_at: row.created_at,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Counts file occurrences by their own detected language at an authorized tenant pin.
+/// Reads catalog metadata only; no source text, chunks, or parsing is needed.
+/// Unknown occurrences are included in the displayed `text` count only.
+pub async fn file_languages_at(
+    conn: &mut PgConnection,
+    organization: OrganizationId,
+    pin: GenerationPin,
+) -> Result<BTreeMap<String, u64>, StoreError> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT coalesce(f.language, 'text'), count(*)
+         FROM file_version f
+         JOIN view v ON v.id = f.view_id
+         JOIN project p ON p.id = v.project_id AND p.organization_id = $1
+         WHERE f.view_id = $2 AND f.valid_from <= $3
+           AND (f.valid_to IS NULL OR f.valid_to > $3)
+         GROUP BY coalesce(f.language, 'text')",
+    )
+    .bind(organization)
+    .bind(pin.view)
+    .bind(pin.generation)
+    .fetch_all(conn)
+    .await?;
+    rows.into_iter()
+        .map(|(language, count)| Ok((language, from_i64(count, "file count")?)))
+        .collect()
+}
+
 /// Which of `hashes` are not stored yet, in input order without duplicates;
 /// lets the pipeline skip reading and redacting known blobs.
 pub async fn missing_contents(
@@ -254,6 +356,141 @@ pub async fn missing_contents(
     let mut seen = BTreeSet::new();
     missing.retain(|h| seen.insert(*h));
     Ok(missing)
+}
+
+#[derive(sqlx::FromRow)]
+struct LanguageRow {
+    view_id: ViewId,
+    path: String,
+    valid_from: i64,
+    content_hash: Vec<u8>,
+    organization_id: OrganizationId,
+}
+
+/// Detects only from an occurrence's path and its authorized redacted input.
+/// Known paths need no body. Headers use at most 65536 UTF-8 characters from
+/// PostgreSQL; the existing detector then applies its 65536-byte boundary.
+/// Ambiguous paths require the complete first line to preserve shebang semantics.
+async fn occurrence_language(
+    conn: &mut PgConnection,
+    row: &LanguageRow,
+) -> Result<Option<String>, StoreError> {
+    let path = stored_path(row.path.clone())?;
+    let header = matches!(Language::from_path(&path), Some(Language::C))
+        && path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("h"));
+    if !header && Language::from_path(&path).is_some() {
+        return Ok(Some(Language::detect(&path, "").as_str().to_owned()));
+    }
+    let input: Option<Option<String>> = if header {
+        sqlx::query_scalar(
+            "SELECT substring(redacted_text FROM 1 FOR 65536) FROM content
+             WHERE organization_id = $1 AND hash = $2",
+        )
+        .bind(row.organization_id)
+        .bind(&row.content_hash)
+        .fetch_optional(&mut *conn)
+        .await?
+    } else {
+        // A complete first line can itself be very large. Read one ambiguous
+        // occurrence at a time rather than silently truncating a valid shebang.
+        sqlx::query_scalar(
+            "SELECT split_part(redacted_text, E'\\n', 1) FROM content
+             WHERE organization_id = $1 AND hash = $2",
+        )
+        .bind(row.organization_id)
+        .bind(&row.content_hash)
+        .fetch_optional(&mut *conn)
+        .await?
+    };
+    Ok(input
+        .flatten()
+        .map(|input| Language::detect(&path, &input).as_str().to_owned()))
+}
+
+async fn classify_language_rows(
+    conn: &mut PgConnection,
+    rows: &[LanguageRow],
+) -> Result<(), StoreError> {
+    for batch in rows.chunks(BATCH_ROWS) {
+        let mut views = Vec::with_capacity(batch.len());
+        let mut paths = Vec::with_capacity(batch.len());
+        let mut generations = Vec::with_capacity(batch.len());
+        let mut languages = Vec::with_capacity(batch.len());
+        for row in batch {
+            languages.push(occurrence_language(conn, row).await?);
+            views.push(row.view_id);
+            paths.push(row.path.as_str());
+            generations.push(row.valid_from);
+        }
+        sqlx::query(
+            "UPDATE file_version f SET language = u.language, language_detection_version = 1
+             FROM unnest($1::uuid[], $2::text[], $3::bigint[], $4::text[])
+                  AS u(view_id, path, valid_from, language)
+             WHERE f.view_id = u.view_id AND f.path = u.path AND f.valid_from = u.valid_from
+               AND (f.language_detection_version = 0 OR f.language IS NULL)",
+        )
+        .bind(&views)
+        .bind(&paths)
+        .bind(&generations)
+        .bind(&languages)
+        .execute(&mut *conn)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Resumes all historical unclassified occurrences and marks inconclusive results
+/// as classified too. Called while the dedicated connection holds SQLx's migration lock.
+pub(crate) async fn backfill_file_languages(conn: &mut PgConnection) -> Result<(), StoreError> {
+    loop {
+        let mut tx = conn.begin().await?;
+        let rows = sqlx::query_as::<_, LanguageRow>(
+            "SELECT f.view_id, f.path, f.valid_from, f.content_hash, p.organization_id
+             FROM file_version f JOIN view v ON v.id = f.view_id
+             JOIN project p ON p.id = v.project_id
+             WHERE f.language_detection_version = 0
+             ORDER BY f.view_id, f.path COLLATE \"C\", f.valid_from
+             LIMIT $1 FOR UPDATE OF f",
+        )
+        .bind(i64::try_from(BATCH_ROWS).map_err(|_| {
+            StoreError::invalid("language backfill batch size exceeds the supported range")
+        })?)
+        .fetch_all(&mut *tx)
+        .await?;
+        if rows.is_empty() {
+            tx.commit().await?;
+            return Ok(());
+        }
+        classify_language_rows(&mut tx, &rows).await?;
+        tx.commit().await?;
+    }
+}
+
+async fn classify_open_file_languages(
+    conn: &mut PgConnection,
+    view: ViewId,
+    paths: &[&str],
+) -> Result<(), StoreError> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let rows = sqlx::query_as::<_, LanguageRow>(
+        "SELECT f.view_id, f.path, f.valid_from, f.content_hash, p.organization_id
+         FROM file_version f JOIN view v ON v.id = f.view_id
+         JOIN project p ON p.id = v.project_id
+         LEFT JOIN content c ON c.organization_id = p.organization_id AND c.hash = f.content_hash
+         WHERE f.view_id = $1 AND f.path = ANY($2) AND f.valid_to IS NULL
+           AND (f.language_detection_version = 0
+                OR (f.language IS NULL AND c.redacted_text IS NOT NULL))
+         ORDER BY f.path COLLATE \"C\", f.valid_from",
+    )
+    .bind(view)
+    .bind(paths)
+    .fetch_all(&mut *conn)
+    .await?;
+    classify_language_rows(conn, &rows).await
 }
 
 /// Stores chunks; existing chunks with the same key are updated in place
@@ -414,6 +651,44 @@ pub async fn chunks_of(
             })
         })
         .collect()
+}
+
+/// Reads chunks for unique blobs and one parser version, ordered by hash and
+/// ordinal. Uses at most one statement per [`BATCH_ROWS`] unique hashes.
+pub async fn chunks_of_many(
+    conn: &mut PgConnection,
+    organization: OrganizationId,
+    hashes: &[ContentHash],
+    parser_version: &str,
+) -> Result<Vec<Chunk>, StoreError> {
+    let unique: Vec<Vec<u8>> = hashes
+        .iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(hash_bytes)
+        .collect();
+    let mut out = Vec::new();
+    for batch in unique.chunks(BATCH_ROWS) {
+        let rows = sqlx::query_as::<_, ChunkRow>(
+            "SELECT content_hash, parser_version, ordinal, start_line, end_line, start_byte,
+                    end_byte, kind, symbol_path, prepared_input_hash
+             FROM chunk
+             WHERE organization_id = $1 AND content_hash = ANY($2::bytea[]) AND parser_version = $3
+             ORDER BY content_hash, ordinal",
+        )
+        .bind(organization)
+        .bind(batch)
+        .bind(parser_version)
+        .fetch_all(&mut *conn)
+        .await?;
+        for row in rows {
+            out.push(Chunk {
+                organization,
+                chunk: row.into_chunk()?,
+            });
+        }
+    }
+    Ok(out)
 }
 
 /// A chunk located in a pinned view: which file at which generation holds it.
@@ -814,7 +1089,10 @@ pub async fn locate_chunk_inputs(
 ///
 /// Changed paths get a new version starting at `generation`; their previous
 /// version (and the old path of a rename) is closed at `generation`.
-/// Unchanged content is left alone. Re-applying changes for a path within the
+/// Unchanged content keeps its interval; unclassified occurrence metadata is repaired.
+/// An explicit upsert also retries a previously unknown language when its tenant's
+/// redacted source has become available, without creating another file interval.
+/// Re-applying changes for a path within the
 /// same generation replaces the earlier attempt, so retries are idempotent.
 /// Fails with [`StoreError::GenerationNotBuilding`] once the generation was
 /// activated or failed (the write fence).
@@ -930,6 +1208,7 @@ pub async fn apply_file_changes(
     .execute(&mut *tx)
     .await?
     .rows_affected();
+    classify_open_file_languages(&mut tx, view, &up_paths).await?;
     tx.commit().await?;
     Ok(FileChangeSummary { added, closed })
 }
@@ -939,6 +1218,7 @@ struct FileVersionRow {
     view_id: ViewId,
     path: String,
     content_hash: Vec<u8>,
+    language: Option<String>,
     renamed_from: Option<String>,
     valid_from: i64,
     valid_to: Option<i64>,
@@ -952,6 +1232,7 @@ impl TryFrom<FileVersionRow> for FileVersion {
             view: row.view_id,
             path: stored_path(row.path)?,
             content_hash: hash_from_bytes(&row.content_hash)?,
+            language: row.language,
             renamed_from: row.renamed_from.map(stored_path).transpose()?,
             valid_from: row.valid_from,
             valid_to: row.valid_to,
@@ -965,7 +1246,7 @@ pub async fn files_at(
     pin: GenerationPin,
 ) -> Result<Vec<FileVersion>, StoreError> {
     sqlx::query_as::<_, FileVersionRow>(
-        "SELECT view_id, path, content_hash, renamed_from, valid_from, valid_to
+        "SELECT view_id, path, content_hash, language, renamed_from, valid_from, valid_to
          FROM file_version
          WHERE view_id = $1 AND valid_from <= $2 AND (valid_to IS NULL OR valid_to > $2)
          ORDER BY path COLLATE \"C\"",
@@ -986,7 +1267,7 @@ pub async fn file_at(
     path: &RepoPath,
 ) -> Result<Option<FileVersion>, StoreError> {
     let row = sqlx::query_as::<_, FileVersionRow>(
-        "SELECT view_id, path, content_hash, renamed_from, valid_from, valid_to
+        "SELECT view_id, path, content_hash, language, renamed_from, valid_from, valid_to
          FROM file_version
          WHERE view_id = $1 AND path = $3
            AND valid_from <= $2 AND (valid_to IS NULL OR valid_to > $2)",
@@ -1013,13 +1294,13 @@ pub async fn file_history(
     sqlx::query_as::<_, FileVersionRow>(
         "WITH RECURSIVE history AS (
            SELECT * FROM (
-             SELECT f.view_id, f.path, f.content_hash, f.renamed_from, f.valid_from, f.valid_to,
+             SELECT f.view_id, f.path, f.content_hash, f.language, f.renamed_from, f.valid_from, f.valid_to,
                     1 AS step
              FROM file_version f WHERE f.view_id = $1 AND f.path = $2
              ORDER BY f.valid_from DESC LIMIT 1
            ) newest
            UNION ALL
-           SELECT p.view_id, p.path, p.content_hash, p.renamed_from, p.valid_from, p.valid_to,
+           SELECT p.view_id, p.path, p.content_hash, p.language, p.renamed_from, p.valid_from, p.valid_to,
                   h.step + 1
            FROM history h
            JOIN file_version p ON p.view_id = h.view_id
@@ -1027,7 +1308,7 @@ pub async fn file_history(
                               AND p.path = coalesce(h.renamed_from, h.path)
            WHERE h.step < $3
          )
-         SELECT view_id, path, content_hash, renamed_from, valid_from, valid_to
+         SELECT view_id, path, content_hash, language, renamed_from, valid_from, valid_to
          FROM history ORDER BY step",
     )
     .bind(view)

@@ -73,6 +73,55 @@ versions remain errors. Migration selection and vector DDL share an advisory loc
 The historical SQL in `migrations/` is immutable; `core_migrations/` holds only the
 two vector-free variants and the optional vector DDL.
 
+Migration 14 makes `FileVersion.language` authoritative for each path and historical
+interval. Identical body hashes at `.md`, `.rs` and `.ts` paths retain their own languages;
+`Content.language` remains a legacy blob hint. New writes and same-hash no-op repairs
+classify occurrence metadata inside the building-generation transaction. A rename
+classifies its destination path. Language-filtered ANN queries use this occurrence
+metadata before their result limit, including the legacy chunk-input fallback.
+Unknown language stays SQL `NULL`, so explicit `languages=["text"]` does not admit it.
+The lightweight workspace catalog presents unknown occurrences in its `text` count only.
+
+Migration 15 adds optional source hierarchy beside content-level chunks without
+rewriting chunk identities, prepared inputs or embeddings. `content::ChunkStructure`
+retains the declaration and enclosing-symbol ranges, the parent chunk ordinal and
+whether the embedding chunk is exact contiguous source. Elided headers and joined
+regions are explicitly distinguishable from raw source. Existing indexes have no
+hierarchy row until that content is analyzed again; absence never implies exact source.
+`chunk_structures` reads selected keys and `chunk_structures_of` reads selected blobs,
+both within the supplied tenant and without transferring source text.
+
+`files_metadata_at_page` uses exclusive bytewise path cursors at a tenant's exact
+generation; `files_metadata_in_paths` reads only selected paths. Both return file
+occurrences, original byte sizes, text presence and optional redacted line counts.
+New content records line counts during ingress. Legacy counts remain unknown: migration
+15 deliberately does not load every stored body to backfill them. Missing referenced
+content is corruption, not an empty file. `get_content_bounded` checks the exact UTF-8
+redacted-body byte length inside PostgreSQL before transferring text; oversized bodies
+produce an explicit error and are not silently truncated.
+
+Before upgrading, stop all Knowell writers and older running processes. Mixed old and
+new writers are unsupported: the migration advisory lock serializes schema upgrades,
+but does not fence an old binary inserting unclassified rows after the backfill.
+`migrate()` backfills every historical interval under that lock before returning, in
+committed batches of at most `content::BATCH_ROWS`. Classification version 1 records
+inconclusive results too, so subsequent startup does not reread unknown bodies. A
+cancelled backfill resumes remaining version-0 rows on the next migration run.
+
+Detection uses the existing parser's filename/extension and tenant-scoped redacted
+source rules, never the shared blob hint. Conclusive paths require no body read;
+`.h` refinement reads at most 65,536 UTF-8 characters, then the parser applies its
+65,536-byte prefix boundary. Ambiguous paths use the complete first line for shebang
+detection, one occurrence at a time. A pathological first line can therefore require
+an allocation as large as that line, and PostgreSQL may scan the stored text to find
+the newline; this is not a hard memory bound beyond upstream ingress limits. The line
+is not silently truncated. Available text follows `Language::detect` exactly,
+including `text` for unrecognized extensions. Missing ambiguous text produces
+classified unknown. An explicit same-path/hash upsert can repair that unknown result
+when its own tenant's redacted source becomes available, without changing the interval.
+This metadata-only upgrade does not rewrite content, chunks, prepared inputs or vectors,
+and does not call an embedding provider.
+
 `check_server().supports_core()` reports PostgreSQL compatibility;
 `semantic_enabled()` reports a supported installed extension. Use
 `embeddings::available()` to check both the extension and vector table. Vector

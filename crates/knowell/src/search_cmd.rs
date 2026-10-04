@@ -32,6 +32,9 @@ pub(crate) struct SearchArgs {
     /// Omit source snippets from the result.
     #[arg(long)]
     no_snippets: bool,
+    /// Include measured retrieval counters and query embedding usage.
+    #[arg(long)]
+    diagnostics: bool,
     /// Print results, versioned evidence and gaps as JSON.
     #[arg(long)]
     json: bool,
@@ -55,6 +58,7 @@ pub(crate) fn run(args: SearchArgs, env: &Env, out: &mut Output) -> anyhow::Resu
         projects: args.projects,
         limit: Some(args.limit),
         include_snippets: Some(!args.no_snippets),
+        include_diagnostics: Some(args.diagnostics),
         ..SearchInput::default()
     };
     // Direct engine calls do not pass through the MCP server's validator.
@@ -120,7 +124,23 @@ fn write_report(report: &SearchReport, out: &mut Output) -> anyhow::Result<()> {
     for hit in &report.search.hits {
         out.line(format!("  {}", local_engine::terminal_text(&hit.title)))?;
         write_evidence(&hit.evidence, out)?;
+        if !hit.evidence.why.is_empty() {
+            out.line(format!(
+                "    why: {}",
+                local_engine::terminal_text(&knowell_mcp::match_reasons(&hit.evidence.why))
+            ))?;
+        }
         if let Some(snippet) = &hit.snippet {
+            if let Some(lines) = hit.snippet_lines {
+                out.line(format!(
+                    "    shown: {lines}{}",
+                    if hit.snippet_truncated {
+                        "; truncated; fetch the result id for the full range"
+                    } else {
+                        ""
+                    }
+                ))?;
+            }
             out.line(format!(
                 "    untrusted source{}:",
                 if !snippet.instruction_like().is_empty() {
@@ -209,6 +229,8 @@ mod tests {
         ] {
             let output = SearchOutput {
                 query_class: QueryClass::ExactSymbol,
+                diagnostics: None,
+                budget: None,
                 hits: Vec::new(),
                 memory_hits: Vec::new(),
                 more_available: false,

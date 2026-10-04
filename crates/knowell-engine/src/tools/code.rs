@@ -2,21 +2,22 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::time::Instant;
 
-use knowell_core::{LineRange, Name, RepoPath};
+use knowell_core::{LineRange, Name, RepoPath, TrackTarget};
 use knowell_mcp::tools::{
     FetchInput, FetchOutput, FetchedItem, HitKind, InspectSymbolInput, InspectSymbolOutput,
-    SearchHit, SearchInput, SearchKind, SearchOutput, SymbolFacet, SymbolInfo, SymbolKind,
-    SymbolLink, VersionStatus,
+    QueryEmbeddingUsage, SearchDiagnostics, SearchHit, SearchInput, SearchKind, SearchOutput,
+    SymbolFacet, SymbolInfo, SymbolKind, SymbolLink, VersionStatus,
 };
 use knowell_mcp::{
     EvidenceType, FileLocator, FreshnessTier, Gap, GapReason, MatchReason, RelationKind,
     Resolution, ResultId, ToolError, UntrustedText,
 };
 use knowell_parse::SymbolKind as ParseKind;
-use knowell_query::Language;
+use knowell_query::{Language, Origin, PackItem, Snippet};
 use knowell_secrets::ExclusionPolicy;
-use knowell_store::content;
+use knowell_store::{GenerationState, content, views};
 
 use super::workspace::analysis_level;
 use crate::access::Access;
@@ -24,15 +25,12 @@ use crate::engine::Engine;
 use crate::error::store_tool;
 use crate::evidence::{
     coverage_gaps, degradation_gaps, empty_gaps, freshness_of, hit_kind, no_commit_gap, place,
-    query_class, reasons,
+    query_class, reasons, source_omission_gaps,
 };
-use crate::ids::{parse_source_id, source_id};
+use crate::ids::{SourceRef, parse_source_id, source_id};
 use crate::scope::{Pinned, PinnedProject};
-use crate::search::{Filters, is_test_path, symbol_strength};
-use crate::snapshot::{Snapshot, SymbolEntry, line_count, slice_lines, whole_file};
-
-/// Most lines of a search snippet.
-const SNIPPET_LINES: u32 = 40;
+use crate::search::{Filters, is_test_path, source_snippets, symbol_strength};
+use crate::snapshot::{Snapshot, SymbolEntry, line_count, whole_file};
 
 fn symbol_kind(kind: ParseKind) -> SymbolKind {
     match kind {
@@ -65,6 +63,13 @@ fn widen(range: LineRange, context: u32, total: u32) -> LineRange {
     LineRange::new(start, end.max(start)).unwrap_or(range)
 }
 
+/// Requested source takes precedence over optional surrounding context. In
+/// particular, fetching a continuation must not return its preceding page.
+fn widen_for_fetch(range: LineRange, context: u32, total: u32, max: u32) -> LineRange {
+    let spare = max.saturating_sub(range.line_count());
+    widen(range, context.min(spare / 2), total)
+}
+
 /// `range` clamped to `max` lines; `true` when it was cut.
 fn cap(range: LineRange, max: u32) -> (LineRange, bool) {
     if range.line_count() <= max {
@@ -74,16 +79,66 @@ fn cap(range: LineRange, max: u32) -> (LineRange, bool) {
     (LineRange::new(range.start(), end).unwrap_or(range), true)
 }
 
+enum SearchEmission<'a> {
+    Ranked(&'a knowell_query::SearchResult),
+    Packed(&'a PackItem),
+}
+
+/// Resolves both bytes and provenance. Multiple retained commits sharing the
+/// short id prefix are ambiguous even when their file contents are identical.
+fn historical_source<'a>(
+    source: &SourceRef,
+    history: &'a [content::FileVersion],
+    generations: &'a [views::ViewGeneration],
+) -> Option<(&'a content::FileVersion, &'a views::ViewGeneration)> {
+    let mut selected: Option<(&content::FileVersion, &views::ViewGeneration)> = None;
+    for generation in generations {
+        if !matches!(
+            generation.state,
+            GenerationState::Active | GenerationState::Retired
+        ) || generation.resolved_commit.is_none()
+            || !source.names_commit(generation.resolved_commit.as_deref())
+        {
+            continue;
+        }
+        let Some(version) = history.iter().find(|version| {
+            version.view == generation.view
+                && source.names_version(&version.content_hash)
+                && version.valid_from <= generation.generation
+                && version
+                    .valid_to
+                    .is_none_or(|end| generation.generation < end)
+        }) else {
+            continue;
+        };
+        if let Some((_, previous)) = selected {
+            if previous.resolved_commit != generation.resolved_commit {
+                return None;
+            }
+            if previous.generation >= generation.generation {
+                continue;
+            }
+        }
+        selected = Some((version, generation));
+    }
+    selected
+}
+
 impl Engine {
     pub(crate) async fn tool_search(
         &self,
         access: Access,
         input: SearchInput,
     ) -> Result<SearchOutput, ToolError> {
+        let started = Instant::now();
+        let mut diagnostics = None;
         let pinned = self
             .resolve_target_for_projects(&access, &input.target, &input.projects)
             .await?;
         let limit = usize::try_from(input.limit.unwrap_or(10)).unwrap_or(10);
+        let requested = input.token_budget.unwrap_or(4000);
+        let include_snippets = input.include_snippets.unwrap_or(true);
+        let mut used_tokens = 0u32;
         let wants = |kind: SearchKind| input.kinds.is_empty() || input.kinds.contains(&kind);
         let languages = if input.languages.is_empty() {
             None
@@ -105,6 +160,8 @@ impl Engine {
                 .then(|| input.projects.iter().cloned().collect()),
             languages,
             path_prefixes: input.path_prefixes.clone(),
+            kinds: input.kinds.clone(),
+            sections: Vec::new(),
         };
         let mut gaps = pinned.gaps.clone();
         gaps.extend(pinned.not_indexed_gaps(&input.projects));
@@ -114,35 +171,199 @@ impl Engine {
             query_class(knowell_query::plan(&input.query, &self.inner.glossary).intent);
         if wants(SearchKind::Code) || wants(SearchKind::Docs) || wants(SearchKind::Contracts) {
             let run = self
-                .run_search(&pinned, &filters, &input.query, limit, true, false)
+                .run_source_search(
+                    &pinned,
+                    &filters,
+                    &input.query,
+                    if include_snippets {
+                        limit.saturating_mul(4).clamp(16, 64)
+                    } else {
+                        limit
+                    },
+                )
                 .await?;
             query_class_out = query_class(run.response.plan.intent);
-            let texts = if input.include_snippets.unwrap_or(true) {
-                self.texts_for(&run).await?
+            if input.include_diagnostics.unwrap_or(false) {
+                let work = &run.retrieval;
+                let usage = work.embedding_usage;
+                let count = |value: usize| u64::try_from(value).unwrap_or(u64::MAX);
+                diagnostics = Some(SearchDiagnostics {
+                    elapsed_ms: 0,
+                    preparation_ms: work.preparation_ms,
+                    prepared_views: count(work.prepared_views),
+                    exact_ms: work.exact_ms,
+                    lexical_ms: work.lexical_ms,
+                    semantic_ms: work.semantic_ms,
+                    fusion_expansion_ms: work.fusion_expansion_ms,
+                    snippet_read_ms: 0,
+                    lexical_queries: count(work.lexical_queries),
+                    lexical_file_hits: count(work.lexical_file_hits_examined),
+                    lexical_spans: count(work.lexical_candidates),
+                    semantic_queries: count(work.semantic_queries),
+                    semantic_neighbors: count(work.semantic_neighbors_examined),
+                    embedding_calls: count(work.embedding_calls),
+                    embedding_failures: count(work.embedding_failures),
+                    exact_path_embedding_bypassed: work.exact_path_embedding_bypass,
+                    embedding: (usage.requests > 0 || usage.input_tokens > 0).then_some(
+                        QueryEmbeddingUsage {
+                            input_tokens: usage.input_tokens,
+                            tokens_estimated: usage.tokens_estimated,
+                            requests: usage.requests,
+                            retries: usage.retries,
+                            operation_ms: u64::try_from(usage.latency.as_millis())
+                                .unwrap_or(u64::MAX),
+                        },
+                    ),
+                });
+            }
+            let snippet_started = Instant::now();
+            let texts = if include_snippets {
+                self.source_texts_for(&run).await?
             } else {
                 Default::default()
             };
-            let mut no_commit = BTreeSet::new();
-            for result in &run.response.results {
-                let why = reasons(
-                    &result.why,
-                    Some(&result.score),
-                    result.symbol.as_deref(),
-                    &result.location,
+            let source = source_snippets(&run, texts, self.inner.settings.max_fetch_lines);
+            let selected = if include_snippets {
+                Some(
+                    knowell_query::pack_task_with(
+                        &run.response,
+                        crate::source_region::source_budget(requested),
+                        &source,
+                        &crate::source_region::SourceBudgetCounter,
+                        &knowell_query::TaskPackOptions {
+                            strategy: knowell_query::TaskSelectionStrategy::Source,
+                            desired_roles: Vec::new(),
+                            candidate_limit: 64,
+                            ..Default::default()
+                        },
+                    )
+                    .map_err(|error| ToolError::internal(error.to_string()))?,
+                )
+            } else {
+                None
+            };
+            let emissions: Vec<_> = match &selected {
+                Some(selected) => {
+                    let omissions = source_omission_gaps(&selected.pack.omitted);
+                    if selected.pack.items.is_empty()
+                        && !run.response.results.is_empty()
+                        && omissions.is_empty()
+                        && !selected.pack.omitted.iter().any(|omission| {
+                            matches!(
+                                omission.reason,
+                                knowell_query::OmitReason::OverBudget { .. }
+                            )
+                        })
+                    {
+                        gaps.push(Gap::new(GapReason::NotFound,
+                            "retrieval found source candidates, but no source regions were emitted; inspect the pinned index or increase token_budget"));
+                    }
+                    gaps.extend(omissions);
+                    more_available |= selected.pack.items.len() > limit
+                        || !selected.selection.unselected.is_empty()
+                        || !selected.pack.omitted.is_empty();
+                    if selected.pack.omitted.iter().any(|omission| {
+                        matches!(
+                            omission.reason,
+                            knowell_query::OmitReason::OverBudget { .. }
+                        )
+                    }) {
+                        gaps.push(Gap::new(GapReason::BudgetExhausted,
+                            "some source regions did not fit; increase token_budget or narrow the query"));
+                    }
+                    selected
+                        .pack
+                        .items
+                        .iter()
+                        .take(limit)
+                        .map(SearchEmission::Packed)
+                        .collect()
+                }
+                None => run
+                    .response
+                    .results
+                    .iter()
+                    .take(limit)
+                    .map(SearchEmission::Ranked)
+                    .collect(),
+            };
+            if let Some(work) = &mut diagnostics {
+                work.snippet_read_ms = run.retrieval.source_hydration_ms.saturating_add(
+                    u64::try_from(snippet_started.elapsed().as_millis()).unwrap_or(u64::MAX),
                 );
-                let freshness = freshness_of(&result.score, result.location.range);
-                let Some(placed) = place(
-                    &run.prepared,
-                    &result.location,
-                    result.symbol.as_deref(),
-                    why.clone(),
-                    freshness,
-                )?
+            }
+            let mut no_commit = BTreeSet::new();
+            for emission in emissions {
+                let (location, symbol, source_why, score, body) = match emission {
+                    SearchEmission::Ranked(result) => (
+                        &result.location,
+                        result.symbol.as_deref(),
+                        result.why.as_slice(),
+                        Some(&result.score),
+                        None,
+                    ),
+                    SearchEmission::Packed(item) => {
+                        used_tokens = used_tokens.saturating_add(item.tokens);
+                        let body = Some(Snippet {
+                            text: item.text.clone(),
+                            range: item.citation.range,
+                            content_hash: item.citation.content_hash,
+                        });
+                        match item.origin {
+                            Origin::Result { rank } => {
+                                let Some(result) = run
+                                    .response
+                                    .results
+                                    .iter()
+                                    .find(|result| result.rank == rank)
+                                else {
+                                    continue;
+                                };
+                                (
+                                    &result.location,
+                                    item.symbol.as_deref(),
+                                    item.why.as_slice(),
+                                    Some(&result.score),
+                                    body,
+                                )
+                            }
+                            Origin::Expanded { seed_rank, depth } => {
+                                let Some(expanded) =
+                                    run.response.expanded.iter().find(|expanded| {
+                                        expanded.seed_rank == seed_rank
+                                            && expanded.depth == depth
+                                            && expanded.location.project == item.citation.project
+                                            && expanded.location.path == item.citation.path
+                                            && expanded.location.content_hash
+                                                == item.citation.content_hash
+                                            && expanded.location.view == item.citation.view
+                                            && expanded.location.generation
+                                                == item.citation.generation
+                                    })
+                                else {
+                                    continue;
+                                };
+                                (
+                                    &expanded.location,
+                                    item.symbol.as_deref(),
+                                    item.why.as_slice(),
+                                    None,
+                                    body,
+                                )
+                            }
+                        }
+                    }
+                };
+                let why = reasons(source_why, score, symbol, location);
+                let freshness = score.map_or(FreshnessTier::T1Symbols, |score| {
+                    freshness_of(score, location.range)
+                });
+                let Some(placed) = place(&run.prepared, location, symbol, why.clone(), freshness)?
                 else {
-                    no_commit.insert(result.location.project.clone());
+                    no_commit.insert(location.project.clone());
                     continue;
                 };
-                let kind = hit_kind(&result.location.path, placed.language.as_deref(), &why);
+                let kind = hit_kind(&location.path, placed.language.as_deref(), &why);
                 let wanted = match kind {
                     HitKind::Doc => wants(SearchKind::Docs),
                     HitKind::Contract => wants(SearchKind::Contracts),
@@ -151,34 +372,51 @@ impl Engine {
                 if !wanted {
                     continue;
                 }
-                let snippet = if input.include_snippets.unwrap_or(true) {
-                    let (lines, _) = cap(placed.evidence.lines, SNIPPET_LINES);
-                    match run
-                        .prepared
-                        .view_of(&result.location.project, &result.location.view)
-                    {
-                        Some((view, true)) => view
-                            .overlay
-                            .as_ref()
-                            .and_then(|o| o.overlay.file(&result.location.path))
-                            .map(|f| UntrustedText::repository(slice_lines(&f.text, lines))),
-                        Some((_, false)) => texts
-                            .get(&result.location.content_hash)
-                            .map(|t| UntrustedText::repository(slice_lines(t, lines))),
-                        None => None,
-                    }
+                let shown_lines = body.as_ref().map(|snippet| snippet.range);
+                let snippet_id = if let Some(lines) = shown_lines
+                    && lines != placed.evidence.lines
+                {
+                    Some(source_id(
+                        &placed.evidence.project,
+                        Some(placed.evidence.commit.as_str()),
+                        &placed.evidence.content_hash,
+                        &placed.evidence.path,
+                        lines,
+                    )?)
                 } else {
                     None
                 };
-                let title = result.symbol.clone().unwrap_or_else(|| {
-                    format!("{}:{}", result.location.path, placed.evidence.lines)
+                let extent = source
+                    .source_extent(location, symbol)
+                    .unwrap_or(placed.evidence.lines);
+                let truncated = shown_lines.is_some_and(|lines| {
+                    lines.start() > extent.start() || lines.end() < extent.end()
                 });
+                let continuation_ids = match shown_lines {
+                    Some(lines) => crate::ids::source_continuations(
+                        &placed.evidence.project,
+                        Some(placed.evidence.commit.as_str()),
+                        &placed.evidence.content_hash,
+                        &placed.evidence.path,
+                        lines,
+                        extent,
+                    )?,
+                    None => Vec::new(),
+                };
+                let snippet = body.map(|snippet| UntrustedText::repository(snippet.text));
+                let title = symbol
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("{}:{}", location.path, placed.evidence.lines));
                 hits.push(SearchHit {
                     id: placed.id,
                     kind,
                     title,
                     evidence: placed.evidence,
+                    snippet_id,
+                    snippet_lines: shown_lines,
+                    snippet_truncated: truncated,
                     snippet,
+                    continuation_ids,
                 });
             }
             for project in no_commit {
@@ -217,12 +455,21 @@ impl Engine {
             gaps.push(Gap::new(GapReason::NoMatches, knowell_query::ABSENCE_NOTE));
         }
         dedupe(&mut gaps);
+        if input.include_diagnostics.unwrap_or(false) {
+            let work = diagnostics.get_or_insert_with(SearchDiagnostics::default);
+            work.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        }
         Ok(SearchOutput {
             query_class: query_class_out,
             hits,
             memory_hits,
             more_available,
             gaps,
+            diagnostics,
+            budget: Some(knowell_mcp::tools::TokenBudget {
+                requested,
+                used: used_tokens.min(requested),
+            }),
         })
     }
 
@@ -280,6 +527,13 @@ impl Engine {
         max_lines: u32,
     ) -> Result<Result<FetchedItem, Gap>, ToolError> {
         let total = line_count(text);
+        if lines.start() > total {
+            return Ok(Err(Gap::for_project(
+                GapReason::NotFound,
+                project.entry.name.clone(),
+                format!("{path}: the requested range starts beyond this source version"),
+            )));
+        }
         let lines = LineRange::new(
             lines.start().min(total.max(1)),
             lines
@@ -288,6 +542,7 @@ impl Engine {
                 .max(lines.start().min(total.max(1))),
         )
         .unwrap_or(lines);
+        let requested_lines = lines;
         let (lines, truncated) = cap(lines, max_lines);
         let commit = match (personal, &project.overlay) {
             (true, Some(o)) => o
@@ -304,6 +559,19 @@ impl Engine {
             return Ok(Err(no_commit_gap(&project.entry.name)));
         };
         let id = source_id(&project.entry.name, commit.as_deref(), &hash, path, lines)?;
+        let continuation_ids = if truncated {
+            let remaining = LineRange::new(lines.end().saturating_add(1), requested_lines.end())
+                .map_err(|error| ToolError::internal(error.to_string()))?;
+            vec![source_id(
+                &project.entry.name,
+                commit.as_deref(),
+                &hash,
+                path,
+                remaining,
+            )?]
+        } else {
+            Vec::new()
+        };
         Ok(Ok(FetchedItem {
             id,
             evidence: knowell_mcp::Evidence {
@@ -328,11 +596,37 @@ impl Engine {
                 index_state: project.index_state(),
             },
             language,
-            content: UntrustedText::repository(slice_lines(text, lines)),
+            content: UntrustedText::repository(crate::source_region::slice_source_lines(
+                text, lines,
+            )),
             truncated,
+            continuation_ids,
             status,
             current_id,
         }))
+    }
+
+    /// A short commit prefix cannot select one of two retained source pins.
+    /// Check before current/personal fast paths, without loading source bodies.
+    async fn retained_commit_collision(
+        &self,
+        project: &PinnedProject,
+        source: &SourceRef,
+        path: &RepoPath,
+        expected: &str,
+    ) -> Result<bool, ToolError> {
+        let mut conn = self.inner.store.acquire().await.map_err(store_tool)?;
+        content::retained_source_commit_collision(
+            &mut conn,
+            self.inner.organization,
+            project.view,
+            path,
+            &source.hash16,
+            &source.commit12,
+            expected,
+        )
+        .await
+        .map_err(store_tool)
     }
 
     async fn fetch_id(
@@ -361,7 +655,20 @@ impl Engine {
                 .files()
                 .find(|f| source.path.matches(&f.path))
             && source.names_version(&file.content_hash)
+            && source.names_commit(overlay.overlay.head_commit().or(project.commit.as_deref()))
         {
+            let expected = overlay.overlay.head_commit().or(project.commit.as_deref());
+            if let Some(expected) = expected
+                && self
+                    .retained_commit_collision(project, &source, &file.path, expected)
+                    .await?
+            {
+                return Ok(Err(Gap::for_project(
+                    GapReason::NotFound,
+                    source.project.clone(),
+                    "the source id is ambiguous across retained commits; fetch the pinned file by path instead",
+                )));
+            }
             let total = line_count(&file.text);
             return Self::fetched(
                 project,
@@ -369,14 +676,14 @@ impl Engine {
                 file.content_hash,
                 Some(file.parsed.language.as_str().to_owned()),
                 &file.text,
-                widen(source.lines, context, total),
+                widen_for_fetch(source.lines, context, total, max_lines),
                 VersionStatus::Current,
                 None,
                 true,
                 max_lines,
             );
         }
-        let snapshot = self.snapshot_of(project).await?;
+        let snapshot = self.metadata_snapshot_of(project).await?;
         let path = snapshot
             .files
             .keys()
@@ -387,17 +694,30 @@ impl Engine {
             .and_then(|p| snapshot.file(p).map(|f| (p.clone(), f.clone())));
         if let Some((path, file)) = &current
             && source.names_version(&file.content_hash)
+            && source.names_commit(project.commit.as_deref())
         {
+            if let Some(expected) = project.commit.as_deref()
+                && self
+                    .retained_commit_collision(project, &source, path, expected)
+                    .await?
+            {
+                return Ok(Err(Gap::for_project(
+                    GapReason::NotFound,
+                    source.project.clone(),
+                    "the source id is ambiguous across retained commits; fetch the pinned file by path instead",
+                )));
+            }
             let Some(text) = self.text_of(&file.content_hash).await? else {
                 return Ok(Err(not_found()));
             };
+            let total = line_count(&text);
             return Self::fetched(
                 project,
                 path,
                 file.content_hash,
                 file.language.clone(),
                 &text,
-                widen(source.lines, context, file.line_count),
+                widen_for_fetch(source.lines, context, total, max_lines),
                 VersionStatus::Current,
                 None,
                 false,
@@ -415,12 +735,16 @@ impl Engine {
         let history = content::file_history(&mut conn, project.view, &path, 200)
             .await
             .map_err(store_tool)?;
+        let generations = views::list_generations(&mut conn, project.view)
+            .await
+            .map_err(store_tool)?;
         drop(conn);
-        let Some(version) = history
-            .iter()
-            .find(|v| source.names_version(&v.content_hash))
-        else {
-            return Ok(Err(not_found()));
+        let Some((version, generation)) = historical_source(&source, &history, &generations) else {
+            return Ok(Err(Gap::for_project(
+                GapReason::NotFound,
+                source.project.clone(),
+                "the requested source snapshot is unavailable or ambiguous; its historical commit cannot be verified",
+            )));
         };
         let Some(text) = self.text_of(&version.content_hash).await? else {
             return Ok(Err(not_found()));
@@ -428,12 +752,23 @@ impl Engine {
         let total = line_count(&text);
         let (status, current_id) = match &current {
             Some((cur_path, cur_file)) => {
-                let lines = LineRange::new(
-                    source.lines.start().min(cur_file.line_count.max(1)),
-                    source.lines.end().min(cur_file.line_count.max(1)),
-                )
-                .ok()
-                .or_else(|| whole_file(cur_file.line_count));
+                // Legacy metadata has no line count. Resolve only this current
+                // occurrence instead of parsing unrelated files for a new id.
+                let current_total = if cur_file.line_count > 0 {
+                    Some(cur_file.line_count)
+                } else {
+                    self.text_of(&cur_file.content_hash)
+                        .await?
+                        .as_deref()
+                        .map(line_count)
+                };
+                let lines = current_total.and_then(|total| {
+                    LineRange::new(
+                        source.lines.start().min(total.max(1)),
+                        source.lines.end().min(total.max(1)),
+                    )
+                    .ok()
+                });
                 let id = match lines {
                     Some(lines) => Some(source_id(
                         &project.entry.name,
@@ -448,14 +783,23 @@ impl Engine {
             }
             None => (VersionStatus::Deleted, None),
         };
-        let language = current.as_ref().and_then(|(_, f)| f.language.clone());
+        let Some(commit) = generation.resolved_commit.clone() else {
+            return Ok(Err(not_found()));
+        };
+        let mut historical = project.clone();
+        historical.commit = Some(commit.clone());
+        historical.target = TrackTarget::Commit(commit);
+        historical.generation = generation.generation;
+        historical.latest_seen = project.commit.clone();
+        historical.building = None;
+        historical.overlay = None;
         Self::fetched(
-            project,
-            &path,
+            &historical,
+            &version.path,
             version.content_hash,
-            language,
+            version.language.clone(),
             &text,
-            widen(source.lines, context, total),
+            widen_for_fetch(source.lines, context, total, max_lines),
             status,
             current_id,
             false,
@@ -487,7 +831,7 @@ impl Engine {
                 let total = line_count(&file.text);
                 let lines = locator
                     .lines
-                    .map(|l| widen(l, context, total))
+                    .map(|l| widen_for_fetch(l, context, total, max_lines))
                     .or_else(|| whole_file(total))
                     .ok_or_else(|| ToolError::internal("empty range"))?;
                 return Self::fetched(
@@ -511,7 +855,7 @@ impl Engine {
                 )));
             }
         }
-        let snapshot = self.snapshot_of(project).await?;
+        let snapshot = self.metadata_snapshot_of(project).await?;
         let Some(file) = snapshot.file(&locator.path).cloned() else {
             let reason = if ExclusionPolicy::builtin().check(&locator.path).is_some() {
                 GapReason::ExcludedByPolicy
@@ -541,10 +885,11 @@ impl Engine {
                 format!("{} has no stored text (binary or too large)", locator.path),
             )));
         };
+        let total = line_count(&text);
         let lines = locator
             .lines
-            .map(|l| widen(l, context, file.line_count))
-            .or_else(|| whole_file(file.line_count))
+            .map(|l| widen_for_fetch(l, context, total, max_lines))
+            .or_else(|| whole_file(total))
             .ok_or_else(|| ToolError::internal("empty range"))?;
         Self::fetched(
             project,
@@ -899,6 +1244,89 @@ pub(crate) fn dedupe(gaps: &mut Vec<Gap>) {
 mod tests {
     use super::*;
 
+    fn historical_fixture() -> (SourceRef, content::FileVersion, views::ViewGeneration) {
+        let view = knowell_store::ViewId(uuid::Uuid::from_u128(1));
+        let hash = knowell_core::ContentHash::of(b"old source");
+        let project = Name::new("synthetic").unwrap();
+        let path = RepoPath::new("src/history.rs").unwrap();
+        let commit = "a".repeat(40);
+        let id = source_id(
+            &project,
+            Some(&commit),
+            &hash,
+            &path,
+            LineRange::new(1, 3).unwrap(),
+        )
+        .unwrap();
+        let source = parse_source_id(&id).unwrap();
+        let version = content::FileVersion {
+            view,
+            path,
+            content_hash: hash,
+            language: Some("rust".to_owned()),
+            renamed_from: None,
+            valid_from: 2,
+            valid_to: Some(4),
+        };
+        let generation = views::ViewGeneration {
+            view,
+            generation: 3,
+            resolved_commit: Some(commit),
+            state: GenerationState::Retired,
+            error: None,
+            created_at: time::OffsetDateTime::UNIX_EPOCH,
+            activated_at: Some(time::OffsetDateTime::UNIX_EPOCH),
+            finished_at: Some(time::OffsetDateTime::UNIX_EPOCH),
+        };
+        (source, version, generation)
+    }
+
+    #[test]
+    fn historical_source_requires_retained_commit_and_valid_file_interval() {
+        let (source, version, generation) = historical_fixture();
+        let history = vec![version.clone()];
+        let generations = vec![generation.clone()];
+        let (found, pin) = historical_source(&source, &history, &generations).unwrap();
+        assert_eq!(found.content_hash, version.content_hash);
+        assert_eq!(pin.resolved_commit, generation.resolved_commit);
+        assert!(historical_source(&source, &history, &[]).is_none());
+
+        for number in [1, 4] {
+            let mut outside = generation.clone();
+            outside.generation = number;
+            assert!(historical_source(&source, &history, &[outside]).is_none());
+        }
+        let mut different = generation.clone();
+        different.resolved_commit = Some("b".repeat(40));
+        assert!(historical_source(&source, &history, &[different]).is_none());
+        let mut building = generation.clone();
+        building.state = GenerationState::Building;
+        assert!(historical_source(&source, &history, &[building]).is_none());
+        let mut different_body = version;
+        different_body.content_hash = knowell_core::ContentHash::of(b"current source");
+        assert!(historical_source(&source, &[different_body], &generations).is_none());
+    }
+
+    #[test]
+    fn historical_source_rejects_commit_prefix_collision() {
+        let (source, version, generation) = historical_fixture();
+        let mut collision = generation.clone();
+        collision.resolved_commit = Some(format!("{}{}", "a".repeat(12), "b".repeat(28)));
+        let generations = vec![generation, collision];
+        assert!(historical_source(&source, &[version], &generations).is_none());
+    }
+
+    #[test]
+    fn historical_source_reuses_same_commit_across_retained_generations() {
+        let (source, version, generation) = historical_fixture();
+        let mut earlier = generation.clone();
+        earlier.generation = 2;
+        let history = vec![version];
+        let generations = vec![earlier, generation];
+        let (_, pin) = historical_source(&source, &history, &generations).unwrap();
+        assert_eq!(pin.generation, 3);
+    }
+
     #[test]
     fn widen_and_cap_stay_in_bounds() {
         let r = LineRange::new(5, 8).unwrap();
@@ -908,6 +1336,18 @@ mod tests {
         assert!(cut);
         assert_eq!(c, LineRange::new(1, 10).unwrap());
         assert!(!cap(r, 10).1);
+    }
+
+    #[test]
+    fn optional_fetch_context_cannot_hide_the_requested_continuation_start() {
+        let requested = LineRange::new(11, 100).unwrap();
+        let widened = widen_for_fetch(requested, 200, 100, 10);
+        assert_eq!(widened, requested);
+        assert_eq!(cap(widened, 10).0, LineRange::new(11, 20).unwrap());
+        let short = LineRange::new(15, 16).unwrap();
+        let widened = widen_for_fetch(short, 200, 100, 10);
+        assert!(widened.start() <= short.start() && short.end() <= widened.end());
+        assert!(widened.line_count() <= 10);
     }
 
     #[test]

@@ -325,7 +325,10 @@ pub(crate) fn expand(
                     why.push(Reason::TestReferences { subject });
                 }
 
-                if let Some(position) = results.iter().position(|r| r.location.overlaps(location)) {
+                if let Some(position) = results
+                    .iter()
+                    .position(|r| r.location.same_file(location) && r.location.overlaps(location))
+                {
                     if position != current.seed
                         && annotated.insert((position, current.seed))
                         && let Some(result) = results.get_mut(position)
@@ -336,7 +339,9 @@ pub(crate) fn expand(
                     continue;
                 }
                 if !visited.insert(location.clone())
-                    || items.iter().any(|i| i.location.overlaps(location))
+                    || items
+                        .iter()
+                        .any(|i| i.location.same_file(location) && i.location.overlaps(location))
                 {
                     stats.duplicates += 1;
                     continue;

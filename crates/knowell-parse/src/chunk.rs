@@ -142,6 +142,16 @@ pub struct Chunk {
     pub text: String,
 }
 
+impl Chunk {
+    /// Whether the embedding chunk text equals the contiguous UTF-8 bytes at
+    /// its source range in `text`. Supply the redacted source used to parse it.
+    /// Returns false for invalid byte boundaries, elided headers and joined
+    /// source regions; embedding input must not be presented as raw source.
+    pub fn is_exact_source(&self, text: &str) -> bool {
+        text.get(self.byte_range.clone()) == Some(self.text.as_str())
+    }
+}
+
 /// Normalised options.
 #[derive(Clone, Copy)]
 struct Sizes {
@@ -973,6 +983,32 @@ fn merge_partial_lines(lines: Vec<VLine>) -> Vec<VLine> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exact_source_rejects_embedding_elisions_and_invalid_utf8_ranges() {
+        let text = "fn café() {}\n";
+        let mut chunk = Chunk {
+            ordinal: 0,
+            kind: ChunkKind::Function,
+            range: LineRange::new(1, 1).unwrap(),
+            byte_range: 0..text.len(),
+            symbol_path: Some("café".into()),
+            symbol: None,
+            parent: None,
+            text: text.into(),
+        };
+        assert!(chunk.is_exact_source(text));
+        chunk.text = "fn café() { … }\n".into();
+        assert!(!chunk.is_exact_source(text));
+        chunk.text = text.into();
+        // The offset falls inside é's UTF-8 encoding; hostile metadata stays safe.
+        chunk.byte_range = 7..text.len();
+        assert!(!chunk.is_exact_source(text));
+        chunk.byte_range = 0..text.len() + 1;
+        assert!(!chunk.is_exact_source(text));
+        chunk.byte_range = text.len()..0;
+        assert!(!chunk.is_exact_source(text));
+    }
 
     fn vline(text: &str, start: usize) -> VLine {
         VLine {

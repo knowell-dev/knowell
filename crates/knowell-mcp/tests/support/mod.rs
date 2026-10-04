@@ -7,16 +7,27 @@ pub(crate) mod schema;
 
 use std::sync::Arc;
 
-use knowell_mcp::{FixtureTools, KnowellServer};
+use knowell_mcp::{FixtureTools, KnowellServer, OutputMode};
 use rmcp::model::{CallToolRequestParams, CallToolResult, Tool};
 use rmcp::service::RunningService;
 use rmcp::{RoleClient, ServiceExt};
 use serde_json::Value;
 
-/// A client connected to a fresh server task that serves `tools`.
+/// Full-mode client for the typed contract compatibility suite.
 pub(crate) async fn connect(tools: Arc<FixtureTools>) -> RunningService<RoleClient, ()> {
+    connect_server(KnowellServer::new(tools).with_output_mode(OutputMode::Full)).await
+}
+
+/// A client connected to a server with an explicit presentation mode.
+pub(crate) async fn connect_with_mode(
+    tools: Arc<FixtureTools>,
+    mode: OutputMode,
+) -> RunningService<RoleClient, ()> {
+    connect_server(KnowellServer::new(tools).with_output_mode(mode)).await
+}
+
+async fn connect_server(server: KnowellServer<FixtureTools>) -> RunningService<RoleClient, ()> {
     let (server_io, client_io) = tokio::io::duplex(1 << 20);
-    let server = KnowellServer::new(tools);
     tokio::spawn(async move {
         if let Ok(running) = server.serve(server_io).await {
             let _ = running.waiting().await;
