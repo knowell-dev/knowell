@@ -1,6 +1,7 @@
 """Synthetic release target, strict compatibility and malformed manifest tests."""
 
 import json
+import re
 import shutil
 import tempfile
 import unittest
@@ -107,6 +108,31 @@ class UpdateAssets(unittest.TestCase):
         (self.migrations / "0003_gap.sql").write_text("-- synthetic fixture\n")
         with self.assertRaises(ua.UpdateAssetError):
             ua.compatibility(self.compatibility, self.migrations)
+
+    def test_repository_schema_contract_matches_runtime_and_latest_migration(self):
+        repository = Path(__file__).resolve().parents[1]
+        store = repository / "crates" / "knowell-store"
+        runtime = (store / "src" / "migrations.rs").read_text(encoding="utf-8")
+        versions = re.findall(
+            r"^pub const LATEST_SCHEMA_VERSION:\s*i64\s*=\s*([0-9]+);$",
+            runtime,
+            re.MULTILINE,
+        )
+        self.assertEqual(len(versions), 1, "runtime must declare one latest schema identity")
+        runtime_schema = int(versions[0])
+        migrations = store / "migrations"
+        reviewed = ua.compatibility(repository / "dist" / "update-compatibility.json", migrations)
+        latest_migration = max(int(path.name.split("_", 1)[0]) for path in migrations.glob("*.sql"))
+        self.assertEqual(runtime_schema, latest_migration,
+                         "runtime schema identity must track the complete migration sequence")
+        # Runtime admission requires the exact current schema, so wider release
+        # ranges would promise compatibility that the engine does not implement.
+        self.assertEqual(reviewed["schema"], {
+            "read_min": runtime_schema,
+            "read_max": runtime_schema,
+            "write_min": runtime_schema,
+            "write_max": runtime_schema,
+        })
 
     def test_engine_handshake_must_agree_before_artifact_publication(self):
         target = ua.TARGETS[0]
