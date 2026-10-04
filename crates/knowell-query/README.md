@@ -28,18 +28,19 @@ adapted to at integration time. It depends only on `knowell-core`, `serde`,
                         │ 2 overlay shadows base-view paths                       │
                         │ 3 candidate quota per source × project                  │
                         │ 4 weighted RRF  Σ w_source / (k + rank)                 │
-                        │ 5 merge overlapping duplicates (same content hash)      │
-                        │ 6 result quota per project (work-conserving), limit     │
+                        │ 5 merge overlaps within the same pinned file occurrence │
+                        │ 6 keep fused shortlist for optional reranking          │
                         └───────────────────────────┬─────────────────────────────┘
                                                     ▼
                         7 [Reranker] short list only, off by default
-                        8 GraphExpander: depth · edge kinds · fanout · node budget
-                        9 explain: why[], score breakdown, coverage gaps,
+                        8 result quota per project (work-conserving), limit
+                        9 GraphExpander: depth · edge kinds · fanout · node budget
+                       10 explain: why[], score breakdown, coverage gaps,
                           empty-result reasons
                                                     ▼
                                              SearchResponse ──pack()──▶ ContextPack
                                                                  skeletons first, bodies by rank,
-                                                                 no repeated text, citations,
+                                                                 same-file overlap, citations,
                                                                  omitted[], uncertainties[]
 ```
 
@@ -82,12 +83,21 @@ runtime).
 | view is the pinned base or overlay view, generation equals the pinned one | `view_mismatch` |
 | project filter | `project_filter` |
 | language filter (unknown language is dropped when a filter is set) | `language_filter` |
-| path filter: matches an include (if any) and no exclude | `path_filter` |
+| path filter: starts with a literal prefix (if any), matches an include (if any), and no exclude | `path_filter` |
 | base-view path changed in the user's overlay (candidate present in overlay, or listed in `OverlayPin::shadowed_paths`) | `shadowed` |
 
 Path globs: `*` and `?` within a segment, `**` for any number of segments,
 `dir/` for everything below `dir`, and a pattern without `/` matches the file
 name at any depth. Matching is linear-time (no backtracking blow-up).
+
+`PathFilter.prefixes` is separate from globs: any literal, source-root-relative
+prefix must match by exact, case-sensitive UTF-8 bytes. `*`, `?`, `%` and `_`
+have no special meaning. Prefixes and glob constraints are combined with AND.
+`README` matches root `README.md`, not `docs/README.md`; `src/lib` also matches
+`src/library.rs`, while `src/lib/` requests a directory boundary. The query
+crate does not trim or normalize prefixes; input adapters do that before
+constructing the scope. Missing/empty prefix lists preserve older serialized
+scopes and are omitted when serializing an unrestricted prefix list.
 
 `search` rejects a scope whose workspace differs from its manifest, an overlay
 that reuses its base view id, and a plan made for a different domain than the
@@ -193,12 +203,15 @@ evaluation set, not tuned values:
 
 - **Order**: fused score ↓, number of contributing sources ↓, best single rank
   ↑, `Location` ↑.
-- **Duplicates**: hits with the same `Location` are grouped; then a hit whose
-  content hash equals a better-ranked result's and whose line range overlaps it
-  is merged into that result (each source keeps its best rank, so agreement is
-  rewarded without double counting). Merged locations are listed in
-  `also_at` — including identical content in other paths or projects. A
-  file-level hit (no range) only merges with other file-level hits.
+- **Duplicates**: hits with the same `Location` are grouped; overlapping ranges
+  merge only within the same project, path, view, generation and content hash.
+  Each source keeps its best rank, and merged ranges remain in `also_at`.
+  Identical bytes at another path, project or pin remain separate results,
+  graph seeds and packing citations: their callers, imports and configuration
+  can differ. Sharing an immutable body payload is a separate storage concern.
+  A file-level hit (no range) only merges with another file-level hit of that
+  same pinned occurrence. Candidate, result, expansion and token budgets still
+  bound how many occurrences are considered and shown.
 - **Overlay**: a candidate from the user's worktree layer replaces base-view
   candidates for the same path; paths the overlay declares changed or deleted
   drop base-view evidence even without an overlay candidate.
@@ -238,7 +251,10 @@ returns `Neighbor { node, edge, evidence, resolution }`.
 ## Rerank
 
 `Reranker::rerank(plan, items) -> Vec<f64>` reorders only the top `top_n`
-(stable for ties). **Off by default.** Enabled without a reranker →
+(stable for ties) of the fused candidate shortlist, **before** the final
+project quota and visible result limit. A candidate outside `result_limit`
+can therefore be promoted. Final ranks, quota deferrals and truncation counts
+describe the returned order. **Off by default.** Enabled without a reranker →
 `rerank: reranker not configured`; wrong score count / non-finite score /
 error → fused order kept and reported.
 
@@ -252,7 +268,9 @@ error → fused order kept and reported.
 - `searched`: views (project, view, generation, commit, layer), sources
   consulted and answered.
 - `coverage_gaps`: `no_reference_resolution {project, language}` whenever the
-  intent is impact or expansion follows call edges.
+  intent is impact or nonempty expansion is requested over call edges. An
+  expansion disabled by zero seeds/budget, or with no results, does not add
+  unrelated relation warnings; impact questions still report missing analysis.
 - `empty.reasons` (several can hold): `empty_query`, `unknown_project`,
   `project_not_indexed`, `no_projects_in_scope`, `sources_unavailable`,
   `no_reference_resolution_for_language` (impact queries),
@@ -273,7 +291,8 @@ error → fused order kept and reported.
    body contains, which is then not repeated and listed in `covers`).
 3. Items that do not fit are skipped and listed in `omitted`
    (`over_budget {needed_tokens, remaining_tokens}`); smaller later items may
-   still fit. A body partially overlapping another packed body is
+   still fit. A body partially overlapping another packed body in the same
+   pinned file occurrence is
    `duplicate_of`; a snippet from another file version is `stale_content`;
    `no_snippet`, `snippet_failed` likewise.
 4. Each item's cost includes its citation label
@@ -283,6 +302,147 @@ error → fused order kept and reported.
    exhausted, more results than the limit, empty-result explanation.
 
 Packed text is untrusted repository data; the MCP layer labels it as such.
+Equal body text at distinct occurrences keeps separate citations and token
+costs; it cannot cover or suppress another binding's evidence.
+
+### Body-centered source selection
+
+`TaskPackOptions::default()` selects `source`. The low-level `pack` and
+`pack_with` APIs and explicitly requested research comparators keep their
+original behavior. Source selection fetches each admitted **body** exactly
+once; it does not spend the budget on skeletons before attempting bodies.
+The same alternating result/graph shortlist cap applies (32 by default,
+valid 1–64).
+
+`task_source_locations(&response, candidate_limit)` returns that exact
+deterministic shortlist before hydration, with no source reads. Adapters can
+load only the bodies the selector will inspect rather than every expanded
+neighbor. Invalid counts are rejected by the same validation as task packing;
+admission does not imply that a body is available or sufficient.
+
+The selector uses the actual body: query terms (including approved glossary
+expansions), camel-case identifier pieces and stable fingerprints sampled
+across the complete text. Line fingerprints retain operators, literals and
+token order that a word bag would discard. At most 128 fingerprints are held
+per representation; they express lexical similarity, not semantic equivalence.
+Identical bodies at another path/project/pin are never merged or certified as
+covered. Exact matches for terms explicitly extracted from the query retain
+their own selection value even when their body text repeats.
+
+Each positive marginal move is scored per square root of emitted token cost.
+For direct hits, `relevance = 1 / sqrt(rank)`; graph context retains the
+existing depth-discounted relevance. The gain is:
+
+```text
+0.6 * relevance * (1 + matched_query_fraction) * (1 - max_body_similarity)
++ 0.9 * newly_matched_query_fraction
++ 0.25 * relevance                       (first emitted resolved link to a shown seed)
++ 0.25 + 0.25 * relevance                (first emission of an explicit exact match)
+- 0.2 * sqrt(emitted_tokens / token_budget)
+```
+
+These coefficients are uncalibrated, deterministic heuristics, **not measured
+agent improvements**. Additional content stops when no affordable positive
+move remains or the work bound is reached; filling the budget is not a goal.
+`evaluation_budget` bounds cheap marginal assessments (256 by default,
+valid 1–4096). Unlike the research comparators, this policy does not build and
+copy entire trial packs for every move. Each item's cost charges its actual
+body plus citation using the caller's tokenizer. The transport layer must
+also budget its wrapper and diagnostics; this crate cannot know that wire
+format. The default tokenizer is an estimate, not the agent model's tokenizer.
+
+Source overlap is removed only within the same exact file occurrence. When
+the source's text has the stated number of lines, partially overlapping hits
+retain their uncovered intervals and real bytes. No fictitious contiguous
+span or ellipsis joins separated regions. If a whole body exceeds the remaining
+budget, the policy can select a contiguous query-centered excerpt with up to
+eight lines of surrounding source on either side. It favors query terms not
+already shown, shrinks only at line boundaries, and can select multiple
+separated excerpts. If one matching line is unaffordable, other matching
+anchors are tried. A long individual line is omitted rather than cut inside
+a UTF-8 character or assigned an inaccurate line range. A source with an
+inconsistent line count is rejected with a source failure; a logical final
+blank line without its last terminator is accepted without manufacturing bytes.
+
+Actual excerpt ranges and full-body over-budget omissions remain visible.
+Unavailable, stale and failed bodies retain distinct omission reasons.
+Requested role evidence still requires its full source ranges and evidenced
+path bodies; a term hit or excerpt does not certify a function, a whole path,
+or that the task has been answered. Completely emitted interval unions do not
+receive false over-budget omissions, though role certification remains
+conservative when no single citation contains its complete required range.
+Representation and candidate-role matches also preserve commit identity.
+The caller supplies an already redacted,
+authorized, pinned and byte-bounded snippet source. This policy cannot recover
+candidates excluded upstream, discover arbitrary dependencies, or guarantee
+natural-language evidence completeness.
+
+### Experimental task evidence selection
+
+`pack_task_with(&response, budget_tokens, &snippets, &tokenizer, &TaskPackOptions)`
+returns `Result<TaskContextPack, QueryError>`. `pack_task` supplies the default
+approximate tokenizer. The named comparators are opt-in; `pack`, `pack_with`
+and `TaskSelectionStrategy::Rank` retain the existing packing behavior.
+
+The comparators share the same snippet, hash, overlap and token-budget checks:
+
+| Strategy | Heuristic objective / candidate moves |
+|---|---|
+| `rank` | Existing skeleton-first, body-by-rank pack exactly |
+| `mmr` | Greedy emitted rank relevance minus metadata-token redundancy |
+| `role_coverage` | Greedy emitted rank relevance plus requested evidence roles |
+| `bounded_bundles` | Role coverage and redundancy, also trying linked seed/support pairs |
+
+Experimental relevance is `1 / sqrt(rank)` for direct candidates and
+`0.4 / (sqrt(seed_rank) * depth)` for graph context. Skeletons receive 0.15
+of their body's relevance. Each distinct requested role with emitted body
+evidence adds 1.5. The redundancy penalty is 0.7 times candidate relevance
+times maximum Jaccard similarity to earlier emitted candidates, using at most
+256 path/symbol/lexical-match tokens per candidate. These fixed coefficients
+are **uncalibrated research settings**, not measured improvements. The MMR
+comparator uses metadata tokens, not semantic embedding similarity.
+
+Named comparators use a 32-candidate experimental shortlist by default
+(valid 1–64), and 256 trial packs (valid 1–4096). Results and graph expansions
+alternate when admitting the shortlist. A call caches each exact
+location/symbol/representation request, so repeated trials do not refetch the
+same source. The trial bound limits set evaluations, not wall-clock time or
+snippet bytes. The selector only sees this response's candidate pool and
+cannot recover hits already cut by search. Rank ignores the experimental
+work caps after validating options.
+
+`desired_roles` are soft preferences. A named, located symbol body in an
+allowlisted code language may support `implementation`; document headings,
+schema keys and unknown languages do not. The query model currently lacks
+symbol-kind metadata, so this role means retrieved code, not proof that it
+implements the requested behavior. An exact contract match may support `contract`. Graph
+paths can support `caller`, `callee`, `test`, `contract`, `doc` and
+`surroundings`, only when the seed and every path node have
+emitted bodies and no edge is heuristic, model-suggested, ambiguous or
+unresolved. Call/test steps additionally require semantic or runtime provenance
+and located symbol endpoints. Syntactic, contract-derived or file-level steps
+in these lanes are structural `surroundings`, not evidence that a call occurs
+or a test exercises the subject. Adapters must preserve actual relation
+semantics: resolving an import/reference does not turn it into a call.
+Evidence type remains in the source reasons. `entry` and `config`
+are accepted preferences but remain missing until authoritative role
+metadata is available; file names do not establish those roles.
+
+`TaskSelectionReport` carries considered/selected counts, shortlist omissions,
+trial count and exhaustion, requested covered/missing roles, and source
+citations for each covered role. `unselected` lists admitted locations absent
+from the final representation. `candidate_issues` records observed stale,
+failed, missing or individually over-budget trial snippets separately from
+the final pack's omissions. All original search uncertainties survive,
+including weak paths that selection did not emit. A covered role describes
+the **kind of evidence shown**, not task sufficiency, path completeness,
+exhaustive program understanding, or absence of alternative implementations.
+
+Synthetic tests isolate a case where a lower-ranked implementation/test pair
+beats individually attractive alternatives within the same token budget.
+They establish the comparator's mechanics only. Real agent benefit, ranking
+quality, multilingual behavior, latency and large-repository scaling require
+separate held-out evaluation.
 
 ## Knobs (`SearchConfig`, all `serde(default)`)
 

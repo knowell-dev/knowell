@@ -14,6 +14,7 @@ publish.workspace = true
 
 [dependencies]
 knowell-core.workspace = true
+knowell-parse.workspace = true
 pgvector.workspace = true
 secrecy.workspace = true
 serde.workspace = true

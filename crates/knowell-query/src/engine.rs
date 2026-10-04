@@ -46,8 +46,8 @@ pub struct SearchResult {
     pub score: ScoreBreakdown,
     /// Why it is in the answer.
     pub why: Vec<Reason>,
-    /// Identical, overlapping evidence merged into this result (same content
-    /// at other lines, paths or projects).
+    /// Overlapping evidence merged within this same pinned file occurrence.
+    /// Other paths, projects and pins remain separate results.
     pub also_at: Vec<Location>,
 }
 
@@ -199,6 +199,7 @@ fn finish(
             }
         }
     }
+    results = fusion::finalize_results(results, &config.fusion, &mut stats);
 
     let edges = config.expansion.edges.for_intent(plan.intent);
     let mut expanded = Vec::new();
@@ -227,7 +228,7 @@ fn finish(
         consulted: fused.consulted,
         answered: fused.answered,
     };
-    let followed: &[EdgeKind] = if config.expansion.enabled { edges } else { &[] };
+    let followed: &[EdgeKind] = if expansion_wanted { edges } else { &[] };
     let coverage_gaps = coverage_gaps(plan.intent, followed, scope);
     let empty = results
         .is_empty()
@@ -282,12 +283,57 @@ fn searched_views(scope: &QueryScope) -> Vec<SearchedView> {
 }
 
 /// Reference resolution matters when the question is about relations
-/// (impact) or when expansion follows call edges.
+/// (impact) or when expansion follows call or test edges. Empty relation
+/// lists do not establish that no caller, callee or exercising test exists.
 fn needs_references(intent: Intent, edges: &[EdgeKind]) -> bool {
     intent == Intent::Impact
         || edges
             .iter()
-            .any(|e| matches!(e, EdgeKind::Caller | EdgeKind::Callee))
+            .any(|e| matches!(e, EdgeKind::Caller | EdgeKind::Callee | EdgeKind::Test))
+}
+
+fn has_callable_symbols(language: &Language) -> bool {
+    // A project's document and configuration languages do not establish a
+    // missing call graph. Keep the warning for known executable languages,
+    // including component languages with embedded code and public aliases.
+    matches!(
+        language.as_str(),
+        "rust"
+            | "typescript"
+            | "tsx"
+            | "javascript"
+            | "jsx"
+            | "python"
+            | "go"
+            | "java"
+            | "kotlin"
+            | "csharp"
+            | "c#"
+            | "dart"
+            | "swift"
+            | "php"
+            | "ruby"
+            | "c"
+            | "cpp"
+            | "c++"
+            | "scala"
+            | "bash"
+            | "lua"
+            | "perl"
+            | "r"
+            | "elixir"
+            | "erlang"
+            | "haskell"
+            | "ocaml"
+            | "clojure"
+            | "zig"
+            | "objc"
+            | "powershell"
+            | "batch"
+            | "groovy"
+            | "vue"
+            | "svelte"
+    )
 }
 
 fn coverage_gaps(intent: Intent, edges: &[EdgeKind], scope: &QueryScope) -> Vec<CoverageGap> {
@@ -301,7 +347,10 @@ fn coverage_gaps(intent: Intent, edges: &[EdgeKind], scope: &QueryScope) -> Vec<
                 .languages
                 .as_ref()
                 .is_none_or(|wanted| wanted.contains(language));
-            if selected && !pin.coverage.reference_resolution.contains(language) {
+            if selected
+                && has_callable_symbols(language)
+                && !pin.coverage.reference_resolution.contains(language)
+            {
                 gaps.push(CoverageGap::NoReferenceResolution {
                     project: project.clone(),
                     language: language.clone(),

@@ -117,10 +117,18 @@ impl ViewManifest {
     }
 }
 
-/// Include / exclude path patterns. A path is in scope when it matches at
-/// least one include pattern (or there are none) and no exclude pattern.
+/// Literal prefixes and include / exclude patterns, combined with AND.
+/// A path must start with at least one prefix (or there are none), match
+/// at least one include pattern (or there are none), and no exclude pattern.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PathFilter {
+    /// Literal source-root-relative path prefixes, matched by exact,
+    /// case-sensitive UTF-8 byte prefix. Empty means no prefix restriction.
+    /// No trimming, separator normalization or glob interpretation occurs here;
+    /// adapters normalize input before constructing the filter. A trailing `/`
+    /// requests a directory boundary; `src/lib` also matches `src/library.rs`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prefixes: Vec<String>,
     /// Patterns a path must match (any of); empty means every path.
     #[serde(default)]
     pub include: Vec<PathGlob>,
@@ -132,13 +140,18 @@ pub struct PathFilter {
 impl PathFilter {
     /// Whether `path` passes the filter.
     pub fn admits(&self, path: &RepoPath) -> bool {
+        let prefixed = self.prefixes.is_empty()
+            || self
+                .prefixes
+                .iter()
+                .any(|prefix| path.as_str().starts_with(prefix));
         let included = self.include.is_empty() || self.include.iter().any(|g| g.matches(path));
-        included && !self.exclude.iter().any(|g| g.matches(path))
+        prefixed && included && !self.exclude.iter().any(|g| g.matches(path))
     }
 
     /// Whether the filter restricts anything.
     pub fn is_unrestricted(&self) -> bool {
-        self.include.is_empty() && self.exclude.is_empty()
+        self.prefixes.is_empty() && self.include.is_empty() && self.exclude.is_empty()
     }
 }
 
@@ -154,7 +167,7 @@ pub struct QueryScope {
     /// known language is dropped when this is set.
     #[serde(default)]
     pub languages: Option<BTreeSet<Language>>,
-    /// Path patterns.
+    /// Literal path prefixes and include/exclude patterns.
     #[serde(default)]
     pub paths: PathFilter,
     /// Business domain; selects domain-specific glossary entries and is passed

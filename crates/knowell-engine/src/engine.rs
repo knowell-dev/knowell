@@ -25,6 +25,7 @@ use crate::error::EngineError;
 use crate::graph::GraphCache;
 use crate::memory::Directory;
 use crate::memory::{MemoryRepo, StoreMemory};
+use crate::parse_product::ParseProductCache;
 use crate::scope::ContextStore;
 use crate::settings::EngineSettings;
 use crate::snapshot::{SnapshotCache, TextCache};
@@ -102,6 +103,7 @@ pub(crate) struct Inner {
     pub(crate) snapshots: SnapshotCache,
     pub(crate) graphs: GraphCache,
     pub(crate) texts: TextCache,
+    pub(crate) parse_products: Option<Arc<ParseProductCache>>,
     pub(crate) usage: UsageRecorder,
     pub(crate) overlay_generation: AtomicU64,
     /// Store profile → engine provider name, for every profile a
@@ -198,8 +200,9 @@ impl EngineBuilder {
     ///
     /// # Errors
     /// Store and index errors; [`EngineError::Config`] for an unusable
-    /// glossary.
+    /// glossary or an out-of-range lexical span experiment.
     pub async fn build(self) -> Result<Engine, EngineError> {
+        self.settings.validate()?;
         let glossary = Glossary::new(self.settings.glossary.clone())
             .map_err(|e| EngineError::Config(format!("glossary: {e}")))?;
         let organization_name = self.indexer_config.organization.clone();
@@ -252,6 +255,10 @@ impl EngineBuilder {
             snapshots: SnapshotCache::new(settings.snapshot_cache),
             graphs: GraphCache::default(),
             texts: TextCache::new(settings.text_cache_bytes),
+            parse_products: settings
+                .parse_product_cache
+                .clone()
+                .map(|config| Arc::new(ParseProductCache::new(config, organization))),
             usage: UsageRecorder::default(),
             overlay_generation: AtomicU64::new(0),
             profile_providers: RwLock::new(BTreeMap::new()),
@@ -517,5 +524,39 @@ impl Engine {
                 knowell_embed::Embedder::profile(e.as_ref()).provider_kind
                     == knowell_embed::ProviderKind::Gemini
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn builder_rejects_invalid_lexical_spans_before_store_or_indexer_work() {
+        for lexical_spans_per_file in [0, 4, u8::MAX] {
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .acquire_timeout(Duration::from_millis(10))
+                .connect_lazy(
+                    "postgresql://KNOWELL_CANARY_USER:KNOWELL_CANARY_PASSWORD@127.0.0.1:1/KNOWELL_CANARY_DATABASE",
+                )
+                .unwrap();
+            let temp = tempfile::tempdir().unwrap();
+            let data = temp.path().join("data");
+            let result = Engine::builder(
+                Store::from_pool(pool),
+                IndexerConfig::new(data.clone(), Name::new("synthetic").unwrap()),
+            )
+            .settings(EngineSettings {
+                lexical_spans_per_file,
+                ..EngineSettings::default()
+            })
+            .build()
+            .await;
+            assert!(matches!(result, Err(EngineError::Config(_))));
+            assert!(!data.exists());
+        }
     }
 }

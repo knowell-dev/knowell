@@ -134,6 +134,10 @@ pub struct StagePayload {
     /// active generation); `None` builds every profile the view needs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<ProfileId>,
+    /// Explicit, tenant-scoped precise artifact for this build only. Ordinary
+    /// refreshes never inherit a compiler artifact from a previous generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scip_import: Option<uuid::Uuid>,
 }
 
 pub(crate) fn decode<T: for<'de> Deserialize<'de>>(
@@ -172,8 +176,11 @@ pub(crate) fn text_job(
     job.priority = payload.priority.value();
     job.max_attempts = settings.max_attempts;
     let force = if payload.force { ":force" } else { "" };
+    let precise = payload
+        .scip_import
+        .map_or_else(String::new, |id| format!(":scip:{id}"));
     job.idempotency_key = Some(format!(
-        "{JOB_TEXT}:{}:{}:n{last_generation}{force}",
+        "{JOB_TEXT}:{}:{}:n{last_generation}{force}{precise}",
         payload.view,
         payload.target.key()
     ));
@@ -238,6 +245,7 @@ mod tests {
             priority: Priority::Active,
             force: false,
             profile: None,
+            scip_import: None,
         }
     }
 

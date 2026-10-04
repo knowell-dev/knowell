@@ -275,6 +275,7 @@ impl<E: Embedder + 'static> Inner<E> {
                 priority: Priority::Background,
                 force: false,
                 profile: Some(switch.to),
+                scip_import: None,
             };
             let mut job = stage_job(Tier::T2, &payload, generation, &self.config.jobs)?;
             if retry {

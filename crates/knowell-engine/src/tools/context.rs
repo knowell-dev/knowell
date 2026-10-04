@@ -1,15 +1,18 @@
 //! `build_context` and `history`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
-use knowell_core::RepoPath;
-use knowell_knowledge::RecordState;
+use knowell_core::{Name, RepoPath};
+use knowell_knowledge::{RecordState, Scope};
 use knowell_mcp::tools::{
-    BuildContextInput, BuildContextOutput, CoChange, ContextEntry, ContextSection, EntryKind,
-    HistoryFacet, HistoryInput, HistoryOutput, ScopeLevel, TokenBudget,
+    BuildContextInput, BuildContextOutput, CoChange, ContextEntry, ContextRoadmapStep, ContextRole,
+    ContextSection, ContextSelectionReport, ContextSelectionStrategy, EntryKind, HistoryFacet,
+    HistoryInput, HistoryOutput, ScopeLevel, TokenBudget, Validate,
 };
-use knowell_mcp::{FreshnessTier, Gap, GapReason, ResultId, ToolError, UntrustedText};
-use knowell_query::{OmitReason, Origin, PackItem, Reason, SnippetKind, Uncertainty};
+use knowell_mcp::{FileLocator, FreshnessTier, Gap, GapReason, ResultId, ToolError, UntrustedText};
+use knowell_query::{Language, OmitReason, Origin, PackItem, Reason, SnippetKind, Uncertainty};
+use knowell_secrets::ExclusionPolicy;
 use knowell_store::content;
 use knowell_store::views::{self, GenerationPin};
 
@@ -18,10 +21,118 @@ use super::memory::{conflict_map, memory_error};
 use crate::access::Access;
 use crate::engine::Engine;
 use crate::error::store_tool;
-use crate::evidence::{degradation_gaps, empty_gaps, place, reasons};
+use crate::evidence::{
+    degradation_gaps, empty_gaps, hit_kind, place, reasons, source_omission_gaps,
+};
 use crate::memory::RecordQuery;
-use crate::search::{Filters, is_test_path, snippets};
-use crate::snapshot::slice_lines;
+use crate::scope::Pinned;
+use crate::search::{Filters, SnippetAdapter, snippets, source_snippets, symbol_strength};
+use crate::snapshot::{SymbolEntry, symbol_entries};
+
+#[derive(Debug, Clone)]
+struct ContextFocus {
+    locator: FileLocator,
+    symbol: Option<String>,
+}
+
+fn context_filters(input: &BuildContextInput) -> Result<Filters, ToolError> {
+    let mut prefixes = BTreeSet::new();
+    for prefix in &input.path_prefixes {
+        if prefix.chars().any(char::is_control) {
+            return Err(ToolError::invalid_input(
+                "`path_prefixes` must not contain control characters",
+            ));
+        }
+        let prefix = prefix.trim();
+        if RepoPath::new(prefix.strip_suffix('/').unwrap_or(prefix)).is_err() {
+            return Err(ToolError::invalid_input(
+                "`path_prefixes` must be relative, '/'-separated literal prefixes without empty, '.' or '..' components",
+            ));
+        }
+        prefixes.insert(prefix.to_owned());
+    }
+    let languages = input
+        .languages
+        .iter()
+        .map(|language| {
+            Language::new(language)
+                .map_err(|_| ToolError::invalid_input("`languages` holds an invalid name"))
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    Ok(Filters {
+        projects: (!input.projects.is_empty()).then(|| input.projects.iter().cloned().collect()),
+        languages: (!languages.is_empty()).then_some(languages),
+        path_prefixes: prefixes.into_iter().collect(),
+        ..Filters::default()
+    })
+}
+
+fn context_source_allowed(
+    filters: &Filters,
+    project: &Name,
+    path: &RepoPath,
+    language: Option<&str>,
+) -> bool {
+    filters
+        .projects
+        .as_ref()
+        .is_none_or(|projects| projects.contains(project))
+        && (filters.path_prefixes.is_empty()
+            || filters
+                .path_prefixes
+                .iter()
+                .any(|prefix| path.as_str().starts_with(prefix)))
+        && filters.languages.as_ref().is_none_or(|languages| {
+            language
+                .and_then(|language| Language::new(language).ok())
+                .is_some_and(|language| languages.contains(&language))
+        })
+}
+
+fn focus_symbol_matches(symbol: &SymbolEntry, focus: &str) -> bool {
+    let focus = focus.trim();
+    let name = if let Some((path, name)) = focus.rsplit_once('#') {
+        if symbol.path.as_str() != path {
+            return false;
+        }
+        name
+    } else {
+        focus
+    };
+    symbol_strength(symbol, name).is_some_and(|strength| strength >= 3)
+}
+
+fn focus_section(path: &RepoPath, language: Option<&str>) -> ContextSection {
+    match hit_kind(path, language, &[]) {
+        knowell_mcp::tools::HitKind::Test => ContextSection::Tests,
+        knowell_mcp::tools::HitKind::Doc => ContextSection::Docs,
+        knowell_mcp::tools::HitKind::Contract => ContextSection::Contracts,
+        _ => ContextSection::Code,
+    }
+}
+
+fn focus_covered(
+    entries: &[ContextEntry],
+    location: &knowell_query::Location,
+    commit: Option<&knowell_query::CommitId>,
+    layer: knowell_query::Layer,
+) -> bool {
+    let Some(range) = location.range else {
+        return false;
+    };
+    entries.iter().any(|entry| {
+        entry.evidence.as_ref().is_some_and(|evidence| {
+            evidence.project == location.project
+                && evidence.path == location.path
+                && evidence.content_hash == location.content_hash
+                && commit.is_some_and(|commit| commit.as_str() == evidence.commit.as_str())
+                && (evidence.layer == knowell_mcp::ViewLayer::Personal)
+                    == (layer == knowell_query::Layer::Overlay)
+                && evidence.lines.start() <= range.start()
+                && range.end() <= evidence.lines.end()
+        })
+    })
+}
 
 /// Estimated tokens of `text` (four bytes per token, at least one).
 fn tokens(text: &str) -> u32 {
@@ -70,7 +181,7 @@ fn uncertainty_text(u: &Uncertainty) -> String {
             format!("missing part of the search: {degradation}")
         }
         Uncertainty::NoReferenceResolution { project, language } => format!(
-            "{project}: {language} references are not resolved; callers and tests come from file imports only"
+            "{project}: {language} references are not resolved; shown structural relations do not prove call or test coverage"
         ),
         Uncertainty::WeakGraphEvidence {
             location,
@@ -92,13 +203,542 @@ fn uncertainty_text(u: &Uncertainty) -> String {
     }
 }
 
+/// Generic language capability gaps do not qualify an unrelated source body.
+/// Concrete weak relations remain visible only when their source is emitted.
+fn source_uncertainties(uncertainties: &[Uncertainty], items: &[PackItem]) -> Vec<String> {
+    let same_source = |item: &PackItem, location: &knowell_query::Location| {
+        item.citation.project == location.project
+            && item.citation.view == location.view
+            && item.citation.generation == location.generation
+            && item.citation.path == location.path
+            && item.citation.content_hash == location.content_hash
+    };
+    let mut result = Vec::new();
+    let mut unresolved = false;
+    for uncertainty in uncertainties {
+        match uncertainty {
+            Uncertainty::NoReferenceResolution { project, .. } => {
+                unresolved |= items.iter().any(|item| item.citation.project == *project
+                    && item.why.iter().any(|reason| matches!(reason,
+                        Reason::GraphPath { steps, .. } if steps.iter().any(|step|
+                            matches!(step.edge, knowell_query::EdgeKind::Caller
+                                | knowell_query::EdgeKind::Callee | knowell_query::EdgeKind::Test)
+                                && step.evidence != knowell_query::EvidenceType::SemanticallyResolved
+                        ))));
+            }
+            Uncertainty::WeakGraphEvidence {
+                location,
+                edge,
+                evidence,
+                resolution,
+            } if !items.iter().any(|item| {
+                same_source(item, location)
+                    && item.why.iter().any(|reason| {
+                        matches!(reason,
+                        Reason::GraphPath { steps, .. } if steps.last()
+                            .is_some_and(|step| step.to == *location)
+                            && steps.iter().any(|step| step.edge == *edge
+                                && step.evidence == *evidence && step.resolution == *resolution))
+                    })
+            }) => {}
+            _ => {
+                let message = uncertainty_text(uncertainty);
+                if !result.contains(&message) {
+                    result.push(message);
+                }
+            }
+        }
+    }
+    if unresolved {
+        result.push("selected call/test links lack compiler reference resolution; the shown source does not prove complete call or test coverage".to_owned());
+    }
+    result
+}
+
+fn acquisition_extent(
+    run: &crate::search::SearchRun,
+    location: &knowell_query::Location,
+    symbol: Option<&str>,
+    source: Option<&SnippetAdapter<'_>>,
+) -> Option<knowell_core::LineRange> {
+    source
+        .and_then(|adapter| adapter.source_extent(location, symbol))
+        .or_else(|| {
+            let symbol = symbol?;
+            let (view, overlay) = run.prepared.view_of(&location.project, &location.view)?;
+            let entry = if overlay {
+                view.overlay
+                    .as_ref()?
+                    .symbols
+                    .iter()
+                    .find(|entry| entry.path == location.path && entry.local == symbol)
+            } else {
+                view.snapshot.symbol_by_local(&location.path, symbol)
+            }?;
+            location
+                .range
+                .is_none_or(|range| {
+                    entry.lines.start() <= range.start() && range.end() <= entry.lines.end()
+                })
+                .then_some(entry.lines)
+        })
+        .or(location.range)
+        .or_else(|| {
+            run.prepared
+                .view_of(&location.project, &location.view)
+                .and_then(|(view, overlay)| {
+                    if overlay {
+                        view.overlay
+                            .as_ref()?
+                            .overlay
+                            .file(&location.path)
+                            .and_then(|file| {
+                                crate::snapshot::whole_file(crate::snapshot::line_count(&file.text))
+                            })
+                    } else {
+                        view.snapshot
+                            .file(&location.path)
+                            .and_then(|file| crate::snapshot::whole_file(file.line_count))
+                    }
+                })
+        })
+}
+
+fn query_role(role: ContextRole) -> knowell_query::EvidenceRole {
+    use knowell_query::EvidenceRole as R;
+    match role {
+        ContextRole::Entry => R::Entry,
+        ContextRole::Implementation => R::Implementation,
+        ContextRole::Caller => R::Caller,
+        ContextRole::Callee => R::Callee,
+        ContextRole::Test => R::Test,
+        ContextRole::Config => R::Config,
+        ContextRole::Contract => R::Contract,
+        ContextRole::Doc => R::Doc,
+        ContextRole::Surroundings => R::Surroundings,
+    }
+}
+
+fn mcp_role(role: knowell_query::EvidenceRole) -> ContextRole {
+    use knowell_query::EvidenceRole as R;
+    match role {
+        R::Entry => ContextRole::Entry,
+        R::Implementation => ContextRole::Implementation,
+        R::Caller => ContextRole::Caller,
+        R::Callee => ContextRole::Callee,
+        R::Test => ContextRole::Test,
+        R::Config => ContextRole::Config,
+        R::Contract => ContextRole::Contract,
+        R::Doc => ContextRole::Doc,
+        R::Surroundings => ContextRole::Surroundings,
+    }
+}
+
+fn query_strategy(strategy: ContextSelectionStrategy) -> knowell_query::TaskSelectionStrategy {
+    use knowell_query::TaskSelectionStrategy as S;
+    match strategy {
+        ContextSelectionStrategy::Source => S::Source,
+        ContextSelectionStrategy::Rank => S::Rank,
+        ContextSelectionStrategy::Mmr => S::Mmr,
+        ContextSelectionStrategy::RoleCoverage => S::RoleCoverage,
+        ContextSelectionStrategy::BoundedBundles => S::BoundedBundles,
+    }
+}
+
+fn pack_source_matches(
+    item: &PackItem,
+    location: &knowell_query::Location,
+    commit: Option<&knowell_query::CommitId>,
+    symbol: Option<&str>,
+    why: &[Reason],
+    extent: Option<knowell_core::LineRange>,
+) -> bool {
+    let citation = &item.citation;
+    location.project == citation.project
+        && location.path == citation.path
+        && location.view == citation.view
+        && location.generation == citation.generation
+        && location.content_hash == citation.content_hash
+        && commit == citation.commit.as_ref()
+        && symbol == item.symbol.as_deref()
+        && why == item.why
+        && extent.or(location.range).is_some_and(|range| {
+            range.start() <= citation.range.start() && citation.range.end() <= range.end()
+        })
+    // Bodies may be shortened by the snippet limit. A symbol's skeleton
+    // can precede a retrieved body chunk, so its original reasons bind it.
+    // Source regions may include a surrounding guard outside the retrieved
+    // chunk. Identity, origin and reasons bind it to this exact occurrence;
+    // the emitted citation independently records its actual source range.
+}
+
+fn expanded_pack_source<'a>(
+    expanded: &'a [knowell_query::ExpandedItem],
+    item: &PackItem,
+    seed_rank: u32,
+    depth: u32,
+    extent: &dyn Fn(&knowell_query::Location, Option<&str>) -> Option<knowell_core::LineRange>,
+) -> Option<&'a knowell_query::ExpandedItem> {
+    expanded.iter().find(|source| {
+        source.seed_rank == seed_rank
+            && source.depth == depth
+            && pack_source_matches(
+                item,
+                &source.location,
+                source.commit.as_ref(),
+                source.symbol.as_deref(),
+                &source.why,
+                extent(&source.location, source.symbol.as_deref()),
+            )
+    })
+}
+
+fn source_section(
+    run: &crate::search::SearchRun,
+    location: &knowell_query::Location,
+    why: &[Reason],
+) -> ContextSection {
+    let language = run
+        .prepared
+        .view_of(&location.project, &location.view)
+        .and_then(|(view, overlay)| {
+            if overlay {
+                view.overlay
+                    .as_ref()
+                    .and_then(|o| o.overlay.file(&location.path))
+                    .map(|file| file.parsed.language.as_str())
+            } else {
+                view.snapshot
+                    .file(&location.path)
+                    .and_then(|file| file.language.as_deref())
+            }
+        });
+    let mapped = reasons(why, None, None, location);
+    match hit_kind(&location.path, language, &mapped) {
+        knowell_mcp::tools::HitKind::Test => ContextSection::Tests,
+        knowell_mcp::tools::HitKind::Doc => ContextSection::Docs,
+        knowell_mcp::tools::HitKind::Contract => ContextSection::Contracts,
+        _ => ContextSection::Code,
+    }
+}
+
 impl Engine {
+    /// Resolve preferred names without loading every source body or treating
+    /// a short-name collision as a selected definition.
+    async fn context_focuses(
+        &self,
+        pinned: &Pinned,
+        input: &BuildContextInput,
+        filters: &Filters,
+        uncertainties: &mut Vec<String>,
+    ) -> Result<Vec<ContextFocus>, ToolError> {
+        let mut focuses: Vec<_> = input
+            .focus_paths
+            .iter()
+            .cloned()
+            .map(|locator| ContextFocus {
+                locator,
+                symbol: None,
+            })
+            .collect();
+        for (position, focus) in input.focus_symbols.iter().enumerate() {
+            let short = focus
+                .rsplit_once('#')
+                .map_or(focus.as_str(), |(_, name)| name)
+                .replace("::", ".")
+                .rsplit('.')
+                .next()
+                .unwrap_or_default()
+                .to_lowercase();
+            let mut candidates = Vec::new();
+            let mut seen = BTreeSet::new();
+            'projects: for (name, project) in &pinned.projects {
+                let snapshot = self.metadata_snapshot_of(project).await?;
+                for index in snapshot.by_name.get(&short).into_iter().flatten() {
+                    let Some(symbol) = snapshot.symbols.get(*index) else {
+                        continue;
+                    };
+                    if project.overlay.as_ref().is_some_and(|overlay| {
+                        overlay.overlay.file(&symbol.path).is_some()
+                            || overlay.overlay.deleted().contains(&symbol.path)
+                    }) {
+                        continue;
+                    }
+                    let language = snapshot
+                        .file(&symbol.path)
+                        .and_then(|file| file.language.as_deref());
+                    if context_source_allowed(filters, name, &symbol.path, language)
+                        && filters
+                            .sections
+                            .contains(&focus_section(&symbol.path, language))
+                        && focus_symbol_matches(symbol, focus)
+                        && seen.insert((
+                            name.clone(),
+                            symbol.path.clone(),
+                            symbol.lines.start(),
+                            symbol.lines.end(),
+                            symbol.local.clone(),
+                        ))
+                    {
+                        candidates.push(ContextFocus {
+                            locator: FileLocator {
+                                project: name.clone(),
+                                path: symbol.path.clone(),
+                                lines: Some(symbol.lines),
+                            },
+                            symbol: Some(symbol.local.clone()),
+                        });
+                        if candidates.len() > 1 {
+                            break 'projects;
+                        }
+                    }
+                }
+                if let Some(overlay) = &project.overlay {
+                    for file in overlay.overlay.files() {
+                        if !context_source_allowed(
+                            filters,
+                            name,
+                            &file.path,
+                            Some(file.parsed.language.as_str()),
+                        ) || !filters.sections.contains(&focus_section(
+                            &file.path,
+                            Some(file.parsed.language.as_str()),
+                        )) {
+                            continue;
+                        }
+                        for symbol in symbol_entries(&file.path, &file.parsed, 0) {
+                            if focus_symbol_matches(&symbol, focus)
+                                && seen.insert((
+                                    name.clone(),
+                                    symbol.path.clone(),
+                                    symbol.lines.start(),
+                                    symbol.lines.end(),
+                                    symbol.local.clone(),
+                                ))
+                            {
+                                candidates.push(ContextFocus {
+                                    locator: FileLocator {
+                                        project: name.clone(),
+                                        path: symbol.path,
+                                        lines: Some(symbol.lines),
+                                    },
+                                    symbol: Some(symbol.local),
+                                });
+                                if candidates.len() > 1 {
+                                    break 'projects;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            match candidates.as_slice() {
+                [only] => {
+                    if !focuses.iter().any(|existing| {
+                        existing.locator == only.locator && existing.symbol == only.symbol
+                    }) {
+                        focuses.push(only.clone());
+                    }
+                }
+                [] => uncertainties.push(format!(
+                    "focus symbol {} has no verified definition within the selected source filters; no definition was selected as this focus",
+                    position.saturating_add(1)
+                )),
+                _ => uncertainties.push(format!(
+                    "focus symbol {} matches multiple definitions; qualify it with path#qualified.name or narrow the source filters",
+                    position.saturating_add(1)
+                )),
+            }
+        }
+        Ok(focuses)
+    }
+
+    async fn context_focus_entry(
+        &self,
+        pinned: &Pinned,
+        focus: &ContextFocus,
+        filters: &Filters,
+        wants: &(dyn Fn(ContextSection) -> bool + Sync),
+        remaining: u32,
+    ) -> Result<Result<ContextEntry, Gap>, ToolError> {
+        let locator = &focus.locator;
+        if ExclusionPolicy::builtin().check(&locator.path).is_some() {
+            return Ok(Err(Gap::for_project(
+                GapReason::ExcludedByPolicy,
+                locator.project.clone(),
+                "focus source is excluded by the sensitive-file policy; its body was not read",
+            )));
+        }
+        let Some(project) = pinned.projects.get(&locator.project) else {
+            return Ok(Err(Gap::for_project(
+                GapReason::NotFound,
+                locator.project.clone(),
+                "focus source is not available in this context",
+            )));
+        };
+        let overlay_file = project
+            .overlay
+            .as_ref()
+            .and_then(|overlay| overlay.overlay.file(&locator.path));
+        let snapshot = self.metadata_snapshot_of(project).await?;
+        let base_file = snapshot.file(&locator.path);
+        let language = overlay_file
+            .map(|file| file.parsed.language.as_str())
+            .or_else(|| base_file.and_then(|file| file.language.as_deref()));
+        let section = focus_section(&locator.path, language);
+        if !context_source_allowed(filters, &locator.project, &locator.path, language)
+            || !wants(section)
+        {
+            return Ok(Err(Gap::for_project(
+                GapReason::FiltersExcludedAll,
+                locator.project.clone(),
+                "focus source is outside the requested source filters or sections; its body was not read",
+            )));
+        }
+        if overlay_file.is_none()
+            && project
+                .overlay
+                .as_ref()
+                .is_some_and(|overlay| overlay.overlay.deleted().contains(&locator.path))
+        {
+            return Ok(Err(Gap::for_project(
+                GapReason::NotFound,
+                locator.project.clone(),
+                "focus source was deleted in the pinned personal layer",
+            )));
+        }
+        let (text, hash, personal) = if let Some(file) = overlay_file {
+            (Arc::clone(&file.text), file.content_hash, true)
+        } else if let Some(file) = base_file {
+            let Some(text) = self.text_of(&file.content_hash).await? else {
+                return Ok(Err(Gap::for_project(
+                    GapReason::NotFound,
+                    locator.project.clone(),
+                    "focus source acquisition omitted a body that is not stored",
+                )));
+            };
+            (text, file.content_hash, false)
+        } else {
+            return Ok(Err(Gap::for_project(
+                GapReason::NotFound,
+                locator.project.clone(),
+                "focus source is unavailable in the pinned view; its body was not read",
+            )));
+        };
+        let total = crate::snapshot::line_count(&text);
+        let Some(lines) = locator.lines.or_else(|| crate::snapshot::whole_file(total)) else {
+            return Ok(Err(Gap::for_project(
+                GapReason::NotFound,
+                locator.project.clone(),
+                "focus source contains no source lines",
+            )));
+        };
+        if lines.start() > total || lines.end() > total {
+            return Ok(Err(Gap::for_project(
+                GapReason::NotFound,
+                locator.project.clone(),
+                "focus source range is outside this pinned file version",
+            )));
+        }
+        let body = crate::source_region::slice_source_lines(&text, lines);
+        let cost = tokens(&body);
+        if cost > remaining {
+            return Ok(Err(Gap::for_project(
+                GapReason::BudgetExhausted,
+                locator.project.clone(),
+                format!(
+                    "focus source needs {cost} estimated tokens; the budget has {remaining} left; request a smaller range or use a targeted source read"
+                ),
+            )));
+        }
+        let commit = if personal {
+            project
+                .overlay
+                .as_ref()
+                .and_then(|overlay| overlay.overlay.head_commit())
+                .and_then(|commit| knowell_mcp::CommitId::new(commit).ok())
+                .or_else(|| project.commit_id())
+        } else {
+            project.commit_id()
+        };
+        let Some(commit) = commit else {
+            return Ok(Err(Gap::for_project(
+                GapReason::NotFound,
+                locator.project.clone(),
+                "focus source has no pinned commit identity",
+            )));
+        };
+        Ok(Ok(ContextEntry {
+            id: crate::ids::source_id(
+                &locator.project,
+                Some(commit.as_str()),
+                &hash,
+                &locator.path,
+                lines,
+            )?,
+            section,
+            kind: match section {
+                ContextSection::Tests => EntryKind::Test,
+                ContextSection::Docs => EntryKind::Doc,
+                ContextSection::Contracts => EntryKind::Contract,
+                _ => EntryKind::Code,
+            },
+            why_relevant: if focus.symbol.is_some() {
+                "verified definition of a named focus symbol".to_owned()
+            } else {
+                "you named this source range".to_owned()
+            },
+            evidence: Some(knowell_mcp::Evidence {
+                project: locator.project.clone(),
+                view: if personal {
+                    knowell_core::TrackTarget::WorktreeHead
+                } else {
+                    project.target.clone()
+                },
+                layer: if personal {
+                    knowell_mcp::ViewLayer::Personal
+                } else {
+                    knowell_mcp::ViewLayer::Shared
+                },
+                commit,
+                path: locator.path.clone(),
+                lines,
+                content_hash: hash,
+                symbol: focus.symbol.clone(),
+                why: focus
+                    .symbol
+                    .as_ref()
+                    .map(|symbol| knowell_mcp::MatchReason::ExactSymbol {
+                        symbol: symbol.clone(),
+                    })
+                    .into_iter()
+                    .collect(),
+                freshness: if focus.symbol.is_some() {
+                    FreshnessTier::T1Symbols
+                } else {
+                    FreshnessTier::T0Text
+                },
+                index_state: project.index_state(),
+            }),
+            memory_id: None,
+            content: UntrustedText::repository(body),
+            content_lines: Some(lines),
+            content_truncated: false,
+            continuation_ids: Vec::new(),
+            estimated_tokens: cost,
+        }))
+    }
+
     pub(crate) async fn tool_build_context(
         &self,
         access: Access,
         input: BuildContextInput,
     ) -> Result<BuildContextOutput, ToolError> {
-        let pinned = self.resolve_target(&access, &input.target).await?;
+        input.validate()?;
+        let mut filters = context_filters(&input)?;
+        let pinned = self
+            .resolve_target_for_projects(&access, &input.target, &input.projects)
+            .await?;
         if let Some(job) = &input.job_id {
             return Err(ToolError::not_found(format!(
                 "context job {job} does not exist; packs are built synchronously"
@@ -110,104 +750,58 @@ impl Engine {
         let requested = input.token_budget.unwrap_or(8000);
         let wants =
             |section: ContextSection| input.include.is_empty() || input.include.contains(&section);
+        filters.sections = [
+            ContextSection::Code,
+            ContextSection::Tests,
+            ContextSection::Contracts,
+            ContextSection::Docs,
+        ]
+        .into_iter()
+        .filter(|section| wants(*section))
+        .collect();
         let mut gaps = pinned.gaps.clone();
-        gaps.extend(pinned.not_indexed_gaps(&[]));
+        gaps.extend(pinned.not_indexed_gaps(&input.projects));
         let mut entries = Vec::new();
         let mut used: u32 = 0;
         let mut uncertainties = Vec::new();
-        // 1. Focus paths the caller named: they come first, as given.
-        for locator in &input.focus_paths {
-            let Some(project) = pinned.projects.get(&locator.project) else {
-                gaps.push(Gap::for_project(
-                    GapReason::NotFound,
-                    locator.project.clone(),
-                    format!("{} is not available in this context", locator.project),
-                ));
-                continue;
-            };
-            let snapshot = self.snapshot_of(project).await?;
-            let Some(file) = snapshot.file(&locator.path).cloned() else {
-                gaps.push(Gap::for_project(
-                    GapReason::NotFound,
-                    locator.project.clone(),
-                    format!("{} does not exist in the pinned view", locator.path),
-                ));
-                continue;
-            };
-            let Some(text) = self
-                .inner
-                .texts
-                .load(
-                    &self.inner.store,
-                    self.inner.organization,
-                    &file.content_hash,
-                )
-                .await
-                .map_err(ToolError::from)?
-            else {
-                continue;
-            };
-            let Some(lines) = locator
-                .lines
-                .or_else(|| crate::snapshot::whole_file(file.line_count))
-            else {
-                continue;
-            };
-            let body = slice_lines(&text, lines);
-            let cost = tokens(&body);
-            if used.saturating_add(cost) > requested {
-                gaps.push(Gap::for_project(
-                    GapReason::BudgetExhausted,
-                    locator.project.clone(),
-                    format!(
-                        "{}:{lines} needs {cost} tokens; the budget has {} left",
-                        locator.path,
-                        requested.saturating_sub(used)
-                    ),
-                ));
-                continue;
+        // 1. Preferred sources remain soft focus, but never bypass hard filters.
+        if !filters.sections.is_empty() {
+            let focuses = self
+                .context_focuses(&pinned, &input, &filters, &mut uncertainties)
+                .await?;
+            for focus in focuses {
+                match self
+                    .context_focus_entry(
+                        &pinned,
+                        &focus,
+                        &filters,
+                        &wants,
+                        requested.saturating_sub(used),
+                    )
+                    .await?
+                {
+                    Ok(entry) => {
+                        if !entries
+                            .iter()
+                            .any(|existing: &ContextEntry| existing.id == entry.id)
+                        {
+                            used = used.saturating_add(entry.estimated_tokens);
+                            entries.push(entry);
+                        }
+                    }
+                    Err(gap) => gaps.push(gap),
+                }
             }
-            let Some(commit) = project.commit_id() else {
-                continue;
-            };
-            let id = crate::ids::source_id(
-                &locator.project,
-                Some(commit.as_str()),
-                &file.content_hash,
-                &locator.path,
-                lines,
-            )?;
-            used = used.saturating_add(cost);
-            entries.push(ContextEntry {
-                id,
-                section: if is_test_path(&locator.path) {
-                    ContextSection::Tests
-                } else {
-                    ContextSection::Code
-                },
-                kind: EntryKind::Code,
-                why_relevant: "you named this file".to_owned(),
-                evidence: Some(knowell_mcp::Evidence {
-                    project: locator.project.clone(),
-                    view: project.target.clone(),
-                    layer: knowell_mcp::ViewLayer::Shared,
-                    commit,
-                    path: locator.path.clone(),
-                    lines,
-                    content_hash: file.content_hash,
-                    symbol: None,
-                    why: Vec::new(),
-                    freshness: FreshnessTier::T0Text,
-                    index_state: project.index_state(),
-                }),
-                memory_id: None,
-                content: UntrustedText::repository(body),
-                estimated_tokens: cost,
-            });
         }
         // 2. Accepted rules and decisions about the task (small, high value).
         if wants(ContextSection::Rules) || wants(ContextSection::Memory) {
-            let scopes = self.readable_scopes(&access, &pinned);
+            let mut scopes = self.readable_scopes(&access, &pinned);
+            scopes.retain(|scope| match scope {
+                Scope::Project { project, .. } => {
+                    input.projects.is_empty() || input.projects.contains(project)
+                }
+                _ => true,
+            });
             let query = RecordQuery {
                 scopes,
                 states: vec![RecordState::Accepted],
@@ -264,9 +858,65 @@ impl Engine {
                     evidence: None,
                     memory_id: Some(mcp.id.clone()),
                     content: UntrustedText::memory(text),
+                    content_lines: None,
+                    content_truncated: false,
+                    continuation_ids: Vec::new(),
                     estimated_tokens: cost,
                 });
             }
+        }
+        let source_sections: Vec<_> = [
+            ContextSection::Code,
+            ContextSection::Tests,
+            ContextSection::Contracts,
+            ContextSection::Docs,
+        ]
+        .into_iter()
+        .filter(|section| wants(*section))
+        .collect();
+        if source_sections.is_empty() || used >= requested {
+            if !source_sections.is_empty() {
+                gaps.push(Gap::new(
+                    GapReason::BudgetExhausted,
+                    "preferred sources exhausted the token budget; additional task sources were not retrieved",
+                ));
+            }
+            if entries.is_empty() && gaps.is_empty() {
+                gaps.push(Gap::new(
+                    GapReason::NoMatches,
+                    "no matching accepted team knowledge was found",
+                ));
+            }
+            dedupe(&mut gaps);
+            let selection = input
+                .selection_strategy
+                .map(|strategy| ContextSelectionReport {
+                    strategy,
+                    considered_candidates: 0,
+                    omitted_by_candidate_limit: 0,
+                    evaluations: 0,
+                    evaluation_budget_exhausted: false,
+                    selected_candidates: 0,
+                    covered_roles: Vec::new(),
+                    missing_roles: if input.desired_roles.is_empty() {
+                        knowell_query::TaskPackOptions::default()
+                            .desired_roles
+                            .into_iter()
+                            .map(mcp_role)
+                            .collect()
+                    } else {
+                        input.desired_roles.clone()
+                    },
+                    steps: Vec::new(),
+                });
+            return Ok(BuildContextOutput {
+                entries,
+                budget: TokenBudget { requested, used },
+                uncertainties,
+                job: None,
+                gaps,
+                selection,
+            });
         }
         // 3. Code found for the task, packed into what is left.
         let mut query = task.to_owned();
@@ -274,19 +924,125 @@ impl Engine {
             query.push(' ');
             query.push_str(symbol);
         }
-        let run = self
-            .run_search(&pinned, &Filters::default(), &query, 20, true, false)
-            .await?;
-        let texts = self.texts_for(&run).await?;
-        let source = snippets(&run, texts, self.inner.settings.max_fetch_lines);
+        filters.sections = source_sections;
+        let strategy = input
+            .selection_strategy
+            .unwrap_or(ContextSelectionStrategy::Source);
+        let mut run = if strategy == ContextSelectionStrategy::Source {
+            self.run_source_search(&pinned, &filters, &query, 64)
+                .await?
+        } else {
+            self.run_search(&pinned, &filters, &query, 20, true, false)
+                .await?
+        };
+        // Section filtering precedes budget allocation and source acquisition.
+        let result_sections: BTreeMap<_, _> = run
+            .response
+            .results
+            .iter()
+            .map(|r| (r.rank, source_section(&run, &r.location, &r.why)))
+            .collect();
+        let expanded_sections: Vec<_> = run
+            .response
+            .expanded
+            .iter()
+            .map(|r| source_section(&run, &r.location, &r.why))
+            .collect();
+        run.response.results.retain(|result| {
+            result_sections
+                .get(&result.rank)
+                .is_some_and(|section| wants(*section))
+                && context_source_allowed(
+                    &filters,
+                    &result.location.project,
+                    &result.location.path,
+                    result.language.as_ref().map(Language::as_str),
+                )
+                && !focus_covered(
+                    &entries,
+                    &result.location,
+                    result.commit.as_ref(),
+                    result.layer,
+                )
+        });
+        let mut section = expanded_sections.into_iter();
+        run.response.expanded.retain(|expanded| {
+            section.next().is_some_and(wants)
+                && context_source_allowed(
+                    &filters,
+                    &expanded.location.project,
+                    &expanded.location.path,
+                    expanded.language.as_ref().map(Language::as_str),
+                )
+                && !focus_covered(
+                    &entries,
+                    &expanded.location,
+                    expanded.commit.as_ref(),
+                    expanded.layer,
+                )
+        });
+        let texts = if strategy == ContextSelectionStrategy::Source {
+            self.source_texts_for(&run).await?
+        } else {
+            self.texts_for(&run).await?
+        };
+        let source = if strategy == ContextSelectionStrategy::Source {
+            source_snippets(&run, texts, self.inner.settings.max_fetch_lines)
+        } else {
+            snippets(&run, texts, self.inner.settings.max_fetch_lines)
+        };
         let remaining = requested.saturating_sub(used);
-        let pack = knowell_query::pack(&run.response, remaining, &source);
+        let (pack, selected) = {
+            let mut options = knowell_query::TaskPackOptions {
+                strategy: query_strategy(strategy),
+                ..knowell_query::TaskPackOptions::default()
+            };
+            if !input.desired_roles.is_empty() {
+                options.desired_roles = input
+                    .desired_roles
+                    .iter()
+                    .copied()
+                    .map(query_role)
+                    .collect();
+            }
+            if strategy == ContextSelectionStrategy::Source {
+                options.candidate_limit = 64;
+                if input.desired_roles.is_empty() {
+                    options.desired_roles.clear();
+                }
+            }
+            let selected = if strategy == ContextSelectionStrategy::Source {
+                knowell_query::pack_task_with(
+                    &run.response,
+                    crate::source_region::source_budget(remaining),
+                    &source,
+                    &crate::source_region::SourceBudgetCounter,
+                    &options,
+                )
+            } else {
+                knowell_query::pack_task(&run.response, remaining, &source, &options)
+            }
+            .map_err(|error| ToolError::internal(error.to_string()))?;
+            (selected.pack, Some(selected.selection))
+        };
+        let mut discarded_sources = 0usize;
         for item in &pack.items {
-            let Some(entry) = self.pack_entry(&run, item, &wants)? else {
+            let Some(entry) = self.pack_entry(
+                &run,
+                item,
+                &wants,
+                (strategy == ContextSelectionStrategy::Source).then_some(&source),
+            )?
+            else {
+                discarded_sources = discarded_sources.saturating_add(1);
                 continue;
             };
             used = used.saturating_add(item.tokens);
             entries.push(entry);
+        }
+        if discarded_sources > 0 {
+            gaps.push(Gap::new(GapReason::NotFound, format!(
+                "{discarded_sources} selected source regions were omitted because their pinned identity or acquisition extent could not be verified")));
         }
         let over_budget = pack
             .omitted
@@ -299,8 +1055,22 @@ impl Engine {
                 format!("{over_budget} relevant items did not fit the token budget"),
             ));
         }
-        for u in &pack.uncertainties {
-            let text = uncertainty_text(u);
+        let acquisition_gaps = source_omission_gaps(&pack.omitted);
+        if pack.items.is_empty()
+            && !run.response.results.is_empty()
+            && acquisition_gaps.is_empty()
+            && over_budget == 0
+        {
+            gaps.push(Gap::new(GapReason::NotFound,
+                "retrieval found source candidates, but no source regions were emitted; inspect the pinned index or increase token_budget"));
+        }
+        gaps.extend(acquisition_gaps);
+        let pack_uncertainties = if strategy == ContextSelectionStrategy::Source {
+            source_uncertainties(&pack.uncertainties, &pack.items)
+        } else {
+            pack.uncertainties.iter().map(uncertainty_text).collect()
+        };
+        for text in pack_uncertainties {
             if !uncertainties.contains(&text) {
                 uncertainties.push(text);
             }
@@ -313,6 +1083,84 @@ impl Engine {
             }
         }
         dedupe(&mut gaps);
+        let selection =
+            selected.map(|selected| {
+                let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+                let steps: Vec<_> = selected
+                    .role_evidence
+                    .iter()
+                    .filter_map(|role| {
+                        let all_shown = role.citations.iter().all(|citation| {
+                            entries.iter().any(|entry| {
+                                !matches!(entry.kind, EntryKind::Signature | EntryKind::Skeleton)
+                                    && entry.evidence.as_ref().is_some_and(|evidence| {
+                                        citation.project == evidence.project
+                                            && citation.path == evidence.path
+                                            && citation.range == evidence.lines
+                                            && citation.content_hash == evidence.content_hash
+                                            && citation.commit.as_ref().is_some_and(|commit| {
+                                                commit.as_str() == evidence.commit.as_str()
+                                            })
+                                    })
+                            })
+                        });
+                        if !all_shown {
+                            return None;
+                        }
+                        let source_ids: Vec<_> = entries
+                            .iter()
+                            .filter_map(|entry| {
+                                let evidence = entry.evidence.as_ref()?;
+                                role.citations
+                                    .iter()
+                                    .any(|citation| {
+                                        citation.project == evidence.project
+                                            && citation.path == evidence.path
+                                            && citation.range == evidence.lines
+                                            && citation.content_hash == evidence.content_hash
+                                            && citation.commit.as_ref().is_some_and(|commit| {
+                                                commit.as_str() == evidence.commit.as_str()
+                                            })
+                                    })
+                                    .then(|| entry.id.clone())
+                            })
+                            .collect();
+                        (!source_ids.is_empty()).then_some(ContextRoadmapStep {
+                            role: mcp_role(role.role),
+                            source_ids,
+                        })
+                    })
+                    .collect();
+                ContextSelectionReport {
+                    strategy: input
+                        .selection_strategy
+                        .unwrap_or(ContextSelectionStrategy::Source),
+                    considered_candidates: count(selected.considered_candidates),
+                    omitted_by_candidate_limit: count(selected.omitted_by_candidate_limit),
+                    evaluations: count(selected.evaluations),
+                    evaluation_budget_exhausted: selected.evaluation_budget_exhausted,
+                    selected_candidates: count(selected.selected_candidates),
+                    covered_roles: selected
+                        .covered_roles
+                        .iter()
+                        .copied()
+                        .map(mcp_role)
+                        .filter(|role| steps.iter().any(|step| step.role == *role))
+                        .collect(),
+                    missing_roles: selected
+                        .missing_roles
+                        .iter()
+                        .copied()
+                        .chain(
+                            selected.covered_roles.iter().copied().filter(|role| {
+                                !steps.iter().any(|step| step.role == mcp_role(*role))
+                            }),
+                        )
+                        .map(mcp_role)
+                        .collect(),
+                    steps,
+                }
+            });
         Ok(BuildContextOutput {
             entries,
             budget: TokenBudget {
@@ -322,6 +1170,7 @@ impl Engine {
             uncertainties,
             job: None,
             gaps,
+            selection,
         })
     }
 
@@ -329,22 +1178,39 @@ impl Engine {
         &self,
         run: &crate::search::SearchRun,
         item: &PackItem,
-        wants: &dyn Fn(ContextSection) -> bool,
+        wants: &(dyn Fn(ContextSection) -> bool + Sync),
+        source: Option<&SnippetAdapter<'_>>,
     ) -> Result<Option<ContextEntry>, ToolError> {
         let (location, why, score) = match item.origin {
             Origin::Result { rank } => {
-                let Some(result) = run.response.results.iter().find(|r| r.rank == rank) else {
+                let Some(result) = run.response.results.iter().find(|result| {
+                    result.rank == rank
+                        && pack_source_matches(
+                            item,
+                            &result.location,
+                            result.commit.as_ref(),
+                            result.symbol.as_deref(),
+                            &result.why,
+                            acquisition_extent(
+                                run,
+                                &result.location,
+                                result.symbol.as_deref(),
+                                source,
+                            ),
+                        )
+                }) else {
                     return Ok(None);
                 };
                 (&result.location, &result.why, Some(&result.score))
             }
             Origin::Expanded { seed_rank, depth } => {
-                let Some(expanded) = run.response.expanded.iter().find(|e| {
-                    e.seed_rank == seed_rank
-                        && e.depth == depth
-                        && e.location.path == item.citation.path
-                        && e.location.project == item.citation.project
-                }) else {
+                let Some(expanded) = expanded_pack_source(
+                    &run.response.expanded,
+                    item,
+                    seed_rank,
+                    depth,
+                    &|location, symbol| acquisition_extent(run, location, symbol, source),
+                ) else {
                     return Ok(None);
                 };
                 (&expanded.location, &expanded.why, None)
@@ -367,14 +1233,7 @@ impl Engine {
         else {
             return Ok(None);
         };
-        let language = placed.language.as_deref();
-        let section = if is_test_path(&location.path) {
-            ContextSection::Tests
-        } else if matches!(language, Some("markdown" | "text")) {
-            ContextSection::Docs
-        } else {
-            ContextSection::Code
-        };
+        let section = source_section(run, location, why);
         if !wants(section) {
             return Ok(None);
         }
@@ -383,7 +1242,24 @@ impl Engine {
             (SnippetKind::Skeleton, _) => EntryKind::Skeleton,
             (SnippetKind::Body, ContextSection::Tests) => EntryKind::Test,
             (SnippetKind::Body, ContextSection::Docs) => EntryKind::Doc,
+            (SnippetKind::Body, ContextSection::Contracts) => EntryKind::Contract,
             (SnippetKind::Body, _) => EntryKind::Code,
+        };
+        let extent = acquisition_extent(run, location, item.symbol.as_deref(), source);
+        let continuation_ids = if item.kind == SnippetKind::Body {
+            match extent {
+                Some(extent) => crate::ids::source_continuations(
+                    &placed.evidence.project,
+                    Some(placed.evidence.commit.as_str()),
+                    &placed.evidence.content_hash,
+                    &placed.evidence.path,
+                    item.citation.range,
+                    extent,
+                )?,
+                None => Vec::new(),
+            }
+        } else {
+            Vec::new()
         };
         Ok(Some(ContextEntry {
             id: placed.id,
@@ -393,7 +1269,14 @@ impl Engine {
             evidence: Some(placed.evidence),
             memory_id: None,
             content: UntrustedText::repository(item.text.clone()),
-            estimated_tokens: item.tokens,
+            content_lines: (item.kind == SnippetKind::Body).then_some(item.citation.range),
+            content_truncated: item.kind == SnippetKind::Body
+                && extent.is_some_and(|range| {
+                    item.citation.range.start() > range.start()
+                        || item.citation.range.end() < range.end()
+                }),
+            continuation_ids,
+            estimated_tokens: tokens(&item.text),
         }))
     }
 
@@ -628,5 +1511,352 @@ impl Engine {
         });
         list.truncate(limit);
         Ok(Some(list))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use knowell_core::{ContentHash, LineRange, Name};
+    use knowell_query::{
+        Citation, CommitId, EdgeKind, EvidenceType, ExpandedItem, GraphStep, Layer, Location,
+        Resolution, ViewId,
+    };
+
+    use super::*;
+
+    fn expanded(symbol: &str, start: u32, edge: EdgeKind) -> ExpandedItem {
+        let location = Location {
+            project: Name::new("synthetic").unwrap(),
+            path: RepoPath::new("src/fixture.rs").unwrap(),
+            range: Some(LineRange::new(start, start + 4).unwrap()),
+            view: ViewId::new("fixture-view").unwrap(),
+            generation: 7,
+            content_hash: ContentHash::of(b"synthetic source identity fixture"),
+        };
+        let mut seed = location.clone();
+        seed.path = RepoPath::new("src/subject.rs").unwrap();
+        seed.range = Some(LineRange::new(1, 5).unwrap());
+        let path = vec![GraphStep {
+            edge,
+            evidence: EvidenceType::SyntacticObservation,
+            resolution: Resolution::Resolved,
+            to: location.clone(),
+            symbol: Some(symbol.to_owned()),
+        }];
+        ExpandedItem {
+            location,
+            commit: Some(CommitId::new("1".repeat(40)).unwrap()),
+            layer: Layer::Base,
+            symbol: Some(symbol.to_owned()),
+            language: None,
+            seed_rank: 1,
+            depth: 1,
+            score: 0.5,
+            why: vec![Reason::GraphPath {
+                seed,
+                steps: path.clone(),
+            }],
+            path,
+        }
+    }
+
+    fn packed(source: &ExpandedItem) -> PackItem {
+        PackItem {
+            origin: Origin::Expanded {
+                seed_rank: source.seed_rank,
+                depth: source.depth,
+            },
+            kind: SnippetKind::Body,
+            citation: Citation {
+                project: source.location.project.clone(),
+                view: source.location.view.clone(),
+                generation: source.location.generation,
+                commit: source.commit.clone(),
+                path: source.location.path.clone(),
+                range: source.location.range.unwrap(),
+                content_hash: source.location.content_hash,
+            },
+            symbol: source.symbol.clone(),
+            text: "synthetic shown body".to_owned(),
+            tokens: 12,
+            why: source.why.clone(),
+            covers: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn context_source_filters_apply_project_directory_boundary_and_known_language() {
+        let input = BuildContextInput {
+            projects: vec![Name::new("synthetic").unwrap()],
+            path_prefixes: vec![" src/native/ ".to_owned()],
+            languages: vec!["rust".to_owned()],
+            ..BuildContextInput::default()
+        };
+        let filters = context_filters(&input).unwrap();
+        let project = Name::new("synthetic").unwrap();
+        let path = RepoPath::new("src/native/read.rs").unwrap();
+        assert!(context_source_allowed(
+            &filters,
+            &project,
+            &path,
+            Some("rust")
+        ));
+        assert!(!context_source_allowed(
+            &filters,
+            &project,
+            &path,
+            Some("cpp")
+        ));
+        assert!(!context_source_allowed(&filters, &project, &path, None));
+        assert!(!context_source_allowed(
+            &filters,
+            &Name::new("other").unwrap(),
+            &path,
+            Some("rust")
+        ));
+        assert!(!context_source_allowed(
+            &filters,
+            &project,
+            &RepoPath::new("src/native_extra/read.rs").unwrap(),
+            Some("rust")
+        ));
+    }
+
+    #[test]
+    fn qualified_focus_does_not_fall_back_to_an_unrelated_short_name() {
+        let symbol = SymbolEntry {
+            key: "src/native.rs#NativeReader.to_document".to_owned(),
+            local: "NativeReader.to_document".to_owned(),
+            name: "to_document".to_owned(),
+            kind: knowell_parse::SymbolKind::Method,
+            path: RepoPath::new("src/native.rs").unwrap(),
+            lines: LineRange::new(2, 7).unwrap(),
+            name_line: 2,
+            signature: String::new(),
+            doc: None,
+            parent: None,
+            store_id: None,
+        };
+        assert!(focus_symbol_matches(&symbol, "to_document"));
+        assert!(focus_symbol_matches(&symbol, "NativeReader::to_document"));
+        assert!(focus_symbol_matches(
+            &symbol,
+            "src/native.rs#NativeReader.to_document"
+        ));
+        assert!(!focus_symbol_matches(&symbol, "OtherReader.to_document"));
+        assert!(!focus_symbol_matches(
+            &symbol,
+            "src/other.rs#NativeReader.to_document"
+        ));
+        assert!(!focus_symbol_matches(&symbol, "TO_DOCUMENT"));
+    }
+
+    #[test]
+    fn focus_deduplication_requires_the_same_commit_layer_and_complete_range() {
+        let source = expanded("reader", 10, EdgeKind::Callee);
+        let item = packed(&source);
+        let entry = ContextEntry {
+            id: ResultId::new("kn:synthetic-focus").unwrap(),
+            section: ContextSection::Code,
+            kind: EntryKind::Code,
+            why_relevant: "synthetic focus".to_owned(),
+            evidence: Some(knowell_mcp::Evidence {
+                project: source.location.project.clone(),
+                view: "branch:main".parse().unwrap(),
+                layer: knowell_mcp::ViewLayer::Shared,
+                commit: knowell_mcp::CommitId::new("1".repeat(40)).unwrap(),
+                path: source.location.path.clone(),
+                lines: source.location.range.unwrap(),
+                content_hash: source.location.content_hash,
+                symbol: Some("reader".to_owned()),
+                why: Vec::new(),
+                freshness: FreshnessTier::T1Symbols,
+                index_state: knowell_mcp::IndexState::Current,
+            }),
+            memory_id: None,
+            content: UntrustedText::repository(item.text),
+            content_lines: Some(item.citation.range),
+            content_truncated: false,
+            continuation_ids: Vec::new(),
+            estimated_tokens: item.tokens,
+        };
+        let entries = vec![entry];
+        assert!(focus_covered(
+            &entries,
+            &source.location,
+            source.commit.as_ref(),
+            Layer::Base
+        ));
+        assert!(!focus_covered(
+            &entries,
+            &source.location,
+            source.commit.as_ref(),
+            Layer::Overlay
+        ));
+        assert!(!focus_covered(
+            &entries,
+            &source.location,
+            Some(&CommitId::new("2".repeat(40)).unwrap()),
+            Layer::Base
+        ));
+        let mut extended = source.location;
+        extended.range = Some(LineRange::new(10, 15).unwrap());
+        assert!(!focus_covered(
+            &entries,
+            &extended,
+            source.commit.as_ref(),
+            Layer::Base
+        ));
+    }
+
+    #[test]
+    fn expanded_bodies_keep_their_same_file_same_depth_endpoint_and_graph_path() {
+        let sources = vec![
+            expanded("first", 10, EdgeKind::Caller),
+            expanded("second", 30, EdgeKind::Test),
+        ];
+        let item = packed(&sources[1]);
+        let extent = |location: &Location, _: Option<&str>| location.range;
+        let source = expanded_pack_source(&sources, &item, 1, 1, &extent).unwrap();
+        assert_eq!(source.location, sources[1].location);
+        assert_eq!(source.symbol, sources[1].symbol);
+        assert_eq!(source.path, sources[1].path);
+        assert_eq!(source.why, sources[1].why);
+        assert_eq!(why_relevant(&source.why), "test of a top result (1 hop(s))");
+
+        let mut wrong_reason = item.clone();
+        wrong_reason.why = sources[0].why.clone();
+        assert!(expanded_pack_source(&sources, &wrong_reason, 1, 1, &extent).is_none());
+    }
+
+    #[test]
+    fn packed_sources_require_the_exact_binding_and_allow_only_shortened_bodies() {
+        let source = expanded("second", 30, EdgeKind::Test);
+        let item = packed(&source);
+        let matches = |item: &PackItem| {
+            pack_source_matches(
+                item,
+                &source.location,
+                source.commit.as_ref(),
+                source.symbol.as_deref(),
+                &source.why,
+                Some(LineRange::new(20, 34).unwrap()),
+            )
+        };
+        assert!(matches(&item));
+        for changed in 0..9 {
+            let mut wrong = item.clone();
+            match changed {
+                0 => wrong.citation.project = Name::new("other").unwrap(),
+                1 => wrong.citation.path = RepoPath::new("src/other.rs").unwrap(),
+                2 => wrong.citation.view = ViewId::new("other-view").unwrap(),
+                3 => wrong.citation.generation += 1,
+                4 => wrong.citation.content_hash = ContentHash::of(b"other synthetic body"),
+                5 => wrong.citation.commit = Some(CommitId::new("2".repeat(40)).unwrap()),
+                6 => wrong.citation.range = LineRange::new(10, 14).unwrap(),
+                7 => wrong.symbol = Some("other".to_owned()),
+                8 => wrong.why.clear(),
+                _ => unreachable!(),
+            }
+            assert!(
+                !matches(&wrong),
+                "accepted a mismatched identity field {changed}"
+            );
+        }
+        let mut shortened = item.clone();
+        shortened.citation.range = LineRange::new(30, 32).unwrap();
+        assert!(matches(&shortened));
+
+        let mut preceding_signature = item;
+        preceding_signature.kind = SnippetKind::Skeleton;
+        preceding_signature.citation.range = LineRange::new(20, 20).unwrap();
+        assert!(matches(&preceding_signature));
+    }
+
+    #[test]
+    fn packed_parent_expansion_stays_inside_its_verified_acquisition_extent() {
+        let source = expanded("guarded", 150, EdgeKind::Callee);
+        let mut item = packed(&source);
+        item.citation.range = LineRange::new(140, 180).unwrap();
+        let extent = Some(LineRange::new(1, 3000).unwrap());
+        let matches = |item: &PackItem| {
+            pack_source_matches(
+                item,
+                &source.location,
+                source.commit.as_ref(),
+                source.symbol.as_deref(),
+                &source.why,
+                extent,
+            )
+        };
+        assert!(matches(&item));
+        item.citation.range = LineRange::new(2990, 3001).unwrap();
+        assert!(!matches(&item));
+        item.citation.range = LineRange::new(140, 180).unwrap();
+        assert!(!pack_source_matches(
+            &item,
+            &source.location,
+            source.commit.as_ref(),
+            source.symbol.as_deref(),
+            &source.why,
+            None
+        ));
+    }
+
+    #[test]
+    fn source_caveats_follow_selected_links_instead_of_all_workspace_languages() {
+        let source = expanded("selected", 30, EdgeKind::Callee);
+        let mut item = packed(&source);
+        for reason in &mut item.why {
+            if let Reason::GraphPath { steps, .. } = reason
+                && let Some(step) = steps.first_mut()
+            {
+                step.resolution = Resolution::Unresolved;
+            }
+        }
+        let mut uncertainties: Vec<_> = ["rust", "markdown", "toml", "yaml"]
+            .into_iter()
+            .map(|language| Uncertainty::NoReferenceResolution {
+                project: source.location.project.clone(),
+                language: knowell_query::Language::new(language).unwrap(),
+            })
+            .collect();
+        let other = expanded("unselected", 60, EdgeKind::Callee);
+        uncertainties.push(Uncertainty::WeakGraphEvidence {
+            location: other.location,
+            edge: EdgeKind::Callee,
+            evidence: EvidenceType::SyntacticObservation,
+            resolution: Resolution::Unresolved,
+        });
+        uncertainties.push(Uncertainty::WeakGraphEvidence {
+            location: source.location.clone(),
+            edge: EdgeKind::Callee,
+            evidence: EvidenceType::SyntacticObservation,
+            resolution: Resolution::Unresolved,
+        });
+        let mut plain = item.clone();
+        plain.why.clear();
+        let plain_notices = source_uncertainties(&uncertainties, &[plain]);
+        assert!(plain_notices.is_empty());
+        assert!(
+            !plain_notices
+                .iter()
+                .any(|notice| notice.contains("compiler reference"))
+        );
+        let notices = source_uncertainties(&uncertainties, &[item]);
+        assert_eq!(notices.len(), 2);
+        assert_eq!(
+            notices
+                .iter()
+                .filter(|notice| notice.contains("compiler reference"))
+                .count(),
+            1
+        );
+        assert!(
+            !notices
+                .iter()
+                .any(|notice| notice.contains("markdown") || notice.contains("toml"))
+        );
+        assert!(source_uncertainties(&uncertainties, &[]).is_empty());
     }
 }

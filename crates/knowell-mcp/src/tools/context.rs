@@ -34,11 +34,28 @@ pub struct BuildContextInput {
     #[schemars(range(min = 256, max = 200000))]
     #[schemars(description = "default 8000")]
     pub token_budget: Option<u32>,
-    /// Files or ranges you already know are relevant.
+    /// Only these projects (all reachable projects when empty). This is a hard
+    /// source filter, including named focus sources and relation expansion.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(description = "")]
+    pub projects: Vec<Name>,
+    /// Literal source-root-relative path prefixes, using the same conventions
+    /// as `search`. A trailing `/` requires a directory boundary.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(description = "")]
+    pub path_prefixes: Vec<String>,
+    /// Only sources with one of these known languages (all when empty).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(description = "")]
+    pub languages: Vec<String>,
+    /// Files or ranges you already know are relevant. These are preferred
+    /// sources, not a restriction on the rest of the pack.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(description = "Known-relevant files")]
     pub focus_paths: Vec<FileLocator>,
-    /// Symbols you already know are relevant.
+    /// Preferred symbols, by name, in-file qualified name or
+    /// `path#qualified.name`. Ambiguous names remain explicit; these are not
+    /// hard filters on the rest of the pack.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(description = "Known-relevant symbols")]
     pub focus_symbols: Vec<String>,
@@ -50,11 +67,37 @@ pub struct BuildContextInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(description = "Collect a pending pack")]
     pub job_id: Option<JobId>,
+    /// Source selection. Omitted uses complementary source packing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "default source; others are comparators")]
+    pub selection_strategy: Option<ContextSelectionStrategy>,
+    /// Revisable evidence needs for experimental selection, not a completeness claim.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(description = "")]
+    pub desired_roles: Vec<ContextRole>,
 }
 
 impl Validate for BuildContextInput {
     fn validate(&self) -> Result<(), ToolError> {
         self.target.validate()?;
+        super::code::SearchInput {
+            target: self.target.clone(),
+            query: "context scope".to_owned(),
+            projects: self.projects.clone(),
+            path_prefixes: self.path_prefixes.clone(),
+            languages: self.languages.clone(),
+            ..super::code::SearchInput::default()
+        }
+        .validate()?;
+        for prefix in &self.path_prefixes {
+            if prefix.chars().any(char::is_control)
+                || RepoPath::new(prefix.trim().strip_suffix('/').unwrap_or(prefix.trim())).is_err()
+            {
+                return Err(invalid(
+                    "`path_prefixes` must be relative, '/'-separated literal prefixes without empty, '.' or '..' components or control characters",
+                ));
+            }
+        }
         match (&self.task, &self.job_id) {
             (None, None) => return Err(invalid("pass `task` or a `job_id`")),
             (Some(_), Some(_)) => {
@@ -74,13 +117,36 @@ impl Validate for BuildContextInput {
             self.focus_paths.len(),
             limits::MAX_LIST_ITEMS,
         )?;
+        for locator in &self.focus_paths {
+            if !self.projects.is_empty() && !self.projects.contains(&locator.project) {
+                return Err(invalid("`focus_paths` must be within `projects`"));
+            }
+            if !self.path_prefixes.is_empty()
+                && !self
+                    .path_prefixes
+                    .iter()
+                    .any(|prefix| locator.path.as_str().starts_with(prefix.trim()))
+            {
+                return Err(invalid("`focus_paths` must be within `path_prefixes`"));
+            }
+        }
         check_texts(
             "focus_symbols",
             &self.focus_symbols,
             limits::MAX_LIST_ITEMS,
             limits::MAX_SYMBOL_CHARS,
         )?;
-        check_len("include", self.include.len(), limits::MAX_LIST_ITEMS)
+        check_len("include", self.include.len(), limits::MAX_LIST_ITEMS)?;
+        check_len(
+            "desired_roles",
+            self.desired_roles.len(),
+            limits::MAX_LIST_ITEMS,
+        )?;
+        super::check_unique("desired_roles", &self.desired_roles)?;
+        if self.selection_strategy.is_none() && !self.desired_roles.is_empty() {
+            return Err(invalid("`desired_roles` requires `selection_strategy`"));
+        }
+        Ok(())
     }
 }
 
@@ -121,6 +187,99 @@ pub struct BuildContextOutput {
     /// What is missing from the pack, and why.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gaps: Vec<Gap>,
+    /// Experimental selection diagnostics and a source-backed inspection path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<ContextSelectionReport>,
+}
+
+/// Source selection strategy. Comparator variants are explicit; none certifies
+/// task completeness.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextSelectionStrategy {
+    /// Adaptive complementary source packing without generated descriptions.
+    #[default]
+    #[schemars(description = "")]
+    Source,
+    /// Existing rank-ordered packing.
+    #[schemars(description = "")]
+    Rank,
+    /// Relevance and diversity selection.
+    #[schemars(description = "")]
+    Mmr,
+    /// Prefer additional supported evidence roles.
+    #[schemars(description = "")]
+    RoleCoverage,
+    /// Evaluate bounded complementary source groups.
+    #[schemars(description = "")]
+    BoundedBundles,
+}
+
+/// A soft evidence need. A missing role remains unknown, not absent.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextRole {
+    /// An authoritative entry-point location.
+    #[schemars(description = "")]
+    Entry,
+    /// Implementation body.
+    #[schemars(description = "")]
+    Implementation,
+    /// Supported incoming call evidence.
+    #[schemars(description = "")]
+    Caller,
+    /// Supported outgoing call evidence.
+    #[schemars(description = "")]
+    Callee,
+    /// Test evidence.
+    #[schemars(description = "")]
+    Test,
+    /// Authoritative configuration dependency.
+    #[schemars(description = "")]
+    Config,
+    /// Contract evidence.
+    #[schemars(description = "")]
+    Contract,
+    /// Documentation.
+    #[schemars(description = "")]
+    Doc,
+    /// Supported surrounding relations.
+    #[schemars(description = "")]
+    Surroundings,
+}
+
+/// Source-backed steps and bounded selection work for a context pack.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ContextSelectionReport {
+    /// Comparator used.
+    pub strategy: ContextSelectionStrategy,
+    /// Candidates considered by the selector.
+    pub considered_candidates: u32,
+    /// Candidates outside the selector's explicit cap.
+    pub omitted_by_candidate_limit: u32,
+    /// Source-set evaluations performed.
+    pub evaluations: u32,
+    /// Whether further set evaluation was prevented by the work limit.
+    pub evaluation_budget_exhausted: bool,
+    /// Selected source candidates.
+    pub selected_candidates: u32,
+    /// Roles supported by actual shown source bodies.
+    pub covered_roles: Vec<ContextRole>,
+    /// Requested roles without sufficient shown support.
+    pub missing_roles: Vec<ContextRole>,
+    /// Inspection steps pointing at actual fetchable entries.
+    pub steps: Vec<ContextRoadmapStep>,
+}
+
+/// A supported part of the task's inspection path; the agent decides the action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ContextRoadmapStep {
+    /// Evidence role supported by these entries.
+    pub role: ContextRole,
+    /// Fetchable ids of the actual shown sources supporting the role.
+    pub source_ids: Vec<ResultId>,
 }
 
 /// Token budget accounting, in estimated tokens (a model-agnostic estimate,
@@ -152,6 +311,17 @@ pub struct ContextEntry {
     pub memory_id: Option<MemoryId>,
     /// The content (untrusted).
     pub content: UntrustedText,
+    /// Actual contiguous source lines in `content`, when known. Unlike
+    /// `evidence.lines`, this describes what is displayed, not the fetch handle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_lines: Option<knowell_core::LineRange>,
+    /// The source body is a partial excerpt of the fetchable evidence range.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub content_truncated: bool,
+    /// Exact pinned source ranges continuing a displayed excerpt. These are
+    /// fetch handles, not inferred claims that a task has been covered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub continuation_ids: Vec<ResultId>,
     /// Estimated tokens of `content`.
     pub estimated_tokens: u32,
 }
@@ -326,4 +496,139 @@ pub struct CoChange {
     pub together: u32,
     /// Commits that changed the subject (in the analysed window).
     pub of_commits: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ids::ContextId;
+
+    fn context_input() -> BuildContextInput {
+        BuildContextInput {
+            target: Target::context(ContextId::new("synthetic-context").unwrap()),
+            task: Some("locate the format reader and mapping".to_owned()),
+            ..BuildContextInput::default()
+        }
+    }
+
+    #[test]
+    fn context_hard_filters_use_literal_search_scope_conventions() {
+        let mut input = context_input();
+        input.projects = vec![Name::new("reader").unwrap()];
+        input.path_prefixes = vec!["src/formats/".to_owned()];
+        input.languages = vec!["rust".to_owned()];
+        input.focus_paths = vec![FileLocator {
+            project: Name::new("reader").unwrap(),
+            path: RepoPath::new("src/formats/native.rs").unwrap(),
+            lines: Some(LineRange::new(2, 7).unwrap()),
+        }];
+        assert!(input.validate().is_ok());
+        let serialized = serde_json::to_value(&input).unwrap();
+        let restored: BuildContextInput = serde_json::from_value(serialized).unwrap();
+        assert_eq!(restored, input);
+
+        input.projects.push(Name::new("reader").unwrap());
+        assert!(input.validate().is_err());
+    }
+
+    #[test]
+    fn context_focus_never_bypasses_hard_project_or_path_filters() {
+        let mut input = context_input();
+        input.projects = vec![Name::new("reader").unwrap()];
+        input.path_prefixes = vec!["src/native/".to_owned()];
+        input.focus_paths = vec![FileLocator {
+            project: Name::new("unrelated").unwrap(),
+            path: RepoPath::new("src/native/read.rs").unwrap(),
+            lines: None,
+        }];
+        assert!(input.validate().is_err());
+        input.focus_paths.first_mut().unwrap().project = Name::new("reader").unwrap();
+        assert!(input.validate().is_ok());
+        input.focus_paths.first_mut().unwrap().path = RepoPath::new("src/native_extra.rs").unwrap();
+        assert!(input.validate().is_err());
+    }
+
+    #[test]
+    fn malformed_context_prefixes_are_rejected_without_echoing_the_input() {
+        for prefix in [
+            "../outside",
+            "src/../outside",
+            "/absolute",
+            "src\\native",
+            "src/./native",
+            "src//native",
+            "src/\u{1b}native",
+            "src/\0native",
+        ] {
+            let mut input = context_input();
+            input.path_prefixes = vec![prefix.to_owned()];
+            let error = input.validate().unwrap_err();
+            assert!(!error.to_string().contains(prefix));
+        }
+        assert!(
+            serde_json::from_str::<BuildContextInput>(
+                r#"{"context_id":"synthetic-context","task":"reader","path_prefixes":["src/""#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<BuildContextInput>(
+                r#"{"context_id":"synthetic-context","task":"reader","projects":42}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn legacy_context_requests_leave_source_filters_unrestricted() {
+        let input = context_input();
+        assert!(input.validate().is_ok());
+        let value = serde_json::to_value(input).unwrap();
+        for field in ["projects", "path_prefixes", "languages"] {
+            assert!(value.get(field).is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn fixture_context_applies_every_hard_source_filter() {
+        use crate::tools::OpenWorkspaceInput;
+        use crate::{Caller, FixtureTools, KnowellTools, TransportKind};
+
+        let tools = FixtureTools::new();
+        let caller = Caller::local(TransportKind::Stdio);
+        let opened = tools
+            .open_workspace(&caller, OpenWorkspaceInput::default())
+            .await
+            .unwrap();
+        let mut input = BuildContextInput {
+            target: Target::context(opened.context_id),
+            task: Some("subscription cancellation".to_owned()),
+            projects: vec![Name::new("billing-api").unwrap()],
+            path_prefixes: vec!["src/payments/".to_owned()],
+            languages: vec!["typescript".to_owned()],
+            include: vec![
+                ContextSection::Code,
+                ContextSection::Tests,
+                ContextSection::Contracts,
+            ],
+            ..BuildContextInput::default()
+        };
+        let context = tools.build_context(&caller, input.clone()).await.unwrap();
+        assert!(!context.entries.is_empty());
+        assert!(context.entries.iter().all(|entry| {
+            entry.evidence.as_ref().is_some_and(|evidence| {
+                evidence.project.as_str() == "billing-api"
+                    && evidence.path.as_str().starts_with("src/payments/")
+            })
+        }));
+        assert!(context.gaps.iter().all(|gap| {
+            gap.project
+                .as_ref()
+                .is_none_or(|project| project.as_str() == "billing-api")
+        }));
+        input.languages = vec!["rust".to_owned()];
+        let empty = tools.build_context(&caller, input).await.unwrap();
+        assert!(empty.entries.is_empty());
+        assert!(!empty.gaps.is_empty());
+    }
 }

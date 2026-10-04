@@ -28,6 +28,7 @@ use knowell_update::manifest::{Artifact, Component, target_name};
 use knowell_update::repository::{RepositoryConfig, TrustedRepository};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tokio::io::AsyncReadExt as _;
 use tough::editor::RepositoryEditor;
 use tough::editor::signed::SignedRole;
 use tough::key_source::{KeySource, LocalKeySource};
@@ -35,6 +36,10 @@ use tough::schema::{KeyHolder, RoleKeys, RoleType, Root, Signed, Target, Targets
 use url::Url;
 
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(20);
+// Preparation streams, hashes and syncs the real debug executable before its
+// candidate handshake. Keep that artifact-I/O allowance separate from MCP
+// readiness, process shutdown and pipe EOF deadlines on loaded CI runners.
+const PREPARE_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn engine_binary() -> PathBuf {
     std::env::var_os("NEXTEST_BIN_EXE_know")
@@ -189,16 +194,62 @@ fn isolated_command(temporary: &tempfile::TempDir, executable: &Path) -> Command
 }
 
 fn bounded_output(command: &mut Command) -> Output {
+    bounded_output_with_timeout(command, PROCESS_TIMEOUT)
+}
+
+fn bounded_output_with_timeout(command: &mut Command, timeout: Duration) -> Output {
     let mut command = tokio::process::Command::from(std::mem::replace(
         command,
         Command::new("unused-test-command"),
     ));
-    command.stdin(Stdio::null()).kill_on_drop(true);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
     block_on(async {
-        tokio::time::timeout(PROCESS_TIMEOUT, command.output())
-            .await
-            .expect("test process did not exit and close its pipes before the deadline")
-            .unwrap()
+        let mut child = command.spawn().unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let mut stderr = child.stderr.take().unwrap();
+        // Drain both streams while waiting, so a full pipe cannot prevent exit.
+        let mut stdout = tokio::spawn(async move {
+            let mut bytes = Vec::new();
+            stdout.read_to_end(&mut bytes).await?;
+            Ok::<_, std::io::Error>(bytes)
+        });
+        let mut stderr = tokio::spawn(async move {
+            let mut bytes = Vec::new();
+            stderr.read_to_end(&mut bytes).await?;
+            Ok::<_, std::io::Error>(bytes)
+        });
+        let status = match tokio::time::timeout(timeout, child.wait()).await {
+            Ok(status) => status.unwrap(),
+            Err(_) => {
+                // Reap explicitly before unwinding: kill_on_drop only requests
+                // termination, and a live Windows image prevents fixture cleanup.
+                let reaped = tokio::time::timeout(PROCESS_TIMEOUT, child.kill()).await;
+                stdout.abort();
+                stderr.abort();
+                assert!(
+                    reaped.is_ok_and(|result| result.is_ok()),
+                    "timed-out test process could not be killed and reaped"
+                );
+                panic!("test process did not exit before its command deadline");
+            }
+        };
+        let streams = tokio::time::timeout(PROCESS_TIMEOUT, async {
+            tokio::join!(&mut stdout, &mut stderr)
+        })
+        .await;
+        stdout.abort();
+        stderr.abort();
+        let (stdout, stderr) = streams
+            .expect("test process exited but its output pipes did not close before the deadline");
+        Output {
+            status,
+            stdout: stdout.unwrap().unwrap(),
+            stderr: stderr.unwrap().unwrap(),
+        }
     })
 }
 
@@ -737,12 +788,15 @@ fn cli_rejects_signed_candidate_version_mismatch_without_interrupting_mcp() {
     );
     assert!(String::from_utf8_lossy(&plan.stdout).contains(&fixture.candidate.version));
     process.tools(3);
-    let output = bounded_output(sandbox.command(&sandbox.engine).args([
-        "update",
-        "--prepare",
-        "--version",
-        &fixture.candidate.version,
-    ]));
+    let output = bounded_output_with_timeout(
+        sandbox.command(&sandbox.engine).args([
+            "update",
+            "--prepare",
+            "--version",
+            &fixture.candidate.version,
+        ]),
+        PREPARE_TIMEOUT,
+    );
     assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stderr)

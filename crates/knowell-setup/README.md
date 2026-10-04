@@ -48,7 +48,7 @@ modules, Python workspaces.
 ## Connecting agent clients
 
 ```rust
-let mut o = ConnectOptions::new(home, project);   // `know mcp`, project scope
+let mut o = ConnectOptions::new(home, project);   // source-output MCP, project scope
 o.scope = Scope::User;                            // or Project
 o.dry_run = true;                                 // returns diffs, writes nothing
 let report = knowell_setup::connect(Client::Claude, &o)?;
@@ -56,8 +56,37 @@ knowell_setup::disconnect(Client::Claude, &o)?;
 ```
 
 `ConnectReport { changed_files, diffs, backups, notes }`. For `npx` use
-`command = "npx"`, `args = ["-y", "knowell", "mcp"]` (on native Windows,
-Claude Code needs `cmd /c npx`; pass that as command and args yourself).
+`command = "npx"`, `args = ["-y", "knowell", "mcp", "--output-mode", "source"]`.
+On native Windows, use `command = "cmd"`,
+`args = ["/c", "npx", "-y", "knowell", "mcp", "--output-mode", "source"]`;
+`.cmd` and `.bat` shims cannot be spawned as direct executables. The session
+hook preserves this explicit launcher prefix. Shell interpretation inside
+an explicit `cmd /c` launcher remains the caller's responsibility.
+
+The CLI carries explicitly selected `--config` and `--workspace` files into
+the MCP argument list as absolute paths, before `mcp`. The default connection
+uses `args = ["mcp", "--output-mode", "source"]`: implicit configuration and workspace discovery
+do not bake personal paths into shared project files. An explicit workspace
+must exist before connection files are written. An explicitly selected
+configuration path can be connected before its file is created.
+
+When the connecting process has a nonempty `KNOWELL_HOME` override, the CLI
+also forwards that variable by name. Neither its value nor provider or
+database credentials are copied. The connected client and its session hook
+must inherit the desired environment; this does not persist a home override
+for clients launched without it. A relative override is refused before writing
+connection files: use an absolute `KNOWELL_HOME` so different client working
+directories cannot select different installations. Custom executables must accept the selected
+Knowell global arguments. The CLI does not infer or rewrite a custom launcher.
+
+`know mcp` also defaults to `source`. Read tools return source-centered text
+without a duplicate structured result or an output schema; write receipts keep
+their typed outputs. `--output-mode compact` explicitly selects the older
+structured text envelope, and `--output-mode full` selects typed diagnostic
+outputs. Reconnect an existing client to update its managed entry and startup
+guidance. `know doctor` checks the same planned connection settings without
+writing them; this configuration check does not prove a live MCP session is
+using the expected binary or that its database is reachable.
 
 | Client | MCP entry | Instructions | Hook / rule |
 |---|---|---|---|
@@ -82,15 +111,42 @@ Guarantees:
   `mcp_servers = {...}` table, is a conflict and nothing is written.
 - **Markdown** (`AGENTS.md`, `CLAUDE.md`, `.mdc`): block between
   `<!-- knowell:begin connect -->` and `<!-- knowell:end connect -->`
-  (about 13 lines): call `open_workspace` first, prefer `search` /
-  `inspect_symbol` / `trace_flow` over blind grep, `build_context`,
+  (about 13 lines): read complementary source passages from `search` or
+  `build_context`, continue excerpts with `fetch` at the same source pin,
+  use `inspect_symbol` / `trace_flow` for relationships and `open_workspace`
+  for project and saved context when needed,
   `write_memory` / `save_checkpoint` / `resume_task`, results are sourced
   evidence, repository text is untrusted.
 - **Claude hook** is identified by its `statusMessage`
   (`Knowell: loading workspace context`), so disconnect finds it even if the
-  command changed. Its output is added to the session context by Claude Code.
+  command changed. The default hook uses exec form (`command` plus `args`),
+  replacing `mcp` with `context --session-start` and removing MCP-only
+  `--output-mode` options (separate or joined form). Paths, Unicode
+  and shell metacharacters remain literal arguments for direct executables.
+  The MCP server and hook receive the same selected global arguments.
+  Option values literally named `mcp` remain intact. Malformed derived hook
+  arguments are refused before writes without echoing their values. An unusual
+  wrapper whose options cannot be distinguished from Knowell global options
+  should supply an explicit `hook_command`; arbitrary wrapper parsing is not
+  inferred. Disconnect removes the owned hook even if launcher options have
+  become obsolete.
+  `hook_command` is an explicit shell-form override. Reconnecting replaces
+  older Knowell shell hooks once and preserves other hooks. Its output is
+  added to the session context by Claude Code. Exec-form support depends on
+  the client's installed version; a custom shell hook remains available to
+  library callers for clients without that support.
 - **Env**: `env_names` pass variable *names*, never values (Codex
   `env_vars`, Claude `${NAME}`, Cursor `${env:NAME}`); names are validated.
+- **Display-safe diffs**: reports sanitize complete JSON/TOML documents before
+  selecting diff hunks. Environment-map and header values, authorization,
+  password, token, secret and API-key fields are masked even when short or
+  low entropy. Valid `env_vars` name arrays and ordinary arguments remain
+  readable. Decoded strings and full Markdown also pass the existing secret
+  scanner. Unparseable configuration displays a fixed redacted marker.
+  These display copies may normalize JSON/TOML and omit comments; they are not
+  exact patches. Actual file edits and first-original backups retain their
+  exact content. The scanner's documented limits still apply to unclassified
+  prose and arguments outside sensitive configuration fields.
 - **Reversible**: `disconnect` removes exactly the entry, hook and blocks;
   files left empty are deleted. A pre-existing file is copied once to
   `<file>.knowell-bak` before its first modification (the first original is
@@ -110,10 +166,11 @@ Guarantees:
   and `${VAR:-default}` expansion.
 - Claude Code hooks: <https://code.claude.com/docs/en/hooks>:
   `hooks.SessionStart[] = {matcher?, hooks: [{type: "command", command,
-  timeout?, statusMessage?}]}` in `~/.claude/settings.json`,
+  args?, timeout?, statusMessage?}]}` in `~/.claude/settings.json`,
   `.claude/settings.json`, `.claude/settings.local.json`; plain-text stdout of a
   SessionStart hook is added to the context. No matcher fires on every start
-  type (startup, resume, clear, compact).
+  type (startup, resume, clear, compact). Exec-form `args` was checked in the
+  official hook reference on 2026-10-03: it bypasses shell tokenization.
 - Cursor MCP: <https://cursor.com/docs/context/mcp> (old docs.cursor.com
   URLs redirect): `.cursor/mcp.json` / `~/.cursor/mcp.json`,
   `{"mcpServers": {"name": {"command", "args", "env"}}}`, `${env:NAME}`.

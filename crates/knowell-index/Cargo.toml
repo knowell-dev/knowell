@@ -21,11 +21,13 @@ knowell-lexical.workspace = true
 # T3 contract linking (rule packs, cross-project producer/consumer links).
 knowell-link.workspace = true
 knowell-parse.workspace = true
+knowell-scip.workspace = true
 knowell-secrets.workspace = true
 knowell-source.workspace = true
 knowell-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sqlx.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
@@ -36,8 +38,8 @@ uuid.workspace = true
 
 [dev-dependencies]
 knowell-eval.workspace = true
-# Creates and drops one throwaway database per integration test.
-sqlx.workspace = true
+scip.workspace = true
+protobuf.workspace = true
 tempfile.workspace = true
 
 [lints]

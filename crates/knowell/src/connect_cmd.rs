@@ -89,6 +89,18 @@ pub(crate) fn project_dir(
     }
 }
 
+/// Applies the selected global routing to a launcher without serializing environment values.
+/// Shared by connection writes and the doctor's read-only connection check.
+pub(crate) fn configure_launcher(env: &Env, opts: &mut ConnectOptions) -> anyhow::Result<()> {
+    opts.args = env.connection_args()?;
+    opts.args
+        .extend(["mcp", "--output-mode", "source"].map(str::to_owned));
+    if env.has_home_override() && !opts.env_names.iter().any(|name| name == "KNOWELL_HOME") {
+        opts.env_names.push("KNOWELL_HOME".to_owned());
+    }
+    Ok(())
+}
+
 pub(crate) fn run(
     args: ConnectArgs,
     connect: bool,
@@ -101,13 +113,16 @@ pub(crate) fn run(
     opts.dry_run = args.dry_run;
     opts.command = args.command.clone();
     opts.env_names = args.env_names.clone();
+    if connect {
+        configure_launcher(env, &mut opts)?;
+    }
     let client: Client = args.client.into();
     let result = if connect {
         knowell_setup::connect(client, &opts)
     } else {
         knowell_setup::disconnect(client, &opts)
     };
-    let report = match result {
+    let mut report = match result {
         Ok(report) => report,
         // Refusals: the files hold something Knowell must not touch.
         Err(
@@ -120,6 +135,12 @@ pub(crate) fn run(
         }
         Err(err) => return Err(err.into()),
     };
+    if connect && opts.env_names.iter().any(|name| name == "KNOWELL_HOME") {
+        report.notes.push(
+            "the client and its session hook must inherit KNOWELL_HOME; only its name is forwarded, never its value"
+                .to_owned(),
+        );
+    }
     print_report(&args, client, connect, &report, out)?;
     Ok(ExitCode::SUCCESS)
 }

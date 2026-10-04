@@ -296,6 +296,18 @@ impl<E: Embedder + 'static> Inner<E> {
         priority: Priority,
         force: bool,
     ) -> Result<SyncOutcome, IndexError> {
+        self.sync_with_scip(view, priority, force, None).await
+    }
+
+    /// Pins an explicitly staged compiler artifact to the same resolved target
+    /// as the durable build. An artifact cannot follow a later source revision.
+    pub(crate) async fn sync_with_scip(
+        &self,
+        view: knowell_store::ViewId,
+        priority: Priority,
+        force: bool,
+        scip_import: Option<uuid::Uuid>,
+    ) -> Result<SyncOutcome, IndexError> {
         let ctx = self.context(view)?;
         let target = match self.resolve_target(&ctx).await? {
             Ok(target) => target,
@@ -305,6 +317,26 @@ impl<E: Embedder + 'static> Inner<E> {
             }
         };
         let mut conn = self.store.acquire().await?;
+        if let Some(id) = scip_import {
+            let revision = target
+                .commit()
+                .ok_or_else(|| IndexError::invalid("scip import", "a git revision is required"))?;
+            if knowell_store::analysis::load_scip_import(
+                &mut conn,
+                ctx.organization,
+                view,
+                id,
+                revision,
+            )
+            .await?
+            .is_none()
+            {
+                return Err(IndexError::invalid(
+                    "scip import",
+                    "the staged artifact is unavailable for this view and source revision",
+                ));
+            }
+        }
         if let Some(commit) = target.commit() {
             views::record_seen_commit(&mut conn, view, commit).await?;
         }
@@ -324,12 +356,20 @@ impl<E: Embedder + 'static> Inner<E> {
         // Policy changes also affect unchanged files when the source advances.
         // Without a matching active manifest, fully reconcile rather than reuse
         // the old generation's content-selection decisions.
+        let recorded = row
+            .active_generation
+            .and_then(|generation| manifest::load(&self.config.data_dir, view, generation));
         let force = force
-            || row.active_generation.is_some_and(|generation| {
-                manifest::load(&self.config.data_dir, view, generation)
-                    .is_none_or(|recorded| recorded.policy != ctx.policy_key)
-            });
-        if current && !force {
+            || (row.active_generation.is_some()
+                && recorded
+                    .as_ref()
+                    .is_none_or(|recorded| recorded.policy != ctx.policy_key));
+        // A syntax evidence update must queue T1 at an unchanged revision, but
+        // must not force T0 to reread blobs or change chunk/embedding inputs.
+        let syntax_refresh = recorded
+            .as_ref()
+            .is_some_and(manifest::Manifest::needs_syntax_refresh);
+        if current && !force && !syntax_refresh {
             self.with_runtime(view, |rt| {
                 rt.observed = true;
                 rt.last_error = None;
@@ -361,6 +401,7 @@ impl<E: Embedder + 'static> Inner<E> {
             priority,
             force,
             profile: None,
+            scip_import,
         };
         let mut job = text_job(&payload, row.last_generation, &self.config.jobs)?;
         let mut queued = jobs::enqueue_scoped(&mut conn, &job, JobScope::View(view)).await?;
@@ -566,10 +607,32 @@ impl<E: Embedder + 'static> Inner<E> {
         }
         let generation = match views::building_generation(&mut conn, p.view).await? {
             Some(g) => {
-                let same = p.target.commit().is_some()
-                    && views::get_generation(&mut conn, p.view, g)
+                let same = match &p.target {
+                    BuildTarget::Commit { .. } => views::get_generation(&mut conn, p.view, g)
                         .await?
-                        .is_some_and(|info| info.resolved_commit.as_deref() == p.target.commit());
+                        .is_some_and(|info| info.resolved_commit.as_deref() == p.target.commit()),
+                    BuildTarget::Tree { hash } => {
+                        // The manifest is written after T0's file and lexical
+                        // writes. Its exact target binding plus the stored tree
+                        // prevents resuming a partial or different directory.
+                        let completed = manifest::load(&self.config.data_dir, p.view, g)
+                            .is_some_and(|recorded| {
+                                recorded.commit.is_none()
+                                    && recorded.policy == ctx.policy_key
+                                    && recorded.tree_hash == *hash
+                            });
+                        completed
+                            && store_tree_hash(
+                                &mut conn,
+                                GenerationPin {
+                                    view: p.view,
+                                    generation: g,
+                                },
+                            )
+                            .await?
+                                == *hash
+                    }
+                };
                 if same && !p.force {
                     // Resume after a crash: every write below replaces the
                     // earlier attempt of this generation.

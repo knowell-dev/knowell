@@ -9,7 +9,7 @@
 //!   query engine and storage implement it; [`FixtureTools`] is an in-memory
 //!   implementation with canned data for tests and client checks.
 //! - [`KnowellServer`] — the rmcp server handler: tool listing with
-//!   annotations, structured results with a short text rendering, error
+//!   annotations, source-centered text or opt-in structured results, error
 //!   mapping, prompts (`onboard`, `impact-review`) and the versioned-file
 //!   resource template.
 //! - [`serve_stdio`] and [`streamable_http_router`] — transports.
@@ -44,6 +44,8 @@ mod render;
 mod resource;
 mod schema;
 mod server;
+mod source_render;
+mod stdio;
 mod text;
 pub mod tools;
 mod transport;
@@ -66,10 +68,11 @@ pub use model::{
     Target, ViewLayer, ViewPin,
 };
 pub use prompts::{IMPACT_REVIEW, INSTRUCTIONS, ONBOARD};
+pub use render::reasons as match_reasons;
 pub use resource::{FILE_URI_TEMPLATE, FileUri, MAX_URI_BYTES, UriError};
 pub use server::{
-    KnowellServer, META_EVIDENCE, META_INSTRUCTION_LIKE, META_TRUST, file_resource_template,
-    tool_definition, tool_definitions,
+    KnowellServer, META_EVIDENCE, META_INSTRUCTION_LIKE, META_TRUST, OutputMode,
+    file_resource_template, tool_definition, tool_definitions,
 };
 pub use text::{
     InstructionFlag, InstructionPattern, TextOrigin, Trust, UntrustedText, detect_instruction_like,
@@ -77,5 +80,5 @@ pub use text::{
 pub use tools::{ToolName, Validate};
 pub use transport::{
     DEFAULT_MAX_REQUEST_BODY_BYTES, HttpServerOptions, MCP_HTTP_PATH, serve_stdio,
-    serve_stdio_with, streamable_http_router, streamable_http_service,
+    serve_stdio_with, serve_stdio_with_io, streamable_http_router, streamable_http_service,
 };

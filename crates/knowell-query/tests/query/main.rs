@@ -13,3 +13,5 @@ mod expansion;
 mod fusion;
 mod packing;
 mod planner;
+mod source_packing;
+mod task_packing;

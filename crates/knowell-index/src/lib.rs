@@ -41,9 +41,13 @@ mod merkle;
 mod overlay;
 mod pipeline;
 mod plan;
+mod precise;
+mod precise_queue;
 mod references;
 mod relate;
 mod relations_stage;
+mod rust_imports;
+mod rust_references;
 mod status;
 mod switching;
 mod symbols_stage;
@@ -63,6 +67,7 @@ pub use link::{DEFAULT_MAX_LINK_FILES, LINK_STAGE_NAME, LinkRelationStage};
 pub use merkle::tree_hash;
 pub use overlay::{Overlay, OverlayFile};
 pub use plan::PlanKind;
+pub use precise::{PreparedScipImport, ScipImportLimits, ScipImportManifest, ScipImportReport};
 pub use relate::{
     NoRelations, RelationError, RelationFile, RelationInput, RelationOutput, RelationStage,
     StaleFile, StalenessEvent,

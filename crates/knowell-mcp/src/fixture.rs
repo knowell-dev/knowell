@@ -47,7 +47,7 @@ use crate::tools::{
     ResumeTaskInput, ResumeTaskOutput, Risk, RiskCode, RiskFactor, RiskLevel, SaveCheckpointInput,
     SaveCheckpointOutput, ScopeLevel, SearchHit, SearchInput, SearchKind, SearchOutput,
     SourceChange, SymbolFacet, SymbolInfo, SymbolKind, SymbolLink, TaskDetail, TaskStatus,
-    TaskSummary, TierState, TierStatus, TokenBudget, TraceFlowInput, TraceFlowOutput,
+    TaskSummary, TierState, TierStatus, TokenBudget, TraceFlowInput, TraceFlowOutput, Validate,
     VersionStatus, WriteMemoryInput, WriteMemoryOutput,
 };
 
@@ -440,6 +440,7 @@ struct EdgeSpec {
     to: &'static str,
     relation: RelationKind,
     evidence_type: EvidenceType,
+    resolution: Resolution,
     site: SiteSpec,
 }
 
@@ -449,6 +450,7 @@ const EDGES: &[EdgeSpec] = &[
         to: "endpoint-cancel",
         relation: RelationKind::HttpCall,
         evidence_type: EvidenceType::SyntacticObservation,
+        resolution: Resolution::Resolved,
         site: SITE_CLIENT_FETCH,
     },
     EdgeSpec {
@@ -456,6 +458,7 @@ const EDGES: &[EdgeSpec] = &[
         to: "controller-cancel",
         relation: RelationKind::HttpRoute,
         evidence_type: EvidenceType::SyntacticObservation,
+        resolution: Resolution::Resolved,
         site: SITE_ROUTE_CANCEL,
     },
     EdgeSpec {
@@ -463,6 +466,7 @@ const EDGES: &[EdgeSpec] = &[
         to: "cancel-subscription",
         relation: RelationKind::Calls,
         evidence_type: EvidenceType::SemanticallyResolved,
+        resolution: Resolution::Resolved,
         site: SITE_CALL_CANCEL,
     },
     EdgeSpec {
@@ -470,9 +474,217 @@ const EDGES: &[EdgeSpec] = &[
         to: "topic-cancelled",
         relation: RelationKind::Publishes,
         evidence_type: EvidenceType::SyntacticObservation,
+        resolution: Resolution::Resolved,
         site: SITE_PUBLISH,
     },
 ];
+
+struct FixtureTraceSelection<'a> {
+    nodes: Vec<&'static str>,
+    edges: Vec<&'a EdgeSpec>,
+    candidates_returned: usize,
+    fanout_omitted: usize,
+    candidate_omitted: usize,
+    depth_omitted: usize,
+    node_omitted: usize,
+}
+
+impl FixtureTraceSelection<'_> {
+    fn truncated(&self) -> bool {
+        self.fanout_omitted > 0
+            || self.candidate_omitted > 0
+            || self.depth_omitted > 0
+            || self.node_omitted > 0
+    }
+
+    fn gaps(&self) -> Vec<Gap> {
+        let mut gaps = Vec::new();
+        if self.candidates_returned > 0 {
+            gaps.push(Gap::new(
+                GapReason::RelationsNotReady,
+                format!(
+                    "{} weak, ambiguous or unresolved candidate edges are shown for inspection only; these edges did not carry trace expansion",
+                    self.candidates_returned
+                ),
+            ));
+        }
+        if self.truncated() {
+            gaps.push(Gap::new(
+                GapReason::LimitReached,
+                format!(
+                    "navigation omitted inspected adjacencies: {} by per-node fanout, {} by candidate or node budget, {} beyond depth, {} by primary node budget; these counts do not enumerate the unseen neighborhood",
+                    self.fanout_omitted,
+                    self.candidate_omitted,
+                    self.depth_omitted,
+                    self.node_omitted
+                ),
+            ));
+        } else if self.edges.is_empty() {
+            gaps.push(Gap::new(
+                GapReason::NoCandidatesInSelectedRef,
+                "no indexed relation matched the selected kinds and direction at this source pin; this does not establish that calls or dependencies are absent",
+            ));
+        }
+        gaps
+    }
+}
+
+fn fixture_evidence_rank(evidence: EvidenceType) -> u8 {
+    match evidence {
+        EvidenceType::SemanticallyResolved => 0,
+        EvidenceType::RuntimeObservation => 1,
+        EvidenceType::ContractDerived => 2,
+        EvidenceType::SyntacticObservation => 3,
+        EvidenceType::HeuristicMatch => 4,
+        EvidenceType::ModelSuggestion => 5,
+    }
+}
+
+fn fixture_trace_neighbor(
+    edge: &EdgeSpec,
+    node: &str,
+    direction: FlowDirection,
+) -> Option<&'static str> {
+    match direction {
+        FlowDirection::Downstream => (edge.from == node).then_some(edge.to),
+        FlowDirection::Upstream => (edge.to == node).then_some(edge.from),
+        FlowDirection::Both if edge.from == node => Some(edge.to),
+        FlowDirection::Both if edge.to == node => Some(edge.from),
+        FlowDirection::Both => None,
+    }
+}
+
+/// Mirrors navigation admission over the fixture's small immutable graph.
+fn fixture_navigation<'a>(
+    start: &'static str,
+    input: &TraceFlowInput,
+    edges: &'a [EdgeSpec],
+) -> FixtureTraceSelection<'a> {
+    let direction = input.direction.unwrap_or(FlowDirection::Downstream);
+    let max_depth = input.max_depth.unwrap_or(3);
+    let limit = usize::try_from(input.limit.unwrap_or(50)).unwrap_or(50);
+    let neighbor_limit = usize::try_from(input.neighbor_limit.unwrap_or(12)).unwrap_or(12);
+    let candidate_limit = usize::try_from(input.candidate_limit.unwrap_or(8)).unwrap_or(8);
+    let mut selected = FixtureTraceSelection {
+        nodes: vec![start],
+        edges: Vec::new(),
+        candidates_returned: 0,
+        fanout_omitted: 0,
+        candidate_omitted: 0,
+        depth_omitted: 0,
+        node_omitted: 0,
+    };
+    let mut queue = VecDeque::from([(start, 0u8)]);
+    let mut pending_candidates: Vec<(&EdgeSpec, &'static str)> = Vec::new();
+    let mut processed = BTreeSet::new();
+    while let Some((node, depth)) = queue.pop_front() {
+        processed.insert(node);
+        let mut neighbors: Vec<_> = edges
+            .iter()
+            .filter(|edge| input.relations.is_empty() || input.relations.contains(&edge.relation))
+            .filter_map(|edge| {
+                fixture_trace_neighbor(edge, node, direction).map(|next| (edge, next))
+            })
+            .collect();
+        neighbors.sort_by_key(|(edge, next)| {
+            (
+                fixture_evidence_rank(edge.evidence_type),
+                edge.resolution as u8,
+                edge.relation as u8,
+                *next,
+                edge.from != node,
+                edge.from,
+                edge.to,
+                edge.site.file,
+                edge.site.marker,
+            )
+        });
+        if depth >= max_depth {
+            selected.depth_omitted = selected.depth_omitted.saturating_add(
+                neighbors
+                    .iter()
+                    .filter(|(_, next)| !selected.nodes.contains(next))
+                    .count(),
+            );
+            continue;
+        }
+        let mut primary: BTreeMap<u8, VecDeque<(&EdgeSpec, &'static str)>> = BTreeMap::new();
+        for (edge, next) in neighbors {
+            if edge.resolution == Resolution::Resolved
+                && fixture_evidence_rank(edge.evidence_type) <= 3
+            {
+                if !selected.nodes.contains(&next) {
+                    primary
+                        .entry(edge.relation as u8)
+                        .or_default()
+                        .push_back((edge, next));
+                }
+            } else {
+                // A Both walk sees an uncertain edge at both primary endpoints.
+                // Charge it once even when its first observation could not fit.
+                if (direction == FlowDirection::Both && next != node && processed.contains(&next))
+                    || pending_candidates
+                        .iter()
+                        .any(|(existing, _)| std::ptr::eq(*existing, edge))
+                {
+                    continue;
+                }
+                if pending_candidates.len() >= candidate_limit {
+                    selected.candidate_omitted = selected.candidate_omitted.saturating_add(1);
+                } else {
+                    pending_candidates.push((edge, next));
+                }
+            }
+        }
+        let primary_count: usize = primary.values().map(VecDeque::len).sum();
+        let mut frontier = Vec::new();
+        let mut targets = BTreeSet::new();
+        // Balance relation kinds before expanding a common-reference fanout.
+        while frontier.len() < neighbor_limit {
+            let mut advanced = false;
+            for neighbors in primary.values_mut() {
+                if frontier.len() >= neighbor_limit {
+                    break;
+                }
+                if let Some((edge, next)) = neighbors.pop_front() {
+                    advanced = true;
+                    if targets.insert(next) {
+                        frontier.push((edge, next));
+                    }
+                }
+            }
+            if !advanced {
+                break;
+            }
+        }
+        selected.fanout_omitted = selected
+            .fanout_omitted
+            .saturating_add(primary_count.saturating_sub(frontier.len()));
+        for (edge, next) in frontier {
+            if selected.nodes.len() >= limit {
+                selected.node_omitted = selected.node_omitted.saturating_add(1);
+                continue;
+            }
+            selected.nodes.push(next);
+            selected.edges.push(edge);
+            queue.push_back((next, depth.saturating_add(1)));
+        }
+    }
+    // Candidates share the total node budget and are admitted after strong paths.
+    // Their target never enters the traversal queue.
+    for (edge, next) in pending_candidates {
+        if !selected.nodes.contains(&next) {
+            if selected.nodes.len() >= limit {
+                selected.candidate_omitted = selected.candidate_omitted.saturating_add(1);
+                continue;
+            }
+            selected.nodes.push(next);
+        }
+        selected.edges.push(edge);
+        selected.candidates_returned = selected.candidates_returned.saturating_add(1);
+    }
+    selected
+}
 
 // ---------------------------------------------------------------------------
 // Built data
@@ -1610,6 +1822,10 @@ impl FixtureTools {
                 id,
                 kind: candidate.chunk.spec.kind,
                 title: candidate.chunk.spec.title.to_owned(),
+                snippet_lines: include_snippets.then_some(evidence.lines),
+                snippet_id: None,
+                snippet_truncated: false,
+                continuation_ids: vec![],
                 evidence,
                 snippet: include_snippets
                     .then(|| UntrustedText::repository(candidate.chunk.text.clone())),
@@ -1653,6 +1869,10 @@ impl FixtureTools {
                     id,
                     kind: HitKind::Contract,
                     title: contract.key.clone(),
+                    snippet_lines: None,
+                    snippet_id: None,
+                    snippet_truncated: false,
+                    continuation_ids: vec![],
                     evidence,
                     snippet: None,
                 });
@@ -1736,7 +1956,19 @@ impl FixtureTools {
             }
         }
         Ok(SearchOutput {
+            include_handles: input.include_handles.unwrap_or(false),
             query_class: classify_query(&input.query, exact_symbol),
+            diagnostics: None,
+            budget: input.token_budget.map(|requested| TokenBudget {
+                requested,
+                used: hits
+                    .iter()
+                    .filter_map(|hit| hit.snippet.as_ref().map(UntrustedText::text))
+                    .chain(memory_hits.iter().map(|hit| hit.record.body.text()))
+                    .fold(0u32, |total, text| {
+                        total.saturating_add(estimate_tokens(text))
+                    }),
+            }),
             hits,
             memory_hits,
             more_available: total > limit,
@@ -1909,6 +2141,31 @@ impl FixtureTools {
         }
         let start = find_flow_start(data, &state, &input);
         let mut gaps = resolved.gaps.clone();
+        if input.navigation.unwrap_or(false) {
+            let starts = find_flow_candidates(data, &state, &input);
+            if starts.len() > 1 {
+                let limit = usize::try_from(input.limit.unwrap_or(50)).unwrap_or(50);
+                let mut nodes = Vec::new();
+                for node in starts.iter().take(limit) {
+                    if let Some(spec) = NODES.iter().find(|spec| spec.node == *node) {
+                        nodes.push(flow_node(data, &resolved, spec)?);
+                    }
+                }
+                gaps.push(Gap::new(
+                    GapReason::LimitReached,
+                    format!(
+                        "{} start definitions match; navigation did not choose one or expand their relations; choose a source id or project from the candidate definitions",
+                        starts.len()
+                    ),
+                ));
+                return Ok(TraceFlowOutput {
+                    nodes,
+                    truncated: starts.len() > limit,
+                    gaps,
+                    ..TraceFlowOutput::default()
+                });
+            }
+        }
         let Some(start) = start else {
             gaps.push(Gap::new(
                 GapReason::NoCandidatesInSelectedRef,
@@ -1924,49 +2181,45 @@ impl FixtureTools {
         let max_depth = input.max_depth.unwrap_or(3);
         let limit = usize::try_from(input.limit.unwrap_or(50)).unwrap_or(50);
 
-        let mut visited: Vec<&str> = vec![start];
-        let mut edges_out = Vec::new();
-        let mut queue = VecDeque::from([(start, 0u8)]);
-        let mut truncated = false;
-        while let Some((node, depth)) = queue.pop_front() {
-            for edge in EDGES {
-                if !input.relations.is_empty() && !input.relations.contains(&edge.relation) {
-                    continue;
-                }
-                let next = match direction {
-                    FlowDirection::Downstream => (edge.from == node).then_some(edge.to),
-                    FlowDirection::Upstream => (edge.to == node).then_some(edge.from),
-                    FlowDirection::Both => {
-                        if edge.from == node {
-                            Some(edge.to)
-                        } else if edge.to == node {
-                            Some(edge.from)
-                        } else {
-                            None
-                        }
+        let (visited, edges_out, truncated) = if input.navigation.unwrap_or(false) {
+            let selection = fixture_navigation(start, &input, EDGES);
+            let truncated = selection.truncated();
+            gaps.extend(selection.gaps());
+            (selection.nodes, selection.edges, truncated)
+        } else {
+            let mut visited: Vec<&str> = vec![start];
+            let mut edges_out = Vec::new();
+            let mut queue = VecDeque::from([(start, 0u8)]);
+            let mut truncated = false;
+            while let Some((node, depth)) = queue.pop_front() {
+                for edge in EDGES {
+                    if !input.relations.is_empty() && !input.relations.contains(&edge.relation) {
+                        continue;
                     }
-                };
-                let Some(next) = next else {
-                    continue;
-                };
-                if depth >= max_depth {
-                    truncated = true;
-                    continue;
-                }
-                let already_listed = edges_out.iter().any(|e: &&EdgeSpec| std::ptr::eq(*e, edge));
-                if !already_listed {
-                    edges_out.push(edge);
-                }
-                if !visited.contains(&next) {
-                    if visited.len() >= limit {
+                    let Some(next) = fixture_trace_neighbor(edge, node, direction) else {
+                        continue;
+                    };
+                    if depth >= max_depth {
                         truncated = true;
                         continue;
                     }
-                    visited.push(next);
-                    queue.push_back((next, depth.saturating_add(1)));
+                    let already_listed =
+                        edges_out.iter().any(|e: &&EdgeSpec| std::ptr::eq(*e, edge));
+                    if !already_listed {
+                        edges_out.push(edge);
+                    }
+                    if !visited.contains(&next) {
+                        if visited.len() >= limit {
+                            truncated = true;
+                            continue;
+                        }
+                        visited.push(next);
+                        queue.push_back((next, depth.saturating_add(1)));
+                    }
                 }
             }
-        }
+            (visited, edges_out, truncated)
+        };
         let mut nodes = Vec::new();
         for node in &visited {
             let Some(spec) = NODES.iter().find(|n| n.node == *node) else {
@@ -1988,7 +2241,7 @@ impl FixtureTools {
                 to: edge.to.to_owned(),
                 relation: edge.relation,
                 evidence_type: edge.evidence_type,
-                resolution: Resolution::Resolved,
+                resolution: edge.resolution,
                 evidence,
             });
         }
@@ -2342,8 +2595,29 @@ impl FixtureTools {
     }
 
     fn do_build_context(&self, input: BuildContextInput) -> Result<BuildContextOutput, ToolError> {
+        input.validate()?;
+        if input.selection_strategy.is_some_and(|strategy| {
+            !matches!(
+                strategy,
+                crate::tools::ContextSelectionStrategy::Rank
+                    | crate::tools::ContextSelectionStrategy::Source
+            )
+        }) {
+            return Err(ToolError::invalid_input(
+                "experimental source selection requires the live engine",
+            ));
+        }
         let (data, mut state) = self.parts()?;
         let resolved = resolve(data, &mut state, &input.target)?;
+        if input
+            .projects
+            .iter()
+            .any(|project| data.project(project).is_none())
+        {
+            return Err(ToolError::not_found(
+                "a selected project does not exist in this workspace",
+            ));
+        }
         if let Some(job_id) = &input.job_id {
             return Err(ToolError::not_found(format!(
                 "context job {job_id} does not exist"
@@ -2354,6 +2628,23 @@ impl FixtureTools {
             |section: ContextSection| input.include.is_empty() || input.include.contains(&section);
         let task = input.task.as_deref().unwrap_or_default().to_lowercase();
         let tokens = query_tokens(&task);
+        let source_allowed = |evidence: &Evidence| {
+            (input.projects.is_empty() || input.projects.contains(&evidence.project))
+                && (input.path_prefixes.is_empty()
+                    || input
+                        .path_prefixes
+                        .iter()
+                        .any(|prefix| evidence.path.as_str().starts_with(prefix.trim())))
+                && (input.languages.is_empty()
+                    || data
+                        .file(&evidence.project, &evidence.path)
+                        .is_some_and(|(_, file)| {
+                            input
+                                .languages
+                                .iter()
+                                .any(|language| language == file.language)
+                        }))
+        };
 
         // (chunk key, section, kind, why, base priority)
         let code_entries: [(&str, ContextSection, EntryKind, &str); 7] = [
@@ -2411,6 +2702,9 @@ impl FixtureTools {
             let Some((id, evidence)) = chunk_evidence(data, &resolved, chunk, Vec::new())? else {
                 continue;
             };
+            if !source_allowed(&evidence) {
+                continue;
+            }
             let focus_hit = input
                 .focus_symbols
                 .iter()
@@ -2443,14 +2737,23 @@ impl FixtureTools {
                     evidence: Some(evidence),
                     memory_id: None,
                     content,
+                    content_lines: None,
+                    content_truncated: false,
+                    continuation_ids: vec![],
                 },
             ));
         }
         if wants(ContextSection::Contracts) {
-            for contract in fixture_contracts(data, &resolved)?
+            for mut contract in fixture_contracts(data, &resolved)?
                 .into_iter()
                 .filter(|c| c.key.contains("cancel"))
             {
+                contract
+                    .participants
+                    .retain(|participant| source_allowed(&participant.evidence));
+                if contract.participants.is_empty() {
+                    continue;
+                }
                 let summary = format!(
                     "{} {}: {}",
                     match contract.kind {
@@ -2480,11 +2783,23 @@ impl FixtureTools {
                         evidence: contract.participants.first().map(|p| p.evidence.clone()),
                         memory_id: None,
                         content,
+                        content_lines: None,
+                        content_truncated: false,
+                        continuation_ids: vec![],
                     },
                 ));
             }
         }
         for record in memory_visible_newest_first(&state) {
+            if !input.projects.is_empty()
+                && record
+                    .scope
+                    .project
+                    .as_ref()
+                    .is_some_and(|project| !input.projects.contains(project))
+            {
+                continue;
+            }
             let (section, kind, score) = match (record.kind, record.status) {
                 (MemoryKind::Rule, MemoryStatus::Accepted) => {
                     (ContextSection::Rules, EntryKind::Rule, 50)
@@ -2514,6 +2829,9 @@ impl FixtureTools {
                     evidence: None,
                     memory_id: Some(record.id.clone()),
                     content,
+                    content_lines: None,
+                    content_truncated: false,
+                    continuation_ids: vec![],
                 },
             ));
         }
@@ -2531,17 +2849,38 @@ impl FixtureTools {
             used = next;
             entries.push(entry);
         }
-        let mut gaps = resolved.gaps.clone();
+        let mut gaps: Vec<_> = resolved
+            .gaps
+            .iter()
+            .filter(|gap| {
+                input.projects.is_empty()
+                    || gap
+                        .project
+                        .as_ref()
+                        .is_none_or(|project| input.projects.contains(project))
+            })
+            .cloned()
+            .collect();
         if skipped > 0 {
             gaps.push(Gap::new(
                 GapReason::BudgetExhausted,
                 format!("{skipped} more relevant entries did not fit the budget; raise token_budget or narrow the task"),
             ));
         }
-        gaps.extend(not_indexed_gaps(data, &resolved, None));
-        let uncertainties = if resolved
-            .view(&static_name(NOTIFIER).map_err(ToolError::internal)?)
-            .is_some()
+        gaps.extend(not_indexed_gaps(data, &resolved, Some(&input.projects)));
+        let notifier = static_name(NOTIFIER).map_err(ToolError::internal)?;
+        if entries.is_empty() && skipped == 0 && gaps.is_empty() {
+            gaps.push(Gap::new(
+                if input.projects.is_empty() && input.path_prefixes.is_empty() && input.languages.is_empty() {
+                    GapReason::NoMatches
+                } else {
+                    GapReason::FiltersExcludedAll
+                },
+                "no fixture context sources matched the selected scope; this does not establish absence",
+            ));
+        }
+        let uncertainties = if (input.projects.is_empty() || input.projects.contains(&notifier))
+            && resolved.view(&notifier).is_some()
         {
             vec![
                 "notifier is not indexed: consumers of subscription.cancelled there are unknown."
@@ -2553,6 +2892,7 @@ impl FixtureTools {
         Ok(BuildContextOutput {
             entries,
             budget: TokenBudget { requested, used },
+            selection: None,
             uncertainties,
             job: None,
             gaps,
@@ -3406,6 +3746,26 @@ fn find_flow_start(data: &Data, state: &State, input: &TraceFlowInput) -> Option
         .map(|n| n.node)
 }
 
+fn find_flow_candidates(data: &Data, state: &State, input: &TraceFlowInput) -> Vec<&'static str> {
+    if input.contract.is_some() {
+        return find_flow_start(data, state, input).into_iter().collect();
+    }
+    let symbol = SymbolRef {
+        id: input.id.clone(),
+        symbol: input.symbol.clone(),
+        project: input.project.clone(),
+    };
+    find_symbols(data, state, &symbol)
+        .into_iter()
+        .filter_map(|chunk| {
+            NODES
+                .iter()
+                .find(|node| node.chunk == Some(chunk.spec.key))
+                .map(|node| node.node)
+        })
+        .collect()
+}
+
 fn node_label(node: &str) -> String {
     NODES
         .iter()
@@ -3665,6 +4025,7 @@ fn fetched_item(
         .ok_or_else(|| ToolError::internal("fixture view has no evidence"))?;
     let id = result_id(&evidence.project, &evidence.commit, &file.path, range)?;
     Ok(FetchedItem {
+        continuation_ids: vec![],
         id,
         language: Some(file.language.to_owned()),
         content: UntrustedText::repository(slice_lines(file.content, range)),
@@ -3857,6 +4218,423 @@ impl KnowellTools for FixtureTools {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn navigation_edge(
+        from: &'static str,
+        to: &'static str,
+        relation: RelationKind,
+        evidence_type: EvidenceType,
+        resolution: Resolution,
+    ) -> EdgeSpec {
+        EdgeSpec {
+            from,
+            to,
+            relation,
+            evidence_type,
+            resolution,
+            site: SITE_CALL_CANCEL,
+        }
+    }
+
+    fn navigation_input() -> TraceFlowInput {
+        TraceFlowInput {
+            target: Target::workspace(Name::new(FIXTURE_WORKSPACE).unwrap(), Vec::new()),
+            symbol: Some("PaymentService.cancelSubscription".to_owned()),
+            navigation: Some(true),
+            max_depth: Some(5),
+            ..TraceFlowInput::default()
+        }
+    }
+
+    #[test]
+    fn fixture_navigation_keeps_legacy_optional_and_reuses_strong_routes() {
+        let tools = FixtureTools::new();
+        let mut input = navigation_input();
+        input.navigation = None;
+        let legacy = tools.do_trace_flow(input.clone()).unwrap();
+        input.navigation = Some(false);
+        assert_eq!(tools.do_trace_flow(input.clone()).unwrap(), legacy);
+        input.navigation = Some(true);
+        assert_eq!(tools.do_trace_flow(input).unwrap(), legacy);
+        assert_eq!(legacy.edges.len(), 1);
+    }
+
+    #[test]
+    fn fixture_navigation_does_not_guess_an_ambiguous_start() {
+        let tools = FixtureTools::new();
+        let input = TraceFlowInput {
+            symbol: Some("cancelSubscription".to_owned()),
+            ..navigation_input()
+        };
+        let output = tools.do_trace_flow(input).unwrap();
+        assert_eq!(output.nodes.len(), 2);
+        assert!(output.edges.is_empty());
+        assert!(!output.truncated);
+        assert!(
+            output
+                .gaps
+                .iter()
+                .any(|gap| gap.reason == GapReason::LimitReached)
+        );
+        assert!(
+            output
+                .nodes
+                .iter()
+                .all(|node| node.id.is_some() && node.evidence.is_some()),
+            "ambiguous starts retain exact source identities"
+        );
+    }
+
+    #[test]
+    fn fixture_navigation_candidates_are_non_expanding_and_marked_uncertain() {
+        let edges = [
+            navigation_edge(
+                "start",
+                "primary",
+                RelationKind::Calls,
+                EvidenceType::ContractDerived,
+                Resolution::Resolved,
+            ),
+            navigation_edge(
+                "start",
+                "weak",
+                RelationKind::References,
+                EvidenceType::HeuristicMatch,
+                Resolution::Resolved,
+            ),
+            navigation_edge(
+                "start",
+                "ambiguous",
+                RelationKind::Calls,
+                EvidenceType::SemanticallyResolved,
+                Resolution::Ambiguous,
+            ),
+            navigation_edge(
+                "start",
+                "unresolved",
+                RelationKind::Imports,
+                EvidenceType::RuntimeObservation,
+                Resolution::Unresolved,
+            ),
+            navigation_edge(
+                "weak",
+                "hidden-weak-child",
+                RelationKind::Calls,
+                EvidenceType::SemanticallyResolved,
+                Resolution::Resolved,
+            ),
+            navigation_edge(
+                "ambiguous",
+                "hidden-ambiguous-child",
+                RelationKind::Calls,
+                EvidenceType::SemanticallyResolved,
+                Resolution::Resolved,
+            ),
+            navigation_edge(
+                "unresolved",
+                "hidden-unresolved-child",
+                RelationKind::Calls,
+                EvidenceType::SemanticallyResolved,
+                Resolution::Resolved,
+            ),
+        ];
+        let selection = fixture_navigation("start", &navigation_input(), &edges);
+        assert_eq!(selection.nodes.len(), 5);
+        assert_eq!(selection.nodes.get(1), Some(&"primary"));
+        assert_eq!(selection.candidates_returned, 3);
+        assert_eq!(selection.edges.len(), 4);
+        assert!(
+            selection
+                .nodes
+                .iter()
+                .all(|node| !node.starts_with("hidden-"))
+        );
+        assert!(!selection.truncated());
+        assert!(
+            selection
+                .gaps()
+                .iter()
+                .any(|gap| gap.reason == GapReason::RelationsNotReady)
+        );
+        let ambiguous = selection
+            .edges
+            .iter()
+            .find(|edge| edge.to == "ambiguous")
+            .unwrap();
+        assert_eq!(ambiguous.resolution, Resolution::Ambiguous);
+    }
+
+    #[test]
+    fn fixture_navigation_balances_relation_kinds_and_is_order_independent() {
+        let mut edges = [
+            navigation_edge(
+                "start",
+                "reference-a",
+                RelationKind::References,
+                EvidenceType::SyntacticObservation,
+                Resolution::Resolved,
+            ),
+            navigation_edge(
+                "start",
+                "reference-b",
+                RelationKind::References,
+                EvidenceType::SyntacticObservation,
+                Resolution::Resolved,
+            ),
+            navigation_edge(
+                "start",
+                "reference-c",
+                RelationKind::References,
+                EvidenceType::SyntacticObservation,
+                Resolution::Resolved,
+            ),
+            navigation_edge(
+                "start",
+                "call",
+                RelationKind::Calls,
+                EvidenceType::SemanticallyResolved,
+                Resolution::Resolved,
+            ),
+            navigation_edge(
+                "start",
+                "test",
+                RelationKind::Tests,
+                EvidenceType::SyntacticObservation,
+                Resolution::Resolved,
+            ),
+        ];
+        let input = TraceFlowInput {
+            neighbor_limit: Some(3),
+            ..navigation_input()
+        };
+        let first = fixture_navigation("start", &input, &edges);
+        assert!(first.nodes.contains(&"call") && first.nodes.contains(&"test"));
+        assert_eq!(first.nodes.len(), 4);
+        assert_eq!(first.fanout_omitted, 2);
+        let order = first.nodes.clone();
+        edges.reverse();
+        assert_eq!(fixture_navigation("start", &input, &edges).nodes, order);
+    }
+
+    #[test]
+    fn fixture_navigation_duplicate_targets_do_not_spend_another_neighbor_slot() {
+        let edges = [
+            navigation_edge(
+                "start",
+                "shared",
+                RelationKind::Calls,
+                EvidenceType::SemanticallyResolved,
+                Resolution::Resolved,
+            ),
+            navigation_edge(
+                "start",
+                "shared",
+                RelationKind::References,
+                EvidenceType::SyntacticObservation,
+                Resolution::Resolved,
+            ),
+            navigation_edge(
+                "start",
+                "test",
+                RelationKind::Tests,
+                EvidenceType::SyntacticObservation,
+                Resolution::Resolved,
+            ),
+        ];
+        let input = TraceFlowInput {
+            neighbor_limit: Some(2),
+            ..navigation_input()
+        };
+        let selection = fixture_navigation("start", &input, &edges);
+        assert!(selection.nodes.contains(&"shared") && selection.nodes.contains(&"test"));
+        assert_eq!(selection.nodes.len(), 3);
+    }
+
+    #[test]
+    fn fixture_navigation_candidate_budget_is_global_and_preserves_endpoint_closure() {
+        let edges = [
+            navigation_edge(
+                "start",
+                "primary",
+                RelationKind::Calls,
+                EvidenceType::SemanticallyResolved,
+                Resolution::Resolved,
+            ),
+            navigation_edge(
+                "primary",
+                "leaf",
+                RelationKind::Calls,
+                EvidenceType::SemanticallyResolved,
+                Resolution::Resolved,
+            ),
+            navigation_edge(
+                "start",
+                "candidate-a",
+                RelationKind::References,
+                EvidenceType::HeuristicMatch,
+                Resolution::Resolved,
+            ),
+            navigation_edge(
+                "primary",
+                "candidate-b",
+                RelationKind::References,
+                EvidenceType::HeuristicMatch,
+                Resolution::Resolved,
+            ),
+            navigation_edge(
+                "leaf",
+                "candidate-c",
+                RelationKind::References,
+                EvidenceType::HeuristicMatch,
+                Resolution::Resolved,
+            ),
+        ];
+        let mut input = TraceFlowInput {
+            candidate_limit: Some(1),
+            limit: Some(4),
+            ..navigation_input()
+        };
+        let selection = fixture_navigation("start", &input, &edges);
+        assert_eq!(selection.candidates_returned, 1);
+        assert_eq!(selection.candidate_omitted, 2);
+        assert_eq!(selection.nodes, ["start", "primary", "leaf", "candidate-a"]);
+        assert!(selection.edges.iter().all(|edge| {
+            selection.nodes.contains(&edge.from) && selection.nodes.contains(&edge.to)
+        }));
+        input.limit = Some(3);
+        let tight = fixture_navigation("start", &input, &edges);
+        assert_eq!(tight.candidates_returned, 0);
+        assert_eq!(tight.candidate_omitted, 3);
+        assert_eq!(tight.nodes, ["start", "primary", "leaf"]);
+        assert_eq!(tight.edges.len(), 2);
+        input.candidate_limit = Some(0);
+        let disabled = fixture_navigation("start", &input, &edges);
+        assert_eq!(disabled.candidates_returned, 0);
+        assert_eq!(disabled.candidate_omitted, 3);
+    }
+
+    #[test]
+    fn fixture_navigation_reports_depth_and_primary_node_omissions() {
+        let edges = [
+            navigation_edge(
+                "start",
+                "next",
+                RelationKind::Calls,
+                EvidenceType::SyntacticObservation,
+                Resolution::Resolved,
+            ),
+            navigation_edge(
+                "next",
+                "beyond",
+                RelationKind::References,
+                EvidenceType::HeuristicMatch,
+                Resolution::Resolved,
+            ),
+        ];
+        let mut input = TraceFlowInput {
+            max_depth: Some(1),
+            ..navigation_input()
+        };
+        let shallow = fixture_navigation("start", &input, &edges);
+        assert_eq!(shallow.depth_omitted, 1);
+        assert!(shallow.truncated());
+        input.limit = Some(1);
+        let tight = fixture_navigation("start", &input, &edges);
+        assert_eq!(tight.node_omitted, 1);
+        assert_eq!(tight.nodes, ["start"]);
+        assert!(
+            tight
+                .gaps()
+                .iter()
+                .any(|gap| gap.reason == GapReason::LimitReached)
+        );
+    }
+
+    #[test]
+    fn fixture_navigation_both_charges_each_candidate_edge_once_before_budget() {
+        let edges = [
+            navigation_edge(
+                "start",
+                "a",
+                RelationKind::Calls,
+                EvidenceType::SemanticallyResolved,
+                Resolution::Resolved,
+            ),
+            navigation_edge(
+                "start",
+                "b",
+                RelationKind::Calls,
+                EvidenceType::SemanticallyResolved,
+                Resolution::Resolved,
+            ),
+            navigation_edge(
+                "a",
+                "b",
+                RelationKind::References,
+                EvidenceType::HeuristicMatch,
+                Resolution::Resolved,
+            ),
+            navigation_edge(
+                "b",
+                "c",
+                RelationKind::References,
+                EvidenceType::HeuristicMatch,
+                Resolution::Resolved,
+            ),
+        ];
+        for (candidate_limit, returned, omitted) in [(2, 2, 0), (1, 1, 1), (0, 0, 2)] {
+            let input = TraceFlowInput {
+                direction: Some(FlowDirection::Both),
+                candidate_limit: Some(candidate_limit),
+                ..navigation_input()
+            };
+            let selection = fixture_navigation("start", &input, &edges);
+            assert_eq!(selection.candidates_returned, returned);
+            assert_eq!(selection.candidate_omitted, omitted);
+            assert!(selection.edges.iter().all(|edge| {
+                selection.nodes.contains(&edge.from) && selection.nodes.contains(&edge.to)
+            }));
+        }
+    }
+
+    #[test]
+    fn fixture_navigation_honors_direction_and_filters_without_claiming_absence() {
+        let edges = [
+            navigation_edge(
+                "upstream",
+                "start",
+                RelationKind::Calls,
+                EvidenceType::RuntimeObservation,
+                Resolution::Resolved,
+            ),
+            navigation_edge(
+                "start",
+                "downstream",
+                RelationKind::Imports,
+                EvidenceType::ModelSuggestion,
+                Resolution::Resolved,
+            ),
+        ];
+        let input = TraceFlowInput {
+            direction: Some(FlowDirection::Upstream),
+            relations: vec![RelationKind::Calls],
+            ..navigation_input()
+        };
+        let selection = fixture_navigation("start", &input, &edges);
+        assert_eq!(selection.nodes, ["start", "upstream"]);
+        assert_eq!(selection.edges.len(), 1);
+        let missing = TraceFlowInput {
+            relations: vec![RelationKind::Tests],
+            ..input
+        };
+        let empty = fixture_navigation("start", &missing, &edges);
+        assert_eq!(empty.nodes, ["start"]);
+        assert!(!empty.truncated());
+        assert_eq!(
+            empty.gaps().first().map(|gap| gap.reason),
+            Some(GapReason::NoCandidatesInSelectedRef)
+        );
+    }
 
     #[test]
     fn fixture_data_builds() {

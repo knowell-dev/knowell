@@ -8,7 +8,8 @@ use knowell_engine::{Access, HybridRetriever};
 use knowell_eval::{Bm25Retriever, GrepRetriever, QuerySet, Retriever, run, walk_fixture};
 use knowell_index::Priority;
 use knowell_mcp::tools::{
-    AnalyzeImpactInput, BuildContextInput, ChangeSubject, ContractsInput, FetchInput, HistoryInput,
+    AnalyzeImpactInput, BuildContextInput, ChangeSubject, ContextRole, ContextSection,
+    ContextSelectionStrategy, ContractsInput, EntryKind, FetchInput, HistoryInput,
     IndexStatusInput, InspectSymbolInput, MemoryKind, MemoryScope, MemoryStatus,
     OpenWorkspaceInput, ReadMemoryInput, ResumeTaskInput, SaveCheckpointInput, ScopeLevel,
     SearchInput, SearchKind, TierState, TraceFlowInput, WriteMemoryInput,
@@ -35,6 +36,809 @@ fn project_search(project: &str, query: &str, target: Target) -> SearchInput {
         projects: vec![name(project)],
         ..SearchInput::default()
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn identical_source_bodies_keep_occurrence_languages_in_catalogue_and_search() {
+    if !git_available() {
+        return;
+    }
+    let db = require_db!();
+    let mut ws = fixture_workspace();
+    ws.resolved
+        .projects
+        .retain(|project| project.name.as_str() == "handbook");
+    let body = "// quokka_locus_marker shared note\n".repeat(16);
+    for path in ["quokka-note.md", "quokka-note.rs"] {
+        std::fs::write(ws.project_dir("handbook").join(path), &body).unwrap();
+    }
+    ws.commit_all("handbook", "add synthetic shared-body language cases");
+    let data = tempfile::tempdir().unwrap();
+    let engine = indexed_engine(&db, &ws, data.path()).await;
+    let caller = alice_caller();
+    let opened = engine
+        .open_workspace(&caller, OpenWorkspaceInput::default())
+        .await
+        .unwrap();
+    let project = opened
+        .projects
+        .iter()
+        .find(|project| project.name.as_str() == "handbook")
+        .unwrap();
+    assert!(project.languages.iter().any(|language| language == "rust"));
+    assert!(
+        project
+            .languages
+            .iter()
+            .any(|language| language == "markdown")
+    );
+
+    let mut hashes = Vec::new();
+    for (language, path) in [("rust", "quokka-note.rs"), ("markdown", "quokka-note.md")] {
+        let mut input = project_search(
+            "handbook",
+            "quokka_locus_marker",
+            context_target(&opened.context_id),
+        );
+        input.languages = vec![language.to_owned()];
+        // Other handbook documents are valid semantic neighbors. Restrict the
+        // two shared-body occurrences before asserting exact path admission.
+        input.path_prefixes = vec!["quokka-note.".to_owned()];
+        input.include_diagnostics = Some(true);
+        let result = engine.search(&caller, input).await.unwrap();
+        assert!(!result.hits.is_empty(), "missing {language} occurrence");
+        assert!(
+            result
+                .hits
+                .iter()
+                .all(|hit| hit.evidence.path.as_str() == path)
+        );
+        assert!(result.diagnostics.as_ref().unwrap().semantic_neighbors > 0);
+        hashes.push(result.hits.first().unwrap().evidence.content_hash);
+    }
+    assert_eq!(hashes.first(), hashes.get(1));
+
+    // This control checks occurrence admission, independently of the Source
+    // selector's optional omission of repetitive displayed bodies.
+    let mut admitted = project_search(
+        "handbook",
+        "quokka_locus_marker",
+        context_target(&opened.context_id),
+    );
+    admitted.include_snippets = Some(false);
+    let result = engine.search(&caller, admitted).await.unwrap();
+    for path in ["quokka-note.md", "quokka-note.rs"] {
+        assert!(
+            result
+                .hits
+                .iter()
+                .any(|hit| hit.evidence.path.as_str() == path)
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn overlay_only_code_language_reports_missing_relations_on_a_document_base() {
+    if !git_available() {
+        eprintln!("skipping: git is not installed");
+        return;
+    }
+    let db = require_db!();
+    let mut ws = fixture_workspace();
+    ws.resolved
+        .projects
+        .retain(|project| project.name.as_str() == "handbook");
+    let data = tempfile::tempdir().unwrap();
+    let engine = indexed_engine(&db, &ws, data.path()).await;
+    let caller = alice_caller();
+    let worktree = ws.dir.path().join("handbook-overlay");
+    ws.git(
+        "handbook",
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature/overlay-coverage",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(
+        worktree.join("overlay-guide.md"),
+        "# Overlay guide\n\nSynthetic documentation.\n",
+    )
+    .unwrap();
+    ws.git_in(&worktree, &["add", "--", "overlay-guide.md"]);
+    let documents = engine
+        .open_workspace(
+            &caller,
+            OpenWorkspaceInput {
+                working_directory: Some(worktree.to_string_lossy().into_owned()),
+                ..OpenWorkspaceInput::default()
+            },
+        )
+        .await
+        .unwrap();
+    let document_search = engine
+        .search(
+            &caller,
+            project_search(
+                "handbook",
+                "overlay-guide.md",
+                context_target(&documents.context_id),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(
+        document_search
+            .hits
+            .iter()
+            .any(|hit| hit.evidence.layer == ViewLayer::Personal)
+    );
+    assert!(
+        document_search
+            .gaps
+            .iter()
+            .all(|gap| gap.reason != GapReason::NoReferenceResolutionForLanguage)
+    );
+    let document_context = engine
+        .build_context(
+            &caller,
+            BuildContextInput {
+                target: context_target(&documents.context_id),
+                task: Some("overlay-guide.md".into()),
+                include: vec![ContextSection::Docs],
+                ..BuildContextInput::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!document_context.entries.is_empty());
+    assert!(
+        document_context
+            .uncertainties
+            .iter()
+            .all(|text| !text.contains("references are not resolved"))
+    );
+
+    std::fs::write(
+        worktree.join("overlay_probe.rs"),
+        "pub fn overlay_probe() -> u32 { 7 }\n",
+    )
+    .unwrap();
+    ws.git_in(&worktree, &["add", "--", "overlay_probe.rs"]);
+    let code = engine
+        .open_workspace(
+            &caller,
+            OpenWorkspaceInput {
+                working_directory: Some(worktree.to_string_lossy().into_owned()),
+                ..OpenWorkspaceInput::default()
+            },
+        )
+        .await
+        .unwrap();
+    let code_search = engine
+        .search(
+            &caller,
+            project_search(
+                "handbook",
+                "overlay_probe.rs",
+                context_target(&code.context_id),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(
+        code_search
+            .hits
+            .iter()
+            .any(|hit| hit.evidence.layer == ViewLayer::Personal
+                && hit.evidence.path.as_str() == "overlay_probe.rs")
+    );
+    assert!(code_search.gaps.iter().any(|gap| {
+        gap.reason == GapReason::NoReferenceResolutionForLanguage
+            && gap
+                .project
+                .as_ref()
+                .is_some_and(|project| project.as_str() == "handbook")
+            && gap.message.contains("rust")
+    }));
+    let code_context = engine
+        .build_context(
+            &caller,
+            BuildContextInput {
+                target: context_target(&code.context_id),
+                task: Some("overlay_probe.rs".into()),
+                include: vec![ContextSection::Code],
+                ..BuildContextInput::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!code_context.entries.is_empty());
+    assert!(
+        code_context
+            .uncertainties
+            .iter()
+            .all(|text| !text.contains("references are not resolved")
+                && !text.contains("compiler reference resolution"))
+    );
+    let overlay_source = code_context
+        .entries
+        .iter()
+        .find(|entry| {
+            entry.evidence.as_ref().is_some_and(|evidence| {
+                evidence.layer == ViewLayer::Personal
+                    && evidence.path.as_str() == "overlay_probe.rs"
+            })
+        })
+        .unwrap();
+    assert_eq!(
+        overlay_source.content.text(),
+        "pub fn overlay_probe() -> u32 { 7 }\n"
+    );
+    let fetched = engine
+        .fetch(
+            &caller,
+            FetchInput {
+                target: context_target(&code.context_id),
+                ids: vec![overlay_source.id.clone()],
+                ..FetchInput::default()
+            },
+        )
+        .await
+        .unwrap();
+    let fetched = fetched.items.first().unwrap();
+    let evidence = overlay_source.evidence.as_ref().unwrap();
+    assert_eq!(fetched.evidence.layer, ViewLayer::Personal);
+    assert_eq!(fetched.evidence.content_hash, evidence.content_hash);
+    assert_eq!(fetched.evidence.commit, evidence.commit);
+    assert_eq!(fetched.evidence.lines, evidence.lines);
+    assert_eq!(fetched.content.text(), overlay_source.content.text());
+    let legacy_context = engine
+        .build_context(
+            &caller,
+            BuildContextInput {
+                target: context_target(&code.context_id),
+                task: Some("overlay_probe.rs".into()),
+                include: vec![ContextSection::Code],
+                selection_strategy: Some(ContextSelectionStrategy::Rank),
+                ..BuildContextInput::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!legacy_context.entries.is_empty());
+    assert!(
+        legacy_context
+            .uncertainties
+            .iter()
+            .any(|text| text.contains("rust") && text.contains("call or test coverage"))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn search_diagnostics_are_opt_in_and_snippets_preserve_full_fetch_identity() {
+    if !git_available() {
+        eprintln!("skipping: git is not installed");
+        return;
+    }
+    let db = require_db!();
+    let mut ws = fixture_workspace();
+    ws.resolved
+        .projects
+        .retain(|project| project.name.as_str() == "billing-api");
+    let path = "src/diagnostic-long.ts";
+    let mut source = "export function diagnosticLong(value: number): number {\n".to_owned();
+    for ordinal in 0..90 {
+        source.push_str(&format!("  value += {ordinal};\n"));
+    }
+    source.push_str("  return value;\n}\n");
+    std::fs::write(ws.project_dir("billing-api").join(path), &source).unwrap();
+    ws.commit_all("billing-api", "add synthetic long diagnostic source");
+    let data = tempfile::tempdir().unwrap();
+    let engine = indexed_engine(&db, &ws, data.path()).await;
+    let caller = alice_caller();
+    let opened = engine
+        .open_workspace(&caller, OpenWorkspaceInput::default())
+        .await
+        .unwrap();
+    let target = context_target(&opened.context_id);
+    let mut input = project_search("billing-api", path, target.clone());
+    input.kinds = vec![SearchKind::Code];
+    let ordinary = engine.search(&caller, input.clone()).await.unwrap();
+    assert!(ordinary.diagnostics.is_none());
+    assert!(
+        serde_json::to_value(&ordinary)
+            .unwrap()
+            .get("diagnostics")
+            .is_none()
+    );
+    let full = ordinary
+        .hits
+        .iter()
+        .find(|hit| hit.evidence.path.as_str() == path && hit.evidence.lines.line_count() > 40)
+        .unwrap();
+    let displayed = full.snippet_lines.unwrap();
+    assert_eq!(displayed, full.evidence.lines);
+    assert!(!full.snippet_truncated);
+    let shown = full.snippet.as_ref().unwrap().text();
+    assert_eq!(
+        u32::try_from(shown.lines().count()).unwrap(),
+        displayed.line_count()
+    );
+    assert!(shown.contains("  return value;"));
+    assert!(shown.trim_end().ends_with('}'));
+
+    input.include_diagnostics = Some(true);
+    input.include_snippets = Some(false);
+    let without_text = engine.search(&caller, input).await.unwrap();
+    let same = without_text
+        .hits
+        .iter()
+        .find(|hit| hit.id == full.id)
+        .unwrap();
+    assert_eq!(same.evidence, full.evidence);
+    assert!(same.snippet.is_none() && same.snippet_lines.is_none());
+    assert!(!same.snippet_truncated);
+    let path_work = without_text.diagnostics.unwrap();
+    assert!(path_work.exact_path_embedding_bypassed);
+    assert_eq!(path_work.embedding_calls, 0);
+    assert!(path_work.embedding.is_none());
+    let fetched = engine
+        .fetch(
+            &caller,
+            FetchInput {
+                target: target.clone(),
+                ids: vec![full.id.clone()],
+                context_lines: Some(0),
+                ..FetchInput::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(fetched.items.len(), 1);
+    assert_eq!(fetched.items[0].evidence.lines, full.evidence.lines);
+    assert_eq!(
+        fetched.items[0].evidence.content_hash,
+        full.evidence.content_hash
+    );
+    let expected = fetched.items[0].content.text();
+    assert_eq!(full.snippet.as_ref().unwrap().text(), expected);
+    assert!(fetched.items[0].content.text().lines().count() > 40);
+
+    let mut semantic = project_search("billing-api", "cancel subscription", target);
+    semantic.kinds = vec![SearchKind::Code];
+    semantic.include_diagnostics = Some(true);
+    let measured = engine.search(&caller, semantic).await.unwrap();
+    assert!(!measured.hits.is_empty());
+    let work = measured.diagnostics.unwrap();
+    assert!(work.lexical_queries > 0 && work.lexical_file_hits > 0 && work.lexical_spans > 0);
+    assert!(work.semantic_queries > 0 && work.semantic_neighbors > 0);
+    assert!(work.embedding_calls > 0);
+    assert_eq!(work.embedding_failures, 0);
+    assert!(!work.exact_path_embedding_bypassed);
+    let usage = work.embedding.unwrap();
+    assert!(usage.input_tokens > 0 && usage.requests > 0);
+    assert!(
+        usage.tokens_estimated,
+        "the fake provider has no reported token count"
+    );
+    assert_eq!(usage.retries, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bounded_context_reports_only_emitted_fetchable_evidence_and_keeps_unknown_roles() {
+    if !git_available() {
+        eprintln!("skipping: git is not installed");
+        return;
+    }
+    let db = require_db!();
+    let mut ws = fixture_workspace();
+    ws.resolved
+        .projects
+        .retain(|project| project.name.as_str() == "billing-api");
+    let data = tempfile::tempdir().unwrap();
+    let engine = indexed_engine(&db, &ws, data.path()).await;
+    let caller = alice_caller();
+    let opened = engine
+        .open_workspace(&caller, OpenWorkspaceInput::default())
+        .await
+        .unwrap();
+    let target = context_target(&opened.context_id);
+    let mut input = BuildContextInput {
+        target: target.clone(),
+        task: Some("SubscriptionService.cancelSubscription".to_owned()),
+        token_budget: Some(8000),
+        include: vec![ContextSection::Code],
+        ..BuildContextInput::default()
+    };
+    let ordinary = engine.build_context(&caller, input.clone()).await.unwrap();
+    let ordinary_selection = ordinary.selection.as_ref().unwrap();
+    assert_eq!(
+        ordinary_selection.strategy,
+        ContextSelectionStrategy::Source
+    );
+    assert!(
+        ordinary_selection.considered_candidates > 0
+            && ordinary_selection.considered_candidates <= 64
+    );
+    assert!(ordinary_selection.evaluations > 0 && ordinary_selection.evaluations <= 256);
+    assert!(ordinary_selection.covered_roles.is_empty());
+    assert!(ordinary_selection.missing_roles.is_empty());
+    assert!(ordinary_selection.steps.is_empty());
+    assert!(!ordinary.entries.is_empty());
+    assert!(ordinary.budget.used <= ordinary.budget.requested);
+    for entry in &ordinary.entries {
+        assert!(!matches!(
+            entry.kind,
+            EntryKind::Signature | EntryKind::Skeleton
+        ));
+        let evidence = entry.evidence.as_ref().unwrap();
+        assert_eq!(entry.content_lines, Some(evidence.lines));
+        let fetched = engine
+            .fetch(
+                &caller,
+                FetchInput {
+                    target: target.clone(),
+                    ids: vec![entry.id.clone()],
+                    context_lines: Some(0),
+                    ..FetchInput::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(fetched.items.len(), 1);
+        let source = fetched.items.first().unwrap();
+        assert_eq!(source.evidence.lines, evidence.lines);
+        assert_eq!(source.evidence.content_hash, evidence.content_hash);
+        assert_eq!(source.evidence.commit, evidence.commit);
+        assert_eq!(source.content.text(), entry.content.text());
+    }
+    input.selection_strategy = Some(ContextSelectionStrategy::BoundedBundles);
+    input.desired_roles = vec![
+        ContextRole::Entry,
+        ContextRole::Config,
+        ContextRole::Implementation,
+        ContextRole::Caller,
+        ContextRole::Callee,
+        ContextRole::Surroundings,
+    ];
+    let packed = engine.build_context(&caller, input).await.unwrap();
+    assert!(!packed.entries.is_empty());
+    assert!(packed.budget.used <= packed.budget.requested);
+    let selection = packed.selection.as_ref().unwrap();
+    assert_eq!(selection.strategy, ContextSelectionStrategy::BoundedBundles);
+    assert!(selection.considered_candidates > 0 && selection.considered_candidates <= 32);
+    assert!(selection.evaluations > 0 && selection.evaluations <= 256);
+    assert!(!selection.steps.is_empty());
+    for unsupported in [
+        ContextRole::Entry,
+        ContextRole::Config,
+        ContextRole::Caller,
+        ContextRole::Callee,
+    ] {
+        assert!(
+            selection.missing_roles.contains(&unsupported),
+            "{selection:?}"
+        );
+        assert!(!selection.covered_roles.contains(&unsupported));
+        assert!(!selection.steps.iter().any(|step| step.role == unsupported));
+    }
+    // This language has import evidence, which must not become a call graph.
+    assert!(packed.uncertainties.iter().any(|text| {
+        text.contains("shown structural relations do not prove call or test coverage")
+    }));
+    for step in &selection.steps {
+        assert!(!step.source_ids.is_empty());
+        assert!(selection.covered_roles.contains(&step.role));
+        for id in &step.source_ids {
+            let entry = packed.entries.iter().find(|entry| &entry.id == id).unwrap();
+            assert!(!matches!(
+                entry.kind,
+                EntryKind::Signature | EntryKind::Skeleton
+            ));
+            let evidence = entry.evidence.as_ref().unwrap();
+            let fetched = engine
+                .fetch(
+                    &caller,
+                    FetchInput {
+                        target: target.clone(),
+                        ids: vec![id.clone()],
+                        context_lines: Some(0),
+                        ..FetchInput::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(fetched.items.len(), 1);
+            assert_eq!(fetched.items[0].evidence.lines, evidence.lines);
+            assert_eq!(
+                fetched.items[0].evidence.content_hash,
+                evidence.content_hash
+            );
+            assert_eq!(fetched.items[0].evidence.commit, evidence.commit);
+            assert_eq!(fetched.items[0].content.text(), entry.content.text());
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn context_section_admission_finds_tests_and_docs_beyond_mixed_source_limit() {
+    if !git_available() {
+        eprintln!("skipping: git is not installed");
+        return;
+    }
+    let db = require_db!();
+    let mut ws = fixture_workspace();
+    ws.resolved
+        .projects
+        .retain(|project| project.name.as_str() == "billing-api");
+    // Isolate admission and lexical refill from embedding quality.
+    ws.resolved.projects[0].embedding.provider = None;
+    ws.resolved.projects[0].embedding.model = None;
+    let root = ws.project_dir("billing-api");
+    std::fs::create_dir_all(root.join("src/selection-crowd")).unwrap();
+    std::fs::create_dir_all(root.join("test/selection")).unwrap();
+    std::fs::create_dir_all(root.join("docs/selection")).unwrap();
+    for ordinal in 0..30 {
+        std::fs::write(root.join(format!("src/selection-crowd/module-{ordinal:02}.ts")),
+            format!("export function selectionadmissionquokka(): string {{\n  return \"selectionadmissionquokka-{ordinal:02}\";\n}}\n")).unwrap();
+    }
+    std::fs::write(root.join("test/selection/eligible.spec.ts"),
+        "// selectionadmissionquokka regression\ndescribe('eligible source', () => {\n  it('retains evidence', () => {});\n});\n").unwrap();
+    std::fs::write(root.join("docs/selection/eligible.md"),
+        "# Evidence admission\n\nThe selectionadmissionquokka behavior has this source documentation.\n").unwrap();
+    ws.commit_all("billing-api", "add synthetic section admission crowding");
+    let data = tempfile::tempdir().unwrap();
+    // Raise this fixture's project result quota so twenty code decoys truly
+    // precede the eligible test and doc. Production defaults remain intact.
+    let mut settings = knowell_engine::EngineSettings::default();
+    settings.search.fusion.result_quota_per_project = Some(40);
+    let embedder = Arc::new(knowell_embed::AnyEmbedder::Fake(
+        knowell_embed::FakeEmbedder::new(crate::common::DIMS).unwrap(),
+    ));
+    let engine = knowell_engine::Engine::builder(
+        db.store.clone(),
+        crate::common::indexer_config(data.path()),
+    )
+    .engine_config(&crate::common::engine_config())
+    .embedder(name("local"), Arc::clone(&embedder))
+    .embedder(name("cloud"), embedder)
+    .workspace(ws.resolved.clone())
+    .settings(settings)
+    .access(Arc::new(crate::common::access()))
+    .build()
+    .await
+    .unwrap();
+    let (_, outcomes) = engine
+        .indexer()
+        .index_workspace(&ws.resolved, Priority::Interactive)
+        .await
+        .unwrap();
+    for outcome in outcomes {
+        assert!(
+            !matches!(outcome, knowell_index::SyncOutcome::Failed { .. }),
+            "{outcome:?}"
+        );
+    }
+    let caller = alice_caller();
+    let opened = engine
+        .open_workspace(&caller, OpenWorkspaceInput::default())
+        .await
+        .unwrap();
+    let target = context_target(&opened.context_id);
+    let mixed = engine
+        .search(
+            &caller,
+            SearchInput {
+                target: target.clone(),
+                query: "selectionadmissionquokka".to_owned(),
+                limit: Some(20),
+                include_snippets: Some(false),
+                ..SearchInput::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(mixed.hits.len(), 20);
+    assert!(
+        mixed.hits.iter().all(|hit| hit
+            .evidence
+            .path
+            .as_str()
+            .starts_with("src/selection-crowd/")),
+        "crowding prerequisite was not exercised: {:?}",
+        mixed.hits
+    );
+    for (section, path) in [
+        (ContextSection::Tests, "test/selection/eligible.spec.ts"),
+        (ContextSection::Docs, "docs/selection/eligible.md"),
+    ] {
+        let packed = engine
+            .build_context(
+                &caller,
+                BuildContextInput {
+                    target: target.clone(),
+                    task: Some("selectionadmissionquokka".to_owned()),
+                    token_budget: Some(8000),
+                    include: vec![section],
+                    selection_strategy: Some(ContextSelectionStrategy::BoundedBundles),
+                    ..BuildContextInput::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            packed.entries.iter().any(|entry| entry
+                .evidence
+                .as_ref()
+                .is_some_and(|evidence| evidence.path.as_str() == path)),
+            "{packed:?}"
+        );
+        assert!(packed.entries.iter().all(|entry| entry.section == section));
+        assert!(packed.budget.used <= packed.budget.requested);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn knowledge_only_context_never_embeds_the_task_or_claims_source_roles() {
+    if !git_available() {
+        eprintln!("skipping: git is not installed");
+        return;
+    }
+    let db = require_db!();
+    let mut ws = fixture_workspace();
+    ws.resolved
+        .projects
+        .retain(|project| project.name.as_str() == "billing-api");
+    let data = tempfile::tempdir().unwrap();
+    let indexed = indexed_engine(&db, &ws, data.path()).await;
+    let budget = knowell_embed::Budget::new(None, None, 0.0).unwrap();
+    let embedder = Arc::new(knowell_embed::AnyEmbedder::Fake(
+        knowell_embed::FakeEmbedder::new(crate::common::DIMS)
+            .unwrap()
+            .with_budget(budget.clone()),
+    ));
+    let engine = knowell_engine::Engine::builder(
+        db.store.clone(),
+        crate::common::indexer_config(data.path()),
+    )
+    .engine_config(&crate::common::engine_config())
+    .embedder(name("local"), Arc::clone(&embedder))
+    .embedder(name("cloud"), embedder)
+    .workspace(ws.resolved.clone())
+    .access(Arc::new(crate::common::access()))
+    .build()
+    .await
+    .unwrap();
+    let caller = alice_caller();
+    let opened = engine
+        .open_workspace(&caller, OpenWorkspaceInput::default())
+        .await
+        .unwrap();
+    let target = context_target(&opened.context_id);
+    let mut control = project_search("billing-api", "cancel subscription", target.clone());
+    control.kinds = vec![SearchKind::Code];
+    control.include_diagnostics = Some(true);
+    let measured = engine.search(&caller, control).await.unwrap();
+    assert!(measured.diagnostics.unwrap().embedding_calls > 0);
+    let spent = budget.spent_tokens();
+    assert!(
+        spent > 0,
+        "positive source-query control must exercise the observed embedder"
+    );
+    let rest = EngineContext {
+        principal: knowell_auth::Principal::User(alice()),
+        scopes: None,
+        grants: Arc::new({
+            let mut grants = GrantSet::new();
+            grants.add(
+                knowell_auth::Grant::new(
+                    knowell_auth::Principal::User(alice()),
+                    knowell_auth::Role::Admin,
+                    knowell_auth::ResourceScope::Organization,
+                )
+                .unwrap(),
+            );
+            grants
+        }),
+        visible: knowell_auth::ProjectFilter::default(),
+        request_id: knowell_auth::RequestId::new("req-knowledge-only").unwrap(),
+        audit: Arc::new(knowell_server::MemoryAuditSink::new()),
+    };
+    for kind in [MemoryKind::Decision, MemoryKind::Rule] {
+        let written = engine
+            .write_memory(
+                &caller,
+                WriteMemoryInput {
+                    target: target.clone(),
+                    scope: MemoryScope {
+                        level: ScopeLevel::Project,
+                        project: Some(name("billing-api")),
+                        task_id: None,
+                    },
+                    kind,
+                    title: format!("knowledgeonlyquokka {kind:?}"),
+                    body: "knowledgeonlyquokka preserves the synthetic acceptance decision."
+                        .to_owned(),
+                    related_symbols: Vec::new(),
+                    evidence: Vec::new(),
+                    supersedes: None,
+                    idempotency_key: None,
+                },
+            )
+            .await
+            .unwrap();
+        knowell_server::Engine::call(
+            &engine,
+            &rest,
+            EngineRequest::DecideMemory(MemoryDecision {
+                id: written.record.id.to_string(),
+                action: MemoryAction::Accept,
+                note: None,
+            }),
+        )
+        .await
+        .unwrap();
+    }
+    for section in [ContextSection::Memory, ContextSection::Rules] {
+        let packed = engine
+            .build_context(
+                &caller,
+                BuildContextInput {
+                    target: target.clone(),
+                    task: Some("knowledgeonlyquokka".to_owned()),
+                    include: vec![section],
+                    selection_strategy: Some(ContextSelectionStrategy::BoundedBundles),
+                    desired_roles: vec![
+                        ContextRole::Entry,
+                        ContextRole::Config,
+                        ContextRole::Implementation,
+                    ],
+                    ..BuildContextInput::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(packed.entries.len(), 1, "{packed:?}");
+        assert!(
+            packed
+                .entries
+                .iter()
+                .all(|entry| entry.section == section && entry.evidence.is_none())
+        );
+        let selection = packed.selection.unwrap();
+        assert_eq!(selection.considered_candidates, 0);
+        assert_eq!(selection.evaluations, 0);
+        assert!(selection.steps.is_empty() && selection.covered_roles.is_empty());
+        assert_eq!(
+            selection.missing_roles,
+            [
+                ContextRole::Entry,
+                ContextRole::Config,
+                ContextRole::Implementation
+            ]
+        );
+        assert_eq!(
+            budget.spent_tokens(),
+            spent,
+            "knowledge-only packs must not embed the task"
+        );
+    }
+    let mut memory_search = project_search("billing-api", "knowledgeonlyquokka", target);
+    memory_search.kinds = vec![SearchKind::Memory];
+    memory_search.include_diagnostics = Some(true);
+    let memory = engine.search(&caller, memory_search).await.unwrap();
+    assert_eq!(memory.memory_hits.len(), 2);
+    let work = memory.diagnostics.unwrap();
+    assert_eq!(work.embedding_calls, 0);
+    assert!(work.embedding.is_none());
+    assert_eq!(work.lexical_queries, 0);
+    assert_eq!(work.semantic_queries, 0);
+    assert_eq!(budget.spent_tokens(), spent);
+    drop(indexed);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -975,6 +1779,7 @@ async fn engine_serves_every_tool_over_the_indexed_fixture() {
                 target: ctx.clone(),
                 query: "cancel subscription".into(),
                 limit: Some(40),
+                include_diagnostics: Some(true),
                 ..SearchInput::default()
             },
         )
@@ -1017,13 +1822,46 @@ async fn engine_serves_every_tool_over_the_indexed_fixture() {
             .iter()
             .any(|w| matches!(w, MatchReason::Lexical { .. }))
     }));
+    let diagnostics = found.diagnostics.as_ref().unwrap();
+    assert!(diagnostics.embedding_calls > 0 && diagnostics.semantic_neighbors > 0);
+    // Adaptive fusion and complementary Source packing may choose only lexical
+    // results for the mixed query above. A query absent from the fixture proves
+    // that vector candidates reach the output, without claiming that this fake
+    // embedder can judge semantic relevance.
+    let ranked = engine
+        .search(
+            &agent_a,
+            SearchInput {
+                target: ctx.clone(),
+                query: "quartz nebula".into(),
+                limit: Some(40),
+                include_snippets: Some(false),
+                ..SearchInput::default()
+            },
+        )
+        .await
+        .unwrap();
     assert!(
-        found
+        ranked
             .hits
             .iter()
-            .any(|h| h.evidence.freshness == FreshnessTier::T2Embeddings),
+            .any(|h| h.evidence.freshness == FreshnessTier::T2Embeddings
+                && h.evidence
+                    .why
+                    .iter()
+                    .any(|reason| matches!(reason, MatchReason::Semantic { .. }))),
         "the semantic source should contribute"
     );
+    assert!(ranked.hits.iter().all(|hit| {
+        !hit.evidence.why.iter().any(|reason| {
+            matches!(
+                reason,
+                MatchReason::Lexical { .. }
+                    | MatchReason::ExactSymbol { .. }
+                    | MatchReason::ExactPath
+            )
+        })
+    }));
     assert!(
         found
             .gaps

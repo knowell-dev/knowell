@@ -199,6 +199,11 @@ impl Prepared {
                 IndexerConfig::new(env.home.join("data"), self.organization),
             )
             .engine_config(&self.config)
+            .settings(crate::tools::engine_settings(
+                &env.home,
+                env.parse_cache,
+                env.lexical_spans,
+            ))
             .access(Arc::new(access));
             for (name, embedder) in embedders {
                 builder = builder.embedder(name, embedder);
@@ -603,6 +608,8 @@ mod tests {
         let env = Env::from_globals(&crate::GlobalArgs {
             engine_config: Some(config_path),
             workspace_file: Some(temp.path().join("does-not-exist.toml")),
+            parse_cache: false,
+            lexical_spans: 1,
             verbose: 0,
             quiet: false,
         })
@@ -627,6 +634,8 @@ mod tests {
         let env = Env::from_globals(&crate::GlobalArgs {
             engine_config: Some(config_path),
             workspace_file: None,
+            parse_cache: false,
+            lexical_spans: 1,
             verbose: 0,
             quiet: false,
         })

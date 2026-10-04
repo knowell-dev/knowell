@@ -107,7 +107,7 @@ async fn migrations_apply_from_empty_and_rerun_cleanly() {
         .fetch_one(&mut *conn)
         .await
         .unwrap();
-    assert_eq!(applied, 13);
+    assert_eq!(applied, knowell_store::LATEST_SCHEMA_VERSION);
     let tables: Vec<String> = sqlx::query_scalar(
         "SELECT table_name::text FROM information_schema.tables
          WHERE table_schema = current_schema() AND table_name <> '_sqlx_migrations'
@@ -119,11 +119,13 @@ async fn migrations_apply_from_empty_and_rerun_cleanly() {
     let expected = [
         "_knowell_maintenance",
         "access_grant",
+        "analysis_coverage",
         "api_token",
         "audit_log",
         "checkpoint_receipt",
         "chunk",
         "chunk_input",
+        "chunk_structure",
         "content",
         "contract",
         "edge",
@@ -142,6 +144,7 @@ async fn migrations_apply_from_empty_and_rerun_cleanly() {
         "profile_switch",
         "profile_switch_view",
         "project",
+        "scip_import",
         "source",
         "symbol",
         "task",

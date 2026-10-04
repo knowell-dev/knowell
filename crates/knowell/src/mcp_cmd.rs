@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::Context;
-use clap::Args;
+use clap::{Args, ValueEnum};
 
 use crate::db;
 use crate::env::Env;
@@ -16,13 +16,37 @@ use crate::tools::{self, EngineDeps};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Args)]
-pub(crate) struct McpArgs {}
+pub(crate) struct McpArgs {
+    /// Result format: source text (default), compact text envelopes or full typed outputs.
+    #[arg(long, value_enum, default_value_t = OutputModeArg::Source)]
+    output_mode: OutputModeArg,
+}
 
-pub(crate) fn run(_args: McpArgs, env: &Env) -> anyhow::Result<ExitCode> {
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum OutputModeArg {
+    Source,
+    Full,
+    Compact,
+}
+
+impl From<OutputModeArg> for knowell_mcp::OutputMode {
+    fn from(mode: OutputModeArg) -> Self {
+        match mode {
+            OutputModeArg::Source => Self::Source,
+            OutputModeArg::Full => Self::Full,
+            OutputModeArg::Compact => Self::Compact,
+        }
+    }
+}
+
+pub(crate) fn run(args: McpArgs, env: &Env) -> anyhow::Result<ExitCode> {
     // A missing engine configuration is fine while the engine is not wired:
     // the tools answer `not_ready` either way. An invalid one is reported.
     let engine = match env.load_engine() {
         Ok(Some(cfg)) => cfg,
+        Ok(None) if env.has_explicit_engine_config() => {
+            anyhow::bail!("the selected engine configuration is missing; check --config");
+        }
         Ok(None) => {
             tracing::warn!(
                 "no engine configuration at {}; run `know init` (serving with built-in defaults)",
@@ -33,12 +57,19 @@ pub(crate) fn run(_args: McpArgs, env: &Env) -> anyhow::Result<ExitCode> {
         Err(err) => return Err(anyhow::Error::new(err)),
     };
     let organization = knowell_core::Name::new("local")?;
-    let workspace_files = Registry::load(&env.home)
-        .map(|r| r.files_of(&organization))
-        .unwrap_or_else(|err| {
-            tracing::warn!("{err:#}");
-            Default::default()
-        });
+    let workspace_files = if env.explicit_workspace().is_some() {
+        let file = env.require_workspace()?;
+        // An explicitly selected workspace must never silently use the registry.
+        let config = knowell_config::load_workspace(&file)?;
+        std::collections::BTreeMap::from([(config.workspace.name, file)])
+    } else {
+        Registry::load(&env.home)
+            .map(|r| r.files_of(&organization))
+            .unwrap_or_else(|err| {
+                tracing::warn!("{err:#}");
+                Default::default()
+            })
+    };
     let rt = db::runtime()?;
     rt.block_on(async move {
         // Without a reachable database the tools answer `not_ready` and say why.
@@ -57,6 +88,8 @@ pub(crate) fn run(_args: McpArgs, env: &Env) -> anyhow::Result<ExitCode> {
         };
         let deps = EngineDeps {
             home: env.home.clone(),
+            parse_cache: env.parse_cache,
+            lexical_spans: env.lexical_spans,
             engine,
             store,
             workspace_files,
@@ -74,8 +107,10 @@ pub(crate) fn run(_args: McpArgs, env: &Env) -> anyhow::Result<ExitCode> {
         let background = built.as_ref().map(|(engine, workspaces)| {
             tools::start_indexing(engine, workspaces.clone(), &indexing)
         });
+        let server = knowell_mcp::KnowellServer::new(Arc::new(tools::Tools::new(engine_ref)))
+            .with_output_mode(args.output_mode.into());
         let result = tokio::select! {
-            result = knowell_mcp::serve_stdio(Arc::new(tools::Tools::new(engine_ref))) => {
+            result = knowell_mcp::serve_stdio_with(server) => {
                 result.context("the MCP stdio session failed")
             }
             () = env.parent_shutdown.cancelled() => Ok(()),

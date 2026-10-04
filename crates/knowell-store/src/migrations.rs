@@ -9,7 +9,7 @@ use crate::StoreError;
 static ORIGINAL: Migrator = sqlx::migrate!();
 
 /// Latest numbered domain migration this binary reads and writes.
-pub const LATEST_SCHEMA_VERSION: i64 = 13;
+pub const LATEST_SCHEMA_VERSION: i64 = 16;
 
 /// Database runtime-admission protocol implemented by this build.
 pub const RUNTIME_PROTOCOL_VERSION: u32 = 1;
@@ -180,6 +180,9 @@ pub(crate) async fn run_locked(
         .run(&mut *conn)
         .await
         .map_err(StoreError::Migrate)?;
+    // Classification batches commit independently so cancellation resumes at
+    // unfinished rows, while the session still holds the migration lock.
+    crate::content::backfill_file_languages(conn).await?;
     if enable_vectors {
         use sqlx::Connection;
         let mut tx = conn.begin().await?;
@@ -237,10 +240,11 @@ mod tests {
         ));
         assert!(validate_history(&missing, false).is_ok());
         let mut newer = history(true);
-        newer.push((14, true, vec![0; 48]));
+        let unsupported_version = LATEST_SCHEMA_VERSION + 1;
+        newer.push((unsupported_version, true, vec![0; 48]));
         assert!(matches!(
             validate_history(&newer, true),
-            Err(StoreError::SchemaNewer { current: 14, .. })
+            Err(StoreError::SchemaNewer { current, .. }) if current == unsupported_version
         ));
         let mut dirty = history(true);
         if let Some(entry) = dirty.first_mut() {

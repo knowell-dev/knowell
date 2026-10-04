@@ -212,7 +212,7 @@ fn claude_project_merges_existing_files_and_restores_them() {
     assert_eq!(v["mcpServers"]["other"], json!({"command": "x"}));
     assert_eq!(
         v["mcpServers"]["knowell"],
-        json!({"type": "stdio", "command": "know", "args": ["mcp"]})
+        json!({"type": "stdio", "command": "know", "args": ["mcp", "--output-mode", "source"]})
     );
     let s = json_of(&settings);
     assert_eq!(s["permissions"]["allow"], json!(["Bash(ls)"]));
@@ -220,9 +220,10 @@ fn claude_project_merges_existing_files_and_restores_them() {
     let groups = s["hooks"]["SessionStart"].as_array().unwrap();
     assert_eq!(groups.len(), 2);
     assert_eq!(groups[0]["hooks"][0]["command"], "echo hi");
+    assert_eq!(groups[1]["hooks"][0]["command"], "know");
     assert_eq!(
-        groups[1]["hooks"][0]["command"],
-        "know context --session-start"
+        groups[1]["hooks"][0]["args"],
+        json!(["context", "--session-start"])
     );
     let text = read(&md);
     assert!(text.starts_with("# Project rules\n\nBe nice.\n\n<!-- knowell:begin connect -->"));
@@ -252,9 +253,10 @@ fn claude_hook_command_change_replaces_instead_of_duplicating() {
     let s = json_of(&e.project.join(".claude/settings.json"));
     let groups = s["hooks"]["SessionStart"].as_array().unwrap();
     assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0]["hooks"][0]["command"], "npx");
     assert_eq!(
-        groups[0]["hooks"][0]["command"],
-        "npx -y knowell context --session-start"
+        groups[0]["hooks"][0]["args"],
+        json!(["-y", "knowell", "context", "--session-start"])
     );
     let m = json_of(&e.project.join(".mcp.json"));
     assert_eq!(m["mcpServers"]["knowell"]["command"], "npx");
@@ -297,7 +299,7 @@ fn cursor_merges_and_removes_only_its_entry() {
     assert_eq!(v["mcpServers"]["other"]["url"], "http://localhost:1/mcp");
     assert_eq!(
         v["mcpServers"]["knowell"],
-        json!({"command": "know", "args": ["mcp"], "env": {"KNOWELL_HUB_TOKEN": "${env:KNOWELL_HUB_TOKEN}"}})
+        json!({"command": "know", "args": ["mcp", "--output-mode", "source"], "env": {"KNOWELL_HUB_TOKEN": "${env:KNOWELL_HUB_TOKEN}"}})
     );
     let rule = read(&e.project.join(".cursor/rules/knowell.mdc"));
     assert!(rule.starts_with("---\n") && rule.contains("alwaysApply: true"));
@@ -341,7 +343,7 @@ fn codex_preserves_comments_and_other_tables() {
     let table: toml::Table = text.parse().unwrap();
     let k = &table["mcp_servers"]["knowell"];
     assert_eq!(k["command"].as_str(), Some("C:\\tools\\know.exe"));
-    assert_eq!(k["args"].as_array().unwrap().len(), 1);
+    assert_eq!(k["args"].as_array().unwrap().len(), 3);
     assert_eq!(k["env_vars"][0].as_str(), Some("KNOWELL_HUB_TOKEN"));
     assert!(table["mcp_servers"]["other"].is_table());
     assert!(
@@ -446,19 +448,383 @@ fn env_names_are_validated_and_never_echoed() {
 }
 
 #[test]
-fn hook_command_quotes_paths_with_spaces() {
+fn client_reports_mask_values_while_preserving_exact_configs_and_backups() {
+    let arbitrary_env = "KNOWELL_CANARY_arbitrary_env_value";
+    let arbitrary_header = "KNOWELL_CANARY_arbitrary_header_value";
+    let previous_token = "KNOWELL_CANARY_previous_token";
+    let provider_key = format!("ghp_{}", "A".repeat(36));
+    for client in [Client::Claude, Client::Codex, Client::Cursor] {
+        let e = env();
+        let config = e.project.join(match client {
+            Client::Claude => ".mcp.json",
+            Client::Codex => ".codex/config.toml",
+            Client::Cursor => ".cursor/mcp.json",
+        });
+        let before = if client == Client::Codex {
+            format!(
+                "[mcp_servers.other]\ncommand = 'keep-other'\nargs = ['--literal', 'keep-argv']\nenv_vars = ['KEEP_NAME']\nenv = {{ ARBITRARY = '{arbitrary_env}' }}\nhttp_headers = {{ Arbitrary = '{arbitrary_header}', Authorization = 'zzq' }}\napi_key = '{previous_token}'\ndescription = '{provider_key}'\n"
+            )
+        } else {
+            serde_json::to_string(&json!({
+                "mcpServers": {
+                    "other": {
+                        "command": "keep-other", "args": ["--literal", "keep-argv"],
+                        "env": {"ARBITRARY": arbitrary_env},
+                        "headers": {"Arbitrary": arbitrary_header, "Authorization": "zzq"},
+                        "api_key": previous_token, "description": provider_key,
+                    },
+                    "knowell": {"command": "old-know", "env": {"TOKEN": previous_token}},
+                }
+            }))
+            .unwrap()
+        };
+        write(&config, &before);
+        let markdown = e.project.join(match client {
+            Client::Claude => "CLAUDE.md",
+            Client::Codex => "AGENTS.md",
+            Client::Cursor => ".cursor/rules/knowell.mdc",
+        });
+        let original_markdown = if client == Client::Cursor {
+            format!(
+                "{}\nSynthetic provider fixture: {provider_key}\n",
+                instruction_block()
+            )
+        } else {
+            format!("# Keep instruction\n\nSynthetic provider fixture: {provider_key}\n")
+        };
+        write(&markdown, &original_markdown);
+        let mut options = opts(&e, Scope::Project);
+        options.env_names = vec!["KEEP_NAME".to_owned()];
+        options.dry_run = true;
+        let dry = connect(client, &options).unwrap();
+        assert_eq!(read(&config), before);
+        assert_eq!(read(&markdown), original_markdown);
+        assert!(!backup_path(&config).exists());
+        let check = |report: &ConnectReport| {
+            for diff in &report.diffs {
+                for value in [
+                    arbitrary_env,
+                    arbitrary_header,
+                    previous_token,
+                    "zzq",
+                    provider_key.as_str(),
+                ] {
+                    assert!(
+                        !diff.diff.contains(value),
+                        "report leaked a synthetic classified value"
+                    );
+                }
+            }
+        };
+        check(&dry);
+        assert!(dry.diffs.iter().any(|diff| diff.diff.contains("mcp")));
+        options.dry_run = false;
+        let connected = connect(client, &options).unwrap();
+        check(&connected);
+        assert_eq!(read(&backup_path(&config)), before);
+        assert_eq!(read(&backup_path(&markdown)), original_markdown);
+        if client == Client::Codex {
+            let original: toml::Table = before.parse().unwrap();
+            let current: toml::Table = read(&config).parse().unwrap();
+            assert_eq!(
+                current["mcp_servers"]["other"],
+                original["mcp_servers"]["other"]
+            );
+            assert_eq!(
+                current["mcp_servers"]["knowell"]["env_vars"][0].as_str(),
+                Some("KEEP_NAME")
+            );
+        } else {
+            let original: Value = serde_json::from_str(&before).unwrap();
+            let current = json_of(&config);
+            assert_eq!(
+                current["mcpServers"]["other"],
+                original["mcpServers"]["other"]
+            );
+        }
+        let disconnected = disconnect(client, &options).unwrap();
+        check(&disconnected);
+        assert_eq!(read(&backup_path(&config)), before);
+        if client == Client::Cursor {
+            assert!(!markdown.exists());
+        } else {
+            assert_eq!(read(&markdown), original_markdown);
+        }
+        assert!(read(&config).contains(arbitrary_env));
+    }
+}
+
+#[test]
+fn hook_arguments_preserve_launcher_paths_without_shell_interpolation() {
     let e = env();
     let mut o = opts(&e, Scope::Project);
-    o.command = "C:\\Program Files\\know\\know.exe".into();
+    o.command = "C:\\Synthetic Tools\\knöw\\know.exe".into();
+    let engine = "C:\\Synthetic Settings\\engine $(ignored) `literal`.toml";
+    let workspace = "C:\\Örnek Proje\\knowell's.toml";
+    o.args = vec![
+        "--config".into(),
+        engine.into(),
+        "--workspace".into(),
+        workspace.into(),
+        "mcp".into(),
+    ];
+    connect(Client::Claude, &o).unwrap();
+    let hook = json_of(&e.project.join(".claude/settings.json"));
     assert_eq!(
-        o.hook_command_line(),
-        "\"C:\\\\Program Files\\\\know\\\\know.exe\" context --session-start"
+        hook["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+        o.command
+    );
+    assert_eq!(
+        hook["hooks"]["SessionStart"][0]["hooks"][0]["args"],
+        json!([
+            "--config",
+            engine,
+            "--workspace",
+            workspace,
+            "context",
+            "--session-start"
+        ])
     );
     o.hook_command = Some("know context --session-start --quiet".into());
+    connect(Client::Claude, &o).unwrap();
+    let hook = json_of(&e.project.join(".claude/settings.json"));
     assert_eq!(
-        o.hook_command_line(),
+        hook["hooks"]["SessionStart"][0]["hooks"][0]["command"],
         "know context --session-start --quiet"
     );
+    assert!(
+        hook["hooks"]["SessionStart"][0]["hooks"][0]
+            .get("args")
+            .is_none()
+    );
+}
+
+#[test]
+fn selected_launch_arguments_and_environment_names_round_trip_for_every_client() {
+    let e = env();
+    let args = vec![
+        "--config".to_owned(),
+        "Synthetic Settings/engine.toml".to_owned(),
+        "--workspace".to_owned(),
+        "Örnek Proje/knowell.toml".to_owned(),
+        "mcp".to_owned(),
+    ];
+    for client in CLIENTS {
+        let mut o = opts(&e, Scope::Project);
+        o.args = args.clone();
+        o.env_names = vec!["KNOWELL_HOME".into(), "KNOWELL_CANARY_PROVIDER".into()];
+        connect(client, &o).unwrap();
+        match client {
+            Client::Codex => {
+                let table: toml::Table =
+                    read(&e.project.join(".codex/config.toml")).parse().unwrap();
+                let entry = &table["mcp_servers"]["knowell"];
+                let actual: Vec<_> = entry["args"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap())
+                    .collect();
+                assert_eq!(actual, args);
+                assert_eq!(entry["env_vars"][0].as_str(), Some("KNOWELL_HOME"));
+            }
+            Client::Claude | Client::Cursor => {
+                let path = if client == Client::Claude {
+                    ".mcp.json"
+                } else {
+                    ".cursor/mcp.json"
+                };
+                let config = json_of(&e.project.join(path));
+                let entry = &config["mcpServers"]["knowell"];
+                assert_eq!(entry["args"], json!(args));
+                let home = if client == Client::Claude {
+                    "${KNOWELL_HOME}"
+                } else {
+                    "${env:KNOWELL_HOME}"
+                };
+                assert_eq!(entry["env"]["KNOWELL_HOME"], home);
+            }
+        }
+        assert!(connect(client, &o).unwrap().changed_files.is_empty());
+        disconnect(client, &o).unwrap();
+    }
+}
+
+#[test]
+fn legacy_claude_shell_hook_is_replaced_once_without_losing_other_hooks() {
+    let e = env();
+    let path = e.project.join(".claude/settings.json");
+    write(
+        &path,
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"know context --session-start","statusMessage":"Knowell: loading workspace context"},{"type":"command","command":"other-start"}]}]}}"#,
+    );
+    let o = opts(&e, Scope::Project);
+    connect(Client::Claude, &o).unwrap();
+    let config = json_of(&path);
+    let groups = config["hooks"]["SessionStart"].as_array().unwrap();
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0]["hooks"][0]["command"], "other-start");
+    assert_eq!(
+        groups[1]["hooks"][0]["args"],
+        json!(["context", "--session-start"])
+    );
+    assert!(
+        connect(Client::Claude, &o)
+            .unwrap()
+            .changed_files
+            .is_empty()
+    );
+    disconnect(Client::Claude, &o).unwrap();
+    assert_eq!(
+        json_of(&path),
+        json!({"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"other-start"}]}]}})
+    );
+}
+
+#[test]
+fn explicit_windows_npx_launcher_is_preserved_for_mcp_and_hook() {
+    let e = env();
+    let mut o = opts(&e, Scope::Project);
+    o.command = "cmd".into();
+    o.args = vec![
+        "/c".into(),
+        "npx".into(),
+        "-y".into(),
+        "knowell".into(),
+        "mcp".into(),
+    ];
+    connect(Client::Claude, &o).unwrap();
+    let mcp = json_of(&e.project.join(".mcp.json"));
+    assert_eq!(mcp["mcpServers"]["knowell"]["command"], "cmd");
+    assert_eq!(
+        mcp["mcpServers"]["knowell"]["args"],
+        json!(["/c", "npx", "-y", "knowell", "mcp"])
+    );
+    let settings = json_of(&e.project.join(".claude/settings.json"));
+    assert_eq!(
+        settings["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+        "cmd"
+    );
+    assert_eq!(
+        settings["hooks"]["SessionStart"][0]["hooks"][0]["args"],
+        json!(["/c", "npx", "-y", "knowell", "context", "--session-start"])
+    );
+}
+
+#[test]
+fn source_mode_hook_preserves_global_options_and_literal_mcp_paths() {
+    let e = env();
+    let mut o = opts(&e, Scope::Project);
+    o.command = "cmd".into();
+    o.args = [
+        "/c",
+        "npx",
+        "-y",
+        "knowell",
+        "--config",
+        "mcp",
+        "--parse-cache",
+        "mcp",
+        "--output-mode",
+        "source",
+        "--workspace",
+        "mcp",
+        "--lexical-spans",
+        "2",
+        "--quiet",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    connect(Client::Claude, &o).unwrap();
+    let settings = json_of(&e.project.join(".claude/settings.json"));
+    assert_eq!(
+        settings["hooks"]["SessionStart"][0]["hooks"][0]["args"],
+        json!([
+            "/c",
+            "npx",
+            "-y",
+            "knowell",
+            "--config",
+            "mcp",
+            "--parse-cache",
+            "context",
+            "--session-start",
+            "--workspace",
+            "mcp",
+            "--lexical-spans",
+            "2",
+            "--quiet"
+        ])
+    );
+    assert!(
+        connect(Client::Claude, &o)
+            .unwrap()
+            .changed_files
+            .is_empty()
+    );
+}
+
+#[test]
+fn joined_output_modes_are_removed_only_from_mcp_arguments() {
+    let e = env();
+    for mode in ["source", "compact", "full"] {
+        let mut o = opts(&e, Scope::Project);
+        o.args = vec![
+            "--workspace".into(),
+            "--output-mode=literal-path".into(),
+            "mcp".into(),
+            format!("--output-mode={mode}"),
+        ];
+        assert_eq!(
+            o.hook_args().unwrap(),
+            [
+                "--workspace",
+                "--output-mode=literal-path",
+                "context",
+                "--session-start"
+            ]
+            .map(str::to_owned)
+        );
+    }
+}
+
+#[test]
+fn malformed_mcp_hook_arguments_are_refused_without_writing_or_echoing_values() {
+    for args in [
+        vec!["mcp", "--output-mode"],
+        vec!["mcp", "--output-mode", "KNOWELL_CANARY_invalid_mode"],
+        vec!["mcp", "--output-mode=KNOWELL_CANARY_invalid_mode"],
+        vec!["--workspace", "mcp"],
+        vec!["mcp", "--config"],
+    ] {
+        let e = env();
+        let mut o = opts(&e, Scope::Project);
+        o.args = args.into_iter().map(str::to_owned).collect();
+        let before = snapshot(&e.project);
+        let error = connect(Client::Claude, &o).unwrap_err();
+        assert!(matches!(error, SetupError::InvalidInput(_)));
+        assert!(!error.to_string().contains("KNOWELL_CANARY"));
+        assert_eq!(snapshot(&e.project), before);
+    }
+}
+
+#[test]
+fn disconnect_does_not_parse_an_obsolete_launcher_and_preserves_foreign_entries() {
+    let e = env();
+    let mcp = e.project.join(".mcp.json");
+    write(
+        &mcp,
+        r#"{"mcpServers":{"other":{"command":"other-server"}}}"#,
+    );
+    let mut o = opts(&e, Scope::Project);
+    connect(Client::Claude, &o).unwrap();
+    o.args = vec!["mcp".into(), "--output-mode".into()];
+    disconnect(Client::Claude, &o).unwrap();
+    assert_eq!(
+        json_of(&mcp),
+        json!({"mcpServers":{"other":{"command":"other-server"}}})
+    );
+    assert!(!e.project.join(".claude/settings.json").exists());
 }
 
 #[test]
@@ -480,10 +846,14 @@ fn instruction_block_is_short_and_marked() {
         "inspect_symbol",
         "trace_flow",
         "build_context",
+        "fetch",
         "write_memory",
         "save_checkpoint",
         "resume_task",
     ] {
         assert!(b.contains(tool), "{tool}");
     }
+    assert!(b.contains("complementary passages"));
+    assert!(b.contains("same pinned source"));
+    assert!(!b.contains("At the start of every session call"));
 }

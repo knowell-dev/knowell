@@ -94,7 +94,7 @@ pub struct Citation {
 }
 
 impl Citation {
-    fn new(location: &Location, commit: Option<&CommitId>, range: LineRange) -> Self {
+    pub(crate) fn new(location: &Location, commit: Option<&CommitId>, range: LineRange) -> Self {
         Self {
             project: location.project.clone(),
             view: location.view.clone(),
@@ -338,8 +338,9 @@ fn contains(outer: LineRange, inner: LineRange) -> bool {
 /// 2. **Bodies by rank**: each item is upgraded to its full text if the
 ///    remaining budget allows (net of the skeleton it replaces and of other
 ///    packed text it contains, which is then not repeated).
-/// 3. Overlapping text is never sent twice; anything that does not fit is
-///    listed in `omitted` with the tokens it needed.
+/// 3. Overlapping text in the same pinned file occurrence is never sent twice.
+///    Equal bytes at another path, project, view or generation retain their
+///    own citation; anything that does not fit is listed in `omitted`.
 ///
 /// Items that do not fit are skipped, and smaller later items may still fit.
 /// The result is deterministic for the same inputs.
@@ -472,6 +473,8 @@ impl Packer<'_> {
         };
         let duplicate = entries.iter().enumerate().find_map(|(j, other)| {
             let packed = other.packed.as_ref()?;
+            // Deduplicate shown text within one binding, never by payload
+            // equality: another occurrence can have different live relations.
             let same = j != i
                 && other.location.same_file(entry.location)
                 && (packed.range == snippet.range
@@ -553,6 +556,7 @@ impl Packer<'_> {
             let Some(packed) = other.packed.as_ref() else {
                 continue;
             };
+            // Covers and overlap omissions certify this exact source binding.
             if j == i || !other.location.same_file(entry.location) {
                 continue;
             }
@@ -633,7 +637,7 @@ fn first_weak_step(steps: &[GraphStep]) -> Option<&GraphStep> {
     steps.iter().find(|s| s.is_uncertain())
 }
 
-fn uncertainties(response: &SearchResponse) -> Vec<Uncertainty> {
+pub(crate) fn uncertainties(response: &SearchResponse) -> Vec<Uncertainty> {
     let mut out: Vec<Uncertainty> = response
         .degraded
         .iter()

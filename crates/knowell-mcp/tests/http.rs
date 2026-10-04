@@ -18,7 +18,8 @@ use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode, header};
 use knowell_mcp::{
-    FixtureTools, HttpServerOptions, KnowellServer, MCP_HTTP_PATH, streamable_http_router,
+    FixtureTools, HttpServerOptions, KnowellServer, MCP_HTTP_PATH, OutputMode,
+    streamable_http_router,
 };
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -26,7 +27,10 @@ use tower::ServiceExt;
 const PROTOCOL: &str = "2025-11-25";
 
 fn router(options: &HttpServerOptions) -> axum::Router {
-    streamable_http_router(KnowellServer::new(Arc::new(FixtureTools::new())), options)
+    streamable_http_router(
+        KnowellServer::new(Arc::new(FixtureTools::new())).with_output_mode(OutputMode::Full),
+        options,
+    )
 }
 
 /// Options for one-shot JSON requests without sessions.
@@ -184,4 +188,70 @@ async fn local_only_resolver_rejects_remote_peers() {
     request.extensions_mut().insert(ConnectInfo(local));
     let (_, text) = send(router(&stateless()), request).await;
     assert_eq!(message(&text)["result"]["isError"], false);
+}
+
+#[tokio::test]
+async fn configured_http_output_modes_keep_schemas_and_results_consistent() {
+    for mode in [OutputMode::Source, OutputMode::Full, OutputMode::Compact] {
+        let server = KnowellServer::new(Arc::new(FixtureTools::new())).with_output_mode(mode);
+        let router = streamable_http_router(server, &stateless());
+        let list = json!({"jsonrpc": "2.0", "id": 20, "method": "tools/list"});
+        let (status, body) = send(
+            router.clone(),
+            post().body(Body::from(list.to_string())).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let listed = message(&body);
+        let tools = listed["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 14);
+        for (id, name, arguments) in [
+            (21, "open_workspace", json!({"workspace": "demo-shop"})),
+            (
+                22,
+                "search",
+                json!({"workspace": "demo-shop", "query": "idempotency key retry", "kinds": ["docs"]}),
+            ),
+        ] {
+            let call = json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": name, "arguments": arguments}});
+            let (status, body) = send(
+                router.clone(),
+                post().body(Body::from(call.to_string())).unwrap(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let reply = message(&body);
+            assert_eq!(reply["result"]["isError"], false, "{reply}");
+            if mode == OutputMode::Source {
+                assert!(reply["result"].get("structuredContent").is_none());
+                assert!(
+                    tools
+                        .iter()
+                        .find(|tool| tool["name"] == name)
+                        .unwrap()
+                        .get("outputSchema")
+                        .is_none()
+                );
+                assert!(
+                    reply["result"]["content"][0]["text"]
+                        .as_str()
+                        .is_some_and(|text| !text.is_empty())
+                );
+                continue;
+            }
+            let result = &reply["result"]["structuredContent"];
+            let schema = &tools.iter().find(|tool| tool["name"] == name).unwrap()["outputSchema"];
+            let errors = support::schema::validate(schema, result);
+            assert!(errors.is_empty(), "{mode:?} {name}: {errors:?}");
+            if mode == OutputMode::Compact {
+                assert_eq!(result.as_object().unwrap().len(), 1);
+                assert_eq!(result["text"], reply["result"]["content"][0]["text"]);
+                assert!(reply["result"].get("_meta").is_none());
+            } else if name == "open_workspace" {
+                assert!(result["context_id"].is_string());
+            } else {
+                assert!(!result["hits"].as_array().unwrap().is_empty());
+            }
+        }
+    }
 }

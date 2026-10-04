@@ -658,4 +658,695 @@ async fn texts_are_read_in_batches_and_never_across_tenants() {
             .unwrap()
             .is_empty()
     );
+
+    // The full-blob batch API also returns metadata for non-text content.
+    wanted.reverse();
+    let contents = get_contents(&mut c, fx.org.id, &wanted).await.unwrap();
+    assert_eq!(contents.len(), blobs.len() + 1);
+    assert!(contents.windows(2).all(|pair| pair[0].hash < pair[1].hash));
+    assert!(contents.iter().all(|row| row.organization == fx.org.id));
+    let text_seven = contents.iter().find(|row| row.hash == h("text 7")).unwrap();
+    assert_eq!(text_seven.redacted_text.as_deref(), Some("text 7"));
+    assert_eq!(text_seven.language.as_deref(), Some("rust"));
+    assert_eq!(text_seven.size_bytes, 6);
+    assert!(
+        contents
+            .iter()
+            .find(|row| row.hash == h("no text"))
+            .unwrap()
+            .redacted_text
+            .is_none()
+    );
+    assert!(
+        get_contents(&mut c, fx.org.id, &[])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let mut chunks: Vec<_> = blobs
+        .iter()
+        .map(|b| NewChunk {
+            content_hash: b.hash,
+            parser_version: "batch-parser-1".into(),
+            ordinal: 0,
+            lines: LineRange::new(1, 1).unwrap(),
+            start_byte: 0,
+            end_byte: b.size_bytes,
+            kind: "text".into(),
+            symbol_path: None,
+            prepared_input_hash: b.hash,
+        })
+        .collect();
+    let mut extra = chunks[0].clone();
+    extra.ordinal = 1;
+    extra.prepared_input_hash = h("second batch-parser-1 input");
+    chunks.push(extra);
+    upsert_chunks(&mut c, fx.org.id, &chunks).await.unwrap();
+    let alternate = NewChunk {
+        parser_version: "batch-parser-2".into(),
+        prepared_input_hash: h("batch-parser-2 input"),
+        ..chunks[0].clone()
+    };
+    upsert_chunks(&mut c, fx.org.id, std::slice::from_ref(&alternate))
+        .await
+        .unwrap();
+    chunks.sort_by_key(|chunk| (chunk.content_hash, chunk.ordinal));
+    let read = chunks_of_many(&mut c, fx.org.id, &wanted, "batch-parser-1")
+        .await
+        .unwrap();
+    assert_eq!(
+        read.iter().map(|row| row.chunk.clone()).collect::<Vec<_>>(),
+        chunks
+    );
+    assert!(read.iter().all(|row| row.organization == fx.org.id));
+    let alternate_read = chunks_of_many(&mut c, fx.org.id, &wanted, "batch-parser-2")
+        .await
+        .unwrap();
+    assert_eq!(
+        alternate_read
+            .iter()
+            .map(|row| row.chunk.clone())
+            .collect::<Vec<_>>(),
+        vec![alternate]
+    );
+    assert!(
+        chunks_of_many(&mut c, fx.org.id, &wanted, "unknown-parser")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        chunks_of_many(&mut c, fx.org.id, &[], "batch-parser-1")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        chunks_of_many(&mut c, other.org.id, &wanted, "batch-parser-1")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // Identical original bytes may have tenant-specific redaction and analysis.
+    upsert_contents(
+        &mut c,
+        other.org.id,
+        &[
+            NewContent {
+                redacted_text: Some("tenant-specific redaction".into()),
+                language: Some("text".into()),
+                ..blobs[0].clone()
+            },
+            blob("other-tenant-only"),
+        ],
+    )
+    .await
+    .unwrap();
+    let other_chunk = NewChunk {
+        symbol_path: Some("other::symbol".into()),
+        ..chunks
+            .iter()
+            .find(|row| row.content_hash == h("text 0") && row.ordinal == 0)
+            .unwrap()
+            .clone()
+    };
+    upsert_chunks(&mut c, other.org.id, std::slice::from_ref(&other_chunk))
+        .await
+        .unwrap();
+    wanted.push(h("other-tenant-only"));
+    assert_eq!(
+        get_contents(&mut c, fx.org.id, &wanted).await.unwrap(),
+        contents
+    );
+    assert_eq!(
+        chunks_of_many(&mut c, fx.org.id, &wanted, "batch-parser-1")
+            .await
+            .unwrap(),
+        read
+    );
+    let other_read = get_contents(&mut c, other.org.id, &wanted).await.unwrap();
+    assert_eq!(other_read.len(), 2);
+    assert!(
+        other_read
+            .iter()
+            .all(|row| row.organization == other.org.id)
+    );
+    assert_eq!(
+        other_read
+            .iter()
+            .find(|row| row.hash == h("text 0"))
+            .unwrap()
+            .redacted_text
+            .as_deref(),
+        Some("tenant-specific redaction")
+    );
+    let other_chunks = chunks_of_many(&mut c, other.org.id, &wanted, "batch-parser-1")
+        .await
+        .unwrap();
+    assert_eq!(
+        other_chunks
+            .iter()
+            .map(|row| row.chunk.clone())
+            .collect::<Vec<_>>(),
+        vec![other_chunk]
+    );
+}
+
+#[tokio::test]
+async fn language_catalog_counts_file_occurrences_at_the_tenant_generation() {
+    let db = require_db!();
+    let mut c = db.conn().await;
+    let fx = fixture(&mut c, "catalog").await;
+    let other = fixture(&mut c, "other-catalog").await;
+    let rust = blob("rust-body");
+    let python = NewContent {
+        language: Some("python".into()),
+        ..blob("python-body")
+    };
+    let unknown = NewContent {
+        language: None,
+        redacted_text: None,
+        ..blob("binary-body")
+    };
+    upsert_contents(&mut c, fx.org.id, &[rust, python, unknown])
+        .await
+        .unwrap();
+    let g1 = views::begin_generation(&mut c, fx.view.id, None)
+        .await
+        .unwrap();
+    apply_file_changes(
+        &mut c,
+        fx.view.id,
+        g1,
+        &[
+            upsert("src/a.rs", "rust-body"),
+            upsert("src/copy.rs", "rust-body"),
+            upsert("scripts/main.py", "python-body"),
+            upsert("asset.bin", "binary-body"),
+        ],
+    )
+    .await
+    .unwrap();
+    views::activate_generation(&mut c, fx.view.id, g1)
+        .await
+        .unwrap();
+    let pin1 = GenerationPin {
+        view: fx.view.id,
+        generation: g1,
+    };
+    let expected1 = std::collections::BTreeMap::from([
+        ("rust".to_owned(), 2),
+        ("python".to_owned(), 1),
+        ("text".to_owned(), 1),
+    ]);
+    assert_eq!(
+        file_languages_at(&mut c, fx.org.id, pin1).await.unwrap(),
+        expected1
+    );
+    let g2 = views::begin_generation(&mut c, fx.view.id, None)
+        .await
+        .unwrap();
+    apply_file_changes(
+        &mut c,
+        fx.view.id,
+        g2,
+        &[
+            FileChange::Delete {
+                path: path("src/copy.rs"),
+            },
+            FileChange::Delete {
+                path: path("asset.bin"),
+            },
+            upsert("src/a.rs", "python-body"),
+        ],
+    )
+    .await
+    .unwrap();
+    views::activate_generation(&mut c, fx.view.id, g2)
+        .await
+        .unwrap();
+    let pin2 = GenerationPin {
+        view: fx.view.id,
+        generation: g2,
+    };
+    assert_eq!(
+        file_languages_at(&mut c, fx.org.id, pin2).await.unwrap(),
+        // A shared blob's Python hint cannot change the .rs occurrence's language.
+        std::collections::BTreeMap::from([("python".to_owned(), 1), ("rust".to_owned(), 1)])
+    );
+    assert_eq!(
+        file_languages_at(&mut c, fx.org.id, pin1).await.unwrap(),
+        expected1
+    );
+    assert!(
+        file_languages_at(&mut c, other.org.id, pin1)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // A foreign view with a hash also present locally must not leak its catalog.
+    upsert_contents(
+        &mut c,
+        other.org.id,
+        &[NewContent {
+            language: Some("javascript".into()),
+            ..blob("rust-body")
+        }],
+    )
+    .await
+    .unwrap();
+    let foreign_generation = views::begin_generation(&mut c, other.view.id, None)
+        .await
+        .unwrap();
+    apply_file_changes(
+        &mut c,
+        other.view.id,
+        foreign_generation,
+        &[upsert("foreign.js", "rust-body")],
+    )
+    .await
+    .unwrap();
+    views::activate_generation(&mut c, other.view.id, foreign_generation)
+        .await
+        .unwrap();
+    let foreign_pin = GenerationPin {
+        view: other.view.id,
+        generation: foreign_generation,
+    };
+    assert!(
+        file_languages_at(&mut c, fx.org.id, foreign_pin)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        file_languages_at(&mut c, other.org.id, foreign_pin)
+            .await
+            .unwrap(),
+        std::collections::BTreeMap::from([("javascript".to_owned(), 1)])
+    );
+}
+
+#[tokio::test]
+async fn shared_body_languages_are_independent_of_blob_hint_and_insertion_order() {
+    let db = require_db!();
+    let mut c = db.conn().await;
+    let text = "// shared language probe\n";
+    for (label, first, second) in [
+        ("markdown-first", "markdown", "rust"),
+        ("rust-first", "rust", "markdown"),
+    ] {
+        let fx = fixture(&mut c, label).await;
+        for language in [first, second] {
+            upsert_contents(
+                &mut c,
+                fx.org.id,
+                &[NewContent {
+                    language: Some(language.into()),
+                    ..blob(text)
+                }],
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            get_content(&mut c, fx.org.id, &h(text))
+                .await
+                .unwrap()
+                .unwrap()
+                .language
+                .as_deref(),
+            Some(first)
+        );
+        let generation = views::begin_generation(&mut c, fx.view.id, None)
+            .await
+            .unwrap();
+        let mut changes = vec![
+            upsert("docs/probe.md", text),
+            upsert("src/probe.rs", text),
+            upsert("src/probe.ts", text),
+        ];
+        if first == "rust" {
+            changes.reverse();
+        }
+        apply_file_changes(&mut c, fx.view.id, generation, &changes)
+            .await
+            .unwrap();
+        views::activate_generation(&mut c, fx.view.id, generation)
+            .await
+            .unwrap();
+        let pin = GenerationPin {
+            view: fx.view.id,
+            generation,
+        };
+        for (file_path, language) in [
+            ("docs/probe.md", "markdown"),
+            ("src/probe.rs", "rust"),
+            ("src/probe.ts", "typescript"),
+        ] {
+            let version = file_at(&mut c, pin, &path(file_path))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(version.content_hash, h(text));
+            assert_eq!(version.language.as_deref(), Some(language));
+        }
+        assert_eq!(
+            file_languages_at(&mut c, fx.org.id, pin).await.unwrap(),
+            std::collections::BTreeMap::from([
+                ("markdown".to_owned(), 1),
+                ("rust".to_owned(), 1),
+                ("typescript".to_owned(), 1),
+            ])
+        );
+    }
+}
+
+#[tokio::test]
+async fn language_follows_same_hash_renames_and_repairs_unclassified_noops() {
+    let db = require_db!();
+    let mut c = db.conn().await;
+    let fx = fixture(&mut c, "renamed-language").await;
+    let text = "// renamed shared language probe\n";
+    upsert_contents(&mut c, fx.org.id, &[blob(text)])
+        .await
+        .unwrap();
+    let g1 = views::begin_generation(&mut c, fx.view.id, None)
+        .await
+        .unwrap();
+    apply_file_changes(&mut c, fx.view.id, g1, &[upsert("docs/probe.md", text)])
+        .await
+        .unwrap();
+    views::activate_generation(&mut c, fx.view.id, g1)
+        .await
+        .unwrap();
+    let g2 = views::begin_generation(&mut c, fx.view.id, None)
+        .await
+        .unwrap();
+    apply_file_changes(
+        &mut c,
+        fx.view.id,
+        g2,
+        &[FileChange::Upsert {
+            path: path("src/probe.rs"),
+            content_hash: h(text),
+            renamed_from: Some(path("docs/probe.md")),
+        }],
+    )
+    .await
+    .unwrap();
+    views::activate_generation(&mut c, fx.view.id, g2)
+        .await
+        .unwrap();
+    let pin1 = GenerationPin {
+        view: fx.view.id,
+        generation: g1,
+    };
+    assert_eq!(
+        file_at(&mut c, pin1, &path("docs/probe.md"))
+            .await
+            .unwrap()
+            .unwrap()
+            .language
+            .as_deref(),
+        Some("markdown")
+    );
+    let history = file_history(&mut c, fx.view.id, &path("src/probe.rs"), 10)
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].language.as_deref(), Some("rust"));
+    assert_eq!(history[1].language.as_deref(), Some("markdown"));
+
+    sqlx::query(
+        "UPDATE file_version SET language = NULL, language_detection_version = 0
+         WHERE view_id = $1 AND path = 'src/probe.rs' AND valid_to IS NULL",
+    )
+    .bind(fx.view.id)
+    .execute(&mut *c)
+    .await
+    .unwrap();
+    let g3 = views::begin_generation(&mut c, fx.view.id, None)
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        let summary = apply_file_changes(&mut c, fx.view.id, g3, &[upsert("src/probe.rs", text)])
+            .await
+            .unwrap();
+        assert_eq!(
+            summary,
+            FileChangeSummary {
+                added: 0,
+                closed: 0
+            }
+        );
+    }
+    let repaired: (i64, Option<String>, i16) = sqlx::query_as(
+        "SELECT valid_from, language, language_detection_version FROM file_version
+         WHERE view_id = $1 AND path = 'src/probe.rs' AND valid_to IS NULL",
+    )
+    .bind(fx.view.id)
+    .fetch_one(&mut *c)
+    .await
+    .unwrap();
+    assert_eq!(repaired, (g2, Some("rust".into()), 1));
+}
+
+#[tokio::test]
+async fn occurrence_detection_refines_headers_and_preserves_unknown_languages() {
+    let db = require_db!();
+    let mut c = db.conn().await;
+    let fx = fixture(&mut c, "language-detector").await;
+    let long_shebang = format!("#!/usr/bin/env {}python3\nprint(1)\n", " ".repeat(70_000));
+    let unicode_header = format!(
+        "{}\nnamespace outside_byte_prefix {{}}\n",
+        "é".repeat(32_768)
+    );
+    let cases = [
+        (
+            "include/cpp.h",
+            "namespace probe {}\n".to_owned(),
+            Some("cpp"),
+            true,
+        ),
+        (
+            "include/objc.h",
+            "@interface Probe\n@end\n".to_owned(),
+            Some("objc"),
+            true,
+        ),
+        (
+            "include/plain.h",
+            "int probe(void);\n".to_owned(),
+            Some("c"),
+            true,
+        ),
+        ("include/unicode.h", unicode_header, Some("c"), true),
+        (
+            "bin/probe",
+            "#!/usr/bin/env python3\nprint(1)\n".to_owned(),
+            Some("python"),
+            true,
+        ),
+        ("bin/long-probe", long_shebang, Some("python"), true),
+        (
+            "src/override.rs",
+            "#!/usr/bin/env python3\n".to_owned(),
+            Some("rust"),
+            true,
+        ),
+        (
+            "docs/explicit.txt",
+            "#!/usr/bin/env python3\n".to_owned(),
+            Some("text"),
+            true,
+        ),
+        (
+            "data/unknown.bin",
+            "no conclusive detector\n".to_owned(),
+            Some("text"),
+            true,
+        ),
+        (
+            "data/unavailable.bin",
+            "unavailable binary".to_owned(),
+            None,
+            false,
+        ),
+        (
+            "include/unavailable.h",
+            "unavailable header".to_owned(),
+            None,
+            false,
+        ),
+    ];
+    let contents: Vec<_> = cases
+        .iter()
+        .map(|(_, text, _, available)| NewContent {
+            language: Some("python".into()),
+            redacted_text: available.then(|| text.clone()),
+            ..blob(text)
+        })
+        .collect();
+    upsert_contents(&mut c, fx.org.id, &contents).await.unwrap();
+    let generation = views::begin_generation(&mut c, fx.view.id, None)
+        .await
+        .unwrap();
+    let changes: Vec<_> = cases
+        .iter()
+        .map(|(p, text, _, _)| upsert(p, text))
+        .collect();
+    apply_file_changes(&mut c, fx.view.id, generation, &changes)
+        .await
+        .unwrap();
+    let pin = GenerationPin {
+        view: fx.view.id,
+        generation,
+    };
+    for (p, _, expected, _) in &cases {
+        let version = file_at(&mut c, pin, &path(p)).await.unwrap().unwrap();
+        assert_eq!(version.language.as_deref(), *expected, "{p}");
+    }
+    let classified: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM file_version WHERE view_id = $1 AND language_detection_version = 1",
+    )
+    .bind(fx.view.id)
+    .fetch_one(&mut *c)
+    .await
+    .unwrap();
+    assert_eq!(classified, i64::try_from(cases.len()).unwrap());
+}
+
+#[tokio::test]
+async fn header_detection_reads_only_the_occurrence_tenants_redacted_body() {
+    let db = require_db!();
+    let mut c = db.conn().await;
+    let first = fixture(&mut c, "first-header-tenant").await;
+    let second = fixture(&mut c, "second-header-tenant").await;
+    let missing = fixture(&mut c, "missing-header-tenant").await;
+    let hash = h("synthetic original shared header");
+    for (fx, text, expected) in [
+        (&first, Some("namespace first {}\n"), Some("cpp")),
+        (&second, Some("@interface Second\n@end\n"), Some("objc")),
+        (&missing, None, None),
+    ] {
+        if let Some(text) = text {
+            upsert_contents(
+                &mut c,
+                fx.org.id,
+                &[NewContent {
+                    hash,
+                    size_bytes: text.len() as u64,
+                    language: Some("rust".into()),
+                    redacted_text: Some(text.to_owned()),
+                }],
+            )
+            .await
+            .unwrap();
+        }
+        let generation = views::begin_generation(&mut c, fx.view.id, None)
+            .await
+            .unwrap();
+        apply_file_changes(
+            &mut c,
+            fx.view.id,
+            generation,
+            &[FileChange::Upsert {
+                path: path("include/shared.h"),
+                content_hash: hash,
+                renamed_from: None,
+            }],
+        )
+        .await
+        .unwrap();
+        let version = file_at(
+            &mut c,
+            GenerationPin {
+                view: fx.view.id,
+                generation,
+            },
+            &path("include/shared.h"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(version.language.as_deref(), expected);
+    }
+}
+
+#[tokio::test]
+async fn same_hash_noop_recovers_language_when_missing_tenant_source_becomes_available() {
+    let db = require_db!();
+    let mut c = db.conn().await;
+    let fx = fixture(&mut c, "recovered-language").await;
+    let text = "#!/usr/bin/env python3\nprint(1)\n";
+    let hash = h(text);
+    let change = FileChange::Upsert {
+        path: path("bin/recovered"),
+        content_hash: hash,
+        renamed_from: None,
+    };
+    let g1 = views::begin_generation(&mut c, fx.view.id, None)
+        .await
+        .unwrap();
+    apply_file_changes(&mut c, fx.view.id, g1, std::slice::from_ref(&change))
+        .await
+        .unwrap();
+    views::activate_generation(&mut c, fx.view.id, g1)
+        .await
+        .unwrap();
+    let before: (Option<String>, i16) = sqlx::query_as(
+        "SELECT language, language_detection_version FROM file_version
+         WHERE view_id = $1 AND path = 'bin/recovered'",
+    )
+    .bind(fx.view.id)
+    .fetch_one(&mut *c)
+    .await
+    .unwrap();
+    assert_eq!(before, (None, 1));
+    let g2 = views::begin_generation(&mut c, fx.view.id, None)
+        .await
+        .unwrap();
+    upsert_contents(&mut c, fx.org.id, &[blob(text)])
+        .await
+        .unwrap();
+    let expected_summary = FileChangeSummary {
+        added: 0,
+        closed: 0,
+    };
+    assert_eq!(
+        apply_file_changes(&mut c, fx.view.id, g2, std::slice::from_ref(&change))
+            .await
+            .unwrap(),
+        expected_summary
+    );
+    let after: (i64, Option<String>, i16, String) = sqlx::query_as(
+        "SELECT valid_from, language, language_detection_version, xmin::text FROM file_version
+         WHERE view_id = $1 AND path = 'bin/recovered'",
+    )
+    .bind(fx.view.id)
+    .fetch_one(&mut *c)
+    .await
+    .unwrap();
+    assert_eq!(after.0, g1);
+    assert_eq!(after.1.as_deref(), Some("python"));
+    assert_eq!(after.2, 1);
+    assert_eq!(
+        apply_file_changes(&mut c, fx.view.id, g2, std::slice::from_ref(&change))
+            .await
+            .unwrap(),
+        expected_summary
+    );
+    let unchanged: (i64, Option<String>, i16, String) = sqlx::query_as(
+        "SELECT valid_from, language, language_detection_version, xmin::text FROM file_version
+         WHERE view_id = $1 AND path = 'bin/recovered'",
+    )
+    .bind(fx.view.id)
+    .fetch_one(&mut *c)
+    .await
+    .unwrap();
+    assert_eq!(unchanged, after);
 }

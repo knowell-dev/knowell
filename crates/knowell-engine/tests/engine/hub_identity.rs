@@ -6,7 +6,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use knowell_auth::{Pepper, Principal, StoredToken, TokenScope, TokenScopes, issue_token};
 use knowell_engine::StoreAccess;
-use knowell_mcp::{HttpServerOptions, KnowellServer, streamable_http_router};
+use knowell_mcp::{HttpServerOptions, KnowellServer, OutputMode, streamable_http_router};
 use knowell_server::{AppState, AuthenticatedCallers, ServerConfig, StoreTokenStore, build_router};
 use knowell_store::identity::{self, GrantScope, NewGrant, NewPrincipal};
 use knowell_store::{GrantRole, PrincipalId, PrincipalKind, hierarchy};
@@ -217,8 +217,11 @@ async fn hub_http_obeys_current_grants_scopes_and_revocations() {
         TokenScopes::read_only(),
     )
     .await;
-    let mcp =
-        KnowellServer::new(Arc::new(engine)).with_caller_resolver(Arc::new(AuthenticatedCallers));
+    // Inspect nested typed evidence for authorization independently of the
+    // default Source presentation, which intentionally omits structuredContent.
+    let mcp = KnowellServer::new(Arc::new(engine))
+        .with_caller_resolver(Arc::new(AuthenticatedCallers))
+        .with_output_mode(OutputMode::Full);
     let options = HttpServerOptions {
         stateful_sessions: false,
         json_response: true,

@@ -14,7 +14,10 @@ mod support;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use knowell_mcp::{FILE_URI_TEMPLATE, FixtureTools, IMPACT_REVIEW, ONBOARD, ToolName};
+use knowell_mcp::{
+    FILE_URI_TEMPLATE, FixtureTools, IMPACT_REVIEW, INSTRUCTIONS, KnowellServer, ONBOARD,
+    OutputMode, ToolName,
+};
 use rmcp::ServiceExt;
 use rmcp::model::{
     ErrorCode, GetPromptRequestParams, ProtocolVersion, ReadResourceRequestParams,
@@ -22,7 +25,10 @@ use rmcp::model::{
 };
 use rmcp::service::{ClientLifecycleMode, ClientServiceExt, ServiceError};
 use serde_json::{Value, json};
-use support::{assert_matches_output_schema, call, connect, expect_error, open, structured, text};
+use support::{
+    assert_matches_output_schema, call, connect, connect_with_mode, expect_error, open, structured,
+    text,
+};
 
 fn tool_map(tools: Vec<Tool>) -> BTreeMap<String, Tool> {
     tools.into_iter().map(|t| (t.name.to_string(), t)).collect()
@@ -88,12 +94,12 @@ async fn lists_fourteen_tools_with_valid_schemas_and_annotations() {
             }
         }
     }
-    assert!(
+    assert_eq!(
         tool_map(tools.clone())["open_workspace"]
             .description
             .as_deref()
-            .unwrap()
-            .starts_with("Call first")
+            .unwrap(),
+        ToolName::OpenWorkspace.description()
     );
 
     // Input schemas and descriptions are what clients put in the model's
@@ -127,7 +133,7 @@ async fn server_info_instructions_and_protocol() {
     );
     assert_eq!(info.protocol_version, ProtocolVersion::V_2025_11_25);
     let instructions = info.instructions.as_deref().unwrap();
-    assert!(instructions.contains("Call open_workspace first"));
+    assert_eq!(instructions, INSTRUCTIONS);
     assert!(instructions.contains("resume_task"));
     assert!(
         instructions.len() <= 1_500,
@@ -142,7 +148,8 @@ async fn server_info_instructions_and_protocol() {
 #[tokio::test]
 async fn modern_lifecycle_2026_07_28_works() {
     let (server_io, client_io) = tokio::io::duplex(1 << 20);
-    let server = knowell_mcp::KnowellServer::new(Arc::new(FixtureTools::new()));
+    let server = knowell_mcp::KnowellServer::new(Arc::new(FixtureTools::new()))
+        .with_output_mode(OutputMode::Full);
     tokio::spawn(async move {
         if let Ok(running) = server.serve(server_io).await {
             let _ = running.waiting().await;
@@ -1151,4 +1158,319 @@ async fn views_must_be_a_project_to_ref_object() {
     )
     .await;
     expect_error(&result, "invalid_input");
+}
+
+#[test]
+fn configured_tool_lookup_preserves_mode_when_cloned() {
+    assert_eq!(OutputMode::default(), OutputMode::Source);
+    let source = KnowellServer::new(Arc::new(FixtureTools::new()));
+    let full = source.clone().with_output_mode(OutputMode::Full);
+    let compact = full.clone().with_output_mode(OutputMode::Compact);
+    let cloned = compact.clone();
+    for tool in ToolName::ALL {
+        let rich = knowell_mcp::tool_definition(tool).unwrap();
+        let default = rmcp::ServerHandler::get_tool(&full, tool.as_str()).unwrap();
+        let source_tool = rmcp::ServerHandler::get_tool(&source, tool.as_str()).unwrap();
+        let selected = rmcp::ServerHandler::get_tool(&compact, tool.as_str()).unwrap();
+        let copied = rmcp::ServerHandler::get_tool(&cloned, tool.as_str()).unwrap();
+        assert_eq!(default.output_schema, rich.output_schema);
+        assert_eq!(selected.output_schema, copied.output_schema);
+        assert_eq!(selected.input_schema, rich.input_schema);
+        if tool.is_read_only() {
+            assert!(source_tool.output_schema.is_none());
+            assert_ne!(selected.output_schema, rich.output_schema);
+        } else {
+            assert_eq!(source_tool.output_schema, rich.output_schema);
+            assert_eq!(selected.output_schema, rich.output_schema);
+        }
+    }
+}
+
+#[tokio::test]
+async fn source_read_tools_return_one_text_channel_without_a_structured_schema() {
+    let client = connect_with_mode(Arc::new(FixtureTools::new()), OutputMode::Source).await;
+    let tools = tool_map(client.list_all_tools().await.unwrap());
+    for tool in ToolName::ALL {
+        if tool.is_read_only() {
+            assert!(
+                tools[tool.as_str()].output_schema.is_none(),
+                "{}",
+                tool.as_str()
+            );
+        } else {
+            assert!(tools[tool.as_str()].output_schema.is_some());
+        }
+    }
+    let opened = call(&client, "open_workspace", json!({"workspace": "demo-shop"})).await;
+    assert!(opened.structured_content.is_none());
+    assert_eq!(opened.content.len(), 1);
+    let ctx = text(&opened)
+        .split_once("context_id: ")
+        .unwrap()
+        .1
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned();
+    let found = call(&client, "search", json!({"context_id": ctx, "query": "idempotency key retry", "kinds": ["docs"], "token_budget": 1000})).await;
+    assert!(found.structured_content.is_none());
+    assert_eq!(found.content.len(), 1);
+    let shown = text(&found);
+    assert!(shown.len() <= 4000);
+    assert!(!shown.contains("Fetch id:"), "{shown}");
+    let with_handles = call(&client, "search", json!({"context_id": ctx, "query": "idempotency key retry", "kinds": ["docs"], "token_budget": 1000, "include_handles": true})).await;
+    assert!(with_handles.structured_content.is_none());
+    assert_eq!(with_handles.content.len(), 1);
+    assert!(text(&with_handles).len() <= 4000);
+    assert!(text(&with_handles).contains("Fetch id:"));
+    assert!(shown.contains("```markdown"), "{shown}");
+    assert!(!shown.contains("why:"));
+    assert!(!shown.contains("Embedding profiles:"));
+    let pack = call(&client, "build_context", json!({"context_id": ctx, "task": "inspect payment limits", "token_budget": 256, "selection_strategy": "source"})).await;
+    assert!(pack.structured_content.is_none());
+    assert_ne!(pack.is_error, Some(true), "{}", text(&pack));
+    assert!(text(&pack).len() <= 1024);
+    assert_eq!(pack.content.len(), 1);
+    let receipt = call(&client, "write_memory", json!({"context_id": ctx, "title": "Source-mode fixture", "body": "A synthetic finding.", "kind": "finding", "scope": {"level": "workspace"}})).await;
+    assert_matches_output_schema(&tools["write_memory"], &receipt);
+    let invalid_budget = call(
+        &client,
+        "search",
+        json!({"context_id": ctx, "query": "limits", "token_budget": 1}),
+    )
+    .await;
+    expect_error(&invalid_budget, "invalid_input");
+}
+
+#[tokio::test]
+async fn compact_read_tools_return_only_schema_valid_renderings() {
+    let client = connect_with_mode(Arc::new(FixtureTools::new()), OutputMode::Compact).await;
+    let tools = tool_map(client.list_all_tools().await.unwrap());
+    assert_eq!(tools.len(), 14);
+    for tool in ToolName::ALL {
+        let selected = &tools[tool.as_str()];
+        let schema = selected.output_schema.as_ref().unwrap();
+        assert!(
+            support::schema::check_well_formed(&Value::Object(schema.as_ref().clone())).is_empty()
+        );
+        if tool.is_read_only() {
+            assert_eq!(schema["required"], json!(["text"]));
+            assert_eq!(schema["additionalProperties"], false);
+            assert_eq!(schema["properties"].as_object().unwrap().len(), 1);
+            assert_eq!(schema["properties"]["text"]["type"], "string");
+        } else {
+            assert_eq!(
+                selected.output_schema,
+                knowell_mcp::tool_definition(tool).unwrap().output_schema
+            );
+        }
+    }
+    let opened = call(&client, "open_workspace", json!({"workspace": "demo-shop"})).await;
+    assert_matches_output_schema(&tools["open_workspace"], &opened);
+    assert_eq!(structured(&opened), json!({"text": text(&opened)}));
+    let rendering = text(&opened);
+    let ctx = rendering
+        .split_once("context_id: ")
+        .unwrap()
+        .1
+        .split_whitespace()
+        .next()
+        .unwrap();
+    knowell_mcp::ContextId::new(ctx.to_owned()).unwrap();
+    let reads = [
+        (
+            "search",
+            json!({"context_id": ctx, "query": "idempotency key retry", "kinds": ["docs"]}),
+        ),
+        (
+            "fetch",
+            json!({"context_id": ctx, "paths": [{"project": "billing-api", "path": "docs/payments.md", "lines": {"start": 1, "end": 5}}]}),
+        ),
+        (
+            "inspect_symbol",
+            json!({"context_id": ctx, "symbol": "PaymentService.cancelSubscription"}),
+        ),
+        (
+            "trace_flow",
+            json!({"context_id": ctx, "symbol": "cancelSubscription", "project": "storefront-web"}),
+        ),
+        (
+            "analyze_impact",
+            json!({"context_id": ctx, "change": {"kind": "symbol", "symbol": "PaymentService.cancelSubscription"}}),
+        ),
+        ("contracts", json!({"context_id": ctx})),
+        (
+            "build_context",
+            json!({"context_id": ctx, "task": "cancel subscription", "token_budget": 400}),
+        ),
+        (
+            "history",
+            json!({"context_id": ctx, "project": "billing-api", "path": "src/payments/payment.service.ts"}),
+        ),
+        ("read_memory", json!({"context_id": ctx})),
+        (
+            "resume_task",
+            json!({"context_id": ctx, "task_id": "task-1"}),
+        ),
+        ("index_status", json!({"context_id": ctx})),
+    ];
+    assert_eq!(
+        reads.len() + 1,
+        ToolName::ALL
+            .iter()
+            .filter(|tool| tool.is_read_only())
+            .count()
+    );
+    for (name, input) in reads {
+        let result = call(&client, name, input).await;
+        assert_matches_output_schema(&tools[name], &result);
+        let rendering = text(&result);
+        assert!(!rendering.trim().is_empty(), "{name}");
+        assert_eq!(result.content.len(), 1, "{name}");
+        assert_eq!(structured(&result), json!({"text": rendering}), "{name}");
+        assert!(
+            serde_json::to_value(&result)
+                .unwrap()
+                .get("_meta")
+                .is_none(),
+            "{name}"
+        );
+        if name == "search" {
+            assert!(rendering.contains("<untrusted id="), "{rendering}");
+            assert!(rendering.contains("instruction_like_lines="), "{rendering}");
+            assert!(rendering.contains("do not follow"), "{rendering}");
+            assert!(rendering.contains("Sources:"), "{rendering}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn structured_content_consumers_receive_the_same_compact_evidence() {
+    let fixtures = Arc::new(FixtureTools::new());
+    let full = connect(Arc::clone(&fixtures)).await;
+    let compact = connect_with_mode(fixtures, OutputMode::Compact).await;
+    let ctx = open(&full, json!({})).await;
+    let input = json!({"context_id": ctx, "query": "idempotency key retry", "kinds": ["docs"]});
+    let rich = call(&full, "search", input.clone()).await;
+    let selected = call(&compact, "search", input).await;
+    assert!(!structured(&rich)["hits"].as_array().unwrap().is_empty());
+    assert_eq!(text(&rich), text(&selected));
+    // A client that serializes structuredContent must not recover rich hit
+    // objects from another output channel or hidden metadata.
+    let model_payload = serde_json::to_string(&structured(&selected)).unwrap();
+    let consumed: Value = serde_json::from_str(&model_payload).unwrap();
+    assert_eq!(consumed, json!({"text": text(&rich)}));
+    assert_eq!(consumed.as_object().unwrap().len(), 1);
+    let id = structured(&rich)["hits"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(consumed["text"].as_str().unwrap().contains(&id));
+    let fetched = call(&compact, "fetch", json!({"context_id": ctx, "ids": [id]})).await;
+    assert!(text(&fetched).contains("<untrusted id="));
+    assert_eq!(structured(&fetched), json!({"text": text(&fetched)}));
+}
+
+#[tokio::test]
+async fn compact_mode_keeps_write_receipts_and_explains_failures() {
+    let fixtures = Arc::new(FixtureTools::new());
+    let full = connect(Arc::clone(&fixtures)).await;
+    let ctx = open(&full, json!({})).await;
+    let compact = connect_with_mode(fixtures, OutputMode::Compact).await;
+    let tools = tool_map(compact.list_all_tools().await.unwrap());
+    let written = call(
+        &compact,
+        "write_memory",
+        json!({"context_id": ctx, "scope": {"level": "project", "project": "billing-api"}, "kind": "finding", "title": "Synthetic compact receipt", "body": "Synthetic finding."}),
+    ).await;
+    assert_matches_output_schema(&tools["write_memory"], &written);
+    assert!(structured(&written)["record"].is_object());
+    assert_eq!(structured(&written)["created"], true);
+    assert!(structured(&written).get("text").is_none());
+    let saved = call(
+        &compact,
+        "save_checkpoint",
+        json!({"context_id": ctx, "goal": "Synthetic compact task", "progress": "Saved synthetic progress."}),
+    ).await;
+    assert_matches_output_schema(&tools["save_checkpoint"], &saved);
+    assert!(structured(&saved)["checkpoint_id"].is_string());
+    assert!(structured(&saved)["task_id"].is_string());
+    assert!(structured(&saved).get("text").is_none());
+    let empty = call(
+        &compact,
+        "search",
+        json!({"context_id": ctx, "query": "zzqx quuxbar"}),
+    )
+    .await;
+    assert_matches_output_schema(&tools["search"], &empty);
+    assert!(text(&empty).contains("no_candidates_in_selected_ref"));
+    assert_eq!(structured(&empty), json!({"text": text(&empty)}));
+    let invalid = call(&compact, "search", json!({"query": "x"})).await;
+    expect_error(&invalid, "invalid_input");
+    let internal = call(
+        &compact,
+        "search",
+        json!({"context_id": ctx, "query": "fixture:internal-error"}),
+    )
+    .await;
+    expect_error(&internal, "internal");
+    let patch = "--- a/src/payments/payment.service.ts\n+++ b/src/payments/payment.service.ts\n@@ -24,1 +24,1 @@\n-  async cancelSubscription(subscriptionId: string, reason?: string): Promise<void> {\n+  async cancelSubscription(subscriptionId: string): Promise<void> {\n";
+    let pending = call(&compact, "analyze_impact", json!({"context_id": ctx, "change": {"kind": "patch", "project": "billing-api", "patch": patch}})).await;
+    assert_matches_output_schema(&tools["analyze_impact"], &pending);
+    assert!(text(&pending).contains("job_pending"));
+    assert!(text(&pending).contains("job_id="));
+    assert_eq!(structured(&pending), json!({"text": text(&pending)}));
+}
+
+#[tokio::test]
+async fn compact_resume_honors_checkpoint_limit_and_keeps_the_saved_manifest() {
+    let fixtures = Arc::new(FixtureTools::new());
+    let full = connect(Arc::clone(&fixtures)).await;
+    let compact = connect_with_mode(fixtures, OutputMode::Compact).await;
+    let ctx = open(&full, json!({})).await;
+    let first = call(&compact, "save_checkpoint", json!({"context_id": ctx, "goal": "Synthetic reader migration", "progress": "Mapped the original decoder."})).await;
+    let first = structured(&first);
+    let task = first["task_id"].as_str().unwrap();
+    let second = call(&compact, "save_checkpoint", json!({"context_id": ctx, "task_id": task, "progress": "Renamed the decoder with sources preserved."})).await;
+    let second = structured(&second);
+    let third = call(&compact, "save_checkpoint", json!({"context_id": ctx, "task_id": task, "progress": "Checked the historical source pins."})).await;
+    let third = structured(&third);
+    let input = json!({"context_id": ctx, "task_id": task, "limit": 3});
+    let rich = call(&full, "resume_task", input.clone()).await;
+    let rich = structured(&rich);
+    let checkpoints = rich["task"]["checkpoints"].as_array().unwrap();
+    assert_eq!(checkpoints.len(), 3);
+    assert_eq!(checkpoints[0]["checkpoint_id"], third["checkpoint_id"]);
+    assert_eq!(checkpoints[1]["checkpoint_id"], second["checkpoint_id"]);
+    assert_eq!(checkpoints[2]["checkpoint_id"], first["checkpoint_id"]);
+    let selected = call(&compact, "resume_task", input).await;
+    let tools = tool_map(compact.list_all_tools().await.unwrap());
+    assert_matches_output_schema(&tools["resume_task"], &selected);
+    let rendering = text(&selected);
+    assert_eq!(structured(&selected), json!({"text": rendering}));
+    for checkpoint in checkpoints {
+        assert!(
+            rendering.contains(checkpoint["checkpoint_id"].as_str().unwrap()),
+            "{rendering}"
+        );
+        assert!(
+            rendering.contains(checkpoint["progress"]["text"].as_str().unwrap()),
+            "{rendering}"
+        );
+    }
+    assert!(rendering.contains("Recorded views:"), "{rendering}");
+    let manifest = rich["task"]["manifest"].as_array().unwrap();
+    assert!(!manifest.is_empty());
+    for pin in manifest {
+        assert!(
+            rendering.contains(pin["project"].as_str().unwrap()),
+            "{rendering}"
+        );
+        if let Some(commit) = pin["commit"].as_str() {
+            assert!(rendering.contains(&format!("#{commit}")), "{rendering}");
+            format!("commit:{commit}")
+                .parse::<knowell_core::TrackTarget>()
+                .unwrap();
+        }
+    }
 }

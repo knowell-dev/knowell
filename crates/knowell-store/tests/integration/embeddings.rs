@@ -422,6 +422,7 @@ async fn scoped_search_fills_k_from_pinned_files_only() {
         k: 5,
         ef_search: Some(10),
         scope: Some(scope.clone()),
+        ..NearestOptions::new(5)
     };
     let hits = nearest(&mut c, &profile, &vector(1, 768), &options)
         .await
@@ -719,5 +720,621 @@ async fn per_path_inputs_scope_search_and_count_coverage() {
     assert_eq!(
         input_coverage(&mut c, pin, profile.id, "p2").await.unwrap(),
         InputCoverage::default()
+    );
+}
+
+#[tokio::test]
+async fn scoped_ann_filters_paths_and_languages_before_limit_with_literal_prefixes() {
+    let db = require_db!();
+    let mut c = db.conn().await;
+    let fx = fixture(&mut c, "filtered-api").await;
+    let other = fixture(&mut c, "foreign-api").await;
+    let profile = register_profile(&mut c, fx.org.id, &spec("filtered", "m1", 8))
+        .await
+        .unwrap();
+    let query = vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    let aligned = |cosine: f32| {
+        vec![
+            cosine,
+            (1.0 - cosine * cosine).sqrt(),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ]
+    };
+    // All closer distractors must be eliminated inside ANN, before k=2.
+    // '%' and '_' are literal path characters, not SQL LIKE wildcards.
+    let rows: Vec<(&str, Option<&str>, f32)> = vec![
+        ("src/%literal_/reader.rs", Some("rust"), 0.9),
+        ("src/%literal_/parser.rs", Some("rust"), 0.8),
+        ("src/XliteralY/closest.rs", Some("rust"), 1.0),
+        ("src/%literal_/script.py", Some("python"), 1.0),
+        ("vendor/closest.rs", Some("rust"), 1.0),
+        ("src/%literal_/deleted.rs", Some("rust"), 1.0),
+        ("src/%literal_/unknown.bin", None, 0.7),
+    ];
+    let blobs: Vec<_> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, (_, language, _))| {
+            let body = format!("synthetic filtered body {i}");
+            NewContent {
+                hash: h(&body),
+                size_bytes: body.len() as u64,
+                language: language.map(str::to_owned),
+                // The unknown .bin models unavailable binary text. A missing
+                // caller hint alone cannot override canonical source detection.
+                redacted_text: if language.is_none() { None } else { Some(body) },
+            }
+        })
+        .collect();
+    content::upsert_contents(&mut c, fx.org.id, &blobs)
+        .await
+        .unwrap();
+    let chunks: Vec<_> = blobs
+        .iter()
+        .enumerate()
+        .map(|(i, blob)| NewChunk {
+            content_hash: blob.hash,
+            parser_version: "filter-parser-1".into(),
+            ordinal: 0,
+            lines: LineRange::new(1, 1).unwrap(),
+            start_byte: 0,
+            end_byte: blob.size_bytes,
+            kind: "text".into(),
+            symbol_path: None,
+            prepared_input_hash: h(&format!("legacy filtered input {i}")),
+        })
+        .collect();
+    content::upsert_chunks(&mut c, fx.org.id, &chunks)
+        .await
+        .unwrap();
+    fill(
+        &mut c,
+        &profile,
+        rows.iter().enumerate().map(|(i, (_, _, similarity))| {
+            // This legacy input is shadowed by parser.rs's per-path input.
+            let similarity = if i == 1 { 1.0 } else { *similarity };
+            (chunks[i].prepared_input_hash, aligned(similarity))
+        }),
+    )
+    .await;
+    let parser_input = h("per-path parser input");
+    fill(&mut c, &profile, [(parser_input, aligned(0.8))].into_iter()).await;
+    let g1 = views::begin_generation(&mut c, fx.view.id, None)
+        .await
+        .unwrap();
+    let pin1 = GenerationPin {
+        view: fx.view.id,
+        generation: g1,
+    };
+    let changes: Vec<_> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, (p, _, _))| FileChange::Upsert {
+            path: path(p),
+            content_hash: blobs[i].hash,
+            renamed_from: None,
+        })
+        .collect();
+    content::apply_file_changes(&mut c, fx.view.id, g1, &changes)
+        .await
+        .unwrap();
+    content::replace_chunk_inputs(
+        &mut c,
+        pin1,
+        "filter-parser-1",
+        &[path(rows[1].0)],
+        &[content::NewChunkInput {
+            path: path(rows[1].0),
+            content_hash: blobs[1].hash,
+            ordinal: 0,
+            prepared_input_hash: parser_input,
+            embed: true,
+        }],
+    )
+    .await
+    .unwrap();
+    views::activate_generation(&mut c, fx.view.id, g1)
+        .await
+        .unwrap();
+    let g2 = views::begin_generation(&mut c, fx.view.id, None)
+        .await
+        .unwrap();
+    content::apply_file_changes(
+        &mut c,
+        fx.view.id,
+        g2,
+        &[FileChange::Delete {
+            path: path(rows[5].0),
+        }],
+    )
+    .await
+    .unwrap();
+    views::activate_generation(&mut c, fx.view.id, g2)
+        .await
+        .unwrap();
+    let pin2 = GenerationPin {
+        view: fx.view.id,
+        generation: g2,
+    };
+    let options = NearestOptions {
+        scope: Some(vec![pin2]),
+        path_prefixes: vec!["src/%literal_/".into()],
+        languages: vec!["rust".into()],
+        ..NearestOptions::new(2)
+    };
+    let hits = nearest(&mut c, &profile, &query, &options).await.unwrap();
+    assert_eq!(
+        hits.iter()
+            .map(|hit| hit.prepared_input_hash)
+            .collect::<Vec<_>>(),
+        vec![chunks[0].prepared_input_hash, parser_input]
+    );
+    let located = content::locate_chunk_inputs(
+        &mut c,
+        fx.org.id,
+        &[pin2],
+        &hits
+            .iter()
+            .map(|hit| hit.prepared_input_hash)
+            .collect::<Vec<_>>(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(located.len(), 2);
+    assert!(
+        located
+            .iter()
+            .all(|item| item.path.as_str().starts_with("src/%literal_/"))
+    );
+
+    // The same request pinned before deletion still sees its closest old input.
+    let old = nearest(
+        &mut c,
+        &profile,
+        &query,
+        &NearestOptions {
+            scope: Some(vec![pin1]),
+            ..options.clone()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        old.iter()
+            .map(|hit| hit.prepared_input_hash)
+            .collect::<Vec<_>>(),
+        vec![chunks[5].prepared_input_hash, chunks[0].prepared_input_hash]
+    );
+    let case_mismatch = NearestOptions {
+        path_prefixes: vec!["SRC/%literal_/".into()],
+        ..options.clone()
+    };
+    assert!(
+        nearest(&mut c, &profile, &query, &case_mismatch)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let python = NearestOptions {
+        languages: vec!["python".into()],
+        ..options.clone()
+    };
+    let hits = nearest(&mut c, &profile, &query, &python).await.unwrap();
+    assert_eq!(
+        hits.iter()
+            .map(|hit| hit.prepared_input_hash)
+            .collect::<Vec<_>>(),
+        vec![chunks[3].prepared_input_hash]
+    );
+    let unknown_language = NearestOptions {
+        languages: vec!["text".into()],
+        ..options.clone()
+    };
+    let hits = nearest(&mut c, &profile, &query, &unknown_language)
+        .await
+        .unwrap();
+    // Catalog presentation calls an unknown language "text", but explicit
+    // retrieval language filters admit only a known stored language.
+    assert!(hits.is_empty());
+    let unknown_unrestricted = NearestOptions {
+        languages: Vec::new(),
+        path_prefixes: vec![rows[6].0.into()],
+        ..options.clone()
+    };
+    let hits = nearest(&mut c, &profile, &query, &unknown_unrestricted)
+        .await
+        .unwrap();
+    assert_eq!(
+        hits.iter()
+            .map(|hit| hit.prepared_input_hash)
+            .collect::<Vec<_>>(),
+        vec![chunks[6].prepared_input_hash]
+    );
+
+    let foreign_generation = views::begin_generation(&mut c, other.view.id, None)
+        .await
+        .unwrap();
+    content::upsert_contents(&mut c, other.org.id, &[blobs[0].clone()])
+        .await
+        .unwrap();
+    content::upsert_chunks(&mut c, other.org.id, &[chunks[0].clone()])
+        .await
+        .unwrap();
+    content::apply_file_changes(
+        &mut c,
+        other.view.id,
+        foreign_generation,
+        &[FileChange::Upsert {
+            path: path("src/%literal_/foreign.rs"),
+            content_hash: blobs[0].hash,
+            renamed_from: None,
+        }],
+    )
+    .await
+    .unwrap();
+    views::activate_generation(&mut c, other.view.id, foreign_generation)
+        .await
+        .unwrap();
+    let foreign_pin = GenerationPin {
+        view: other.view.id,
+        generation: foreign_generation,
+    };
+    let foreign = NearestOptions {
+        scope: Some(vec![foreign_pin]),
+        ..options.clone()
+    };
+    assert!(
+        nearest(&mut c, &profile, &query, &foreign)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let mixed = NearestOptions {
+        scope: Some(vec![foreign_pin, pin2]),
+        ..options.clone()
+    };
+    assert_eq!(
+        nearest(&mut c, &profile, &query, &mixed).await.unwrap(),
+        nearest(&mut c, &profile, &query, &options).await.unwrap()
+    );
+    let unscoped = NearestOptions {
+        scope: None,
+        ..options
+    };
+    assert!(matches!(
+        nearest(&mut c, &profile, &query, &unscoped).await,
+        Err(StoreError::InvalidInput(_))
+    ));
+}
+
+#[tokio::test]
+async fn scoped_ann_uses_occurrence_languages_for_per_path_inputs_before_limit() {
+    assert_occurrence_languages_before_limit(true).await;
+}
+
+#[tokio::test]
+async fn scoped_ann_uses_occurrence_languages_for_legacy_shared_inputs_before_limit() {
+    assert_occurrence_languages_before_limit(false).await;
+}
+
+async fn assert_occurrence_languages_before_limit(per_path: bool) {
+    let db = require_db!();
+    let mut c = db.conn().await;
+    let fx = fixture(&mut c, "occurrence-languages").await;
+    let foreign = fixture(&mut c, "foreign-occurrence-languages").await;
+    let profile = register_profile(&mut c, fx.org.id, &spec("occurrence-language", "m1", 8))
+        .await
+        .unwrap();
+    let parser = "occurrence-language-parser-1";
+    let shared = "pub fn occurrence_language_probe() {}\n";
+    let neutral = "synthetic source without a language clue\n";
+    let unavailable = "synthetic binary blob with no stored source text";
+    let bodies = [
+        shared,
+        "closest synthetic Markdown distractor\n",
+        "another synthetic Markdown distractor\n",
+        neutral,
+        "pub fn outside_the_literal_prefix() {}\n",
+        unavailable,
+    ];
+    let blobs: Vec<_> = bodies
+        .iter()
+        .enumerate()
+        .map(|(ordinal, body)| NewContent {
+            hash: h(body),
+            size_bytes: body.len() as u64,
+            // The shared blob's first hint cannot classify both occurrences.
+            language: Some("markdown".into()),
+            // Only the separate binary blob lacks source. Available unknown
+            // extensions classify as text, consistently with the parser.
+            redacted_text: (ordinal != 5).then(|| (*body).into()),
+        })
+        .collect();
+    content::upsert_contents(&mut c, fx.org.id, &blobs)
+        .await
+        .unwrap();
+    let chunks: Vec<_> = blobs
+        .iter()
+        .enumerate()
+        .map(|(ordinal, blob)| NewChunk {
+            content_hash: blob.hash,
+            parser_version: parser.into(),
+            ordinal: 0,
+            lines: LineRange::new(1, 1).unwrap(),
+            start_byte: 0,
+            end_byte: blob.size_bytes,
+            kind: "text".into(),
+            symbol_path: None,
+            prepared_input_hash: h(&format!("legacy occurrence language input {ordinal}")),
+        })
+        .collect();
+    content::upsert_chunks(&mut c, fx.org.id, &chunks)
+        .await
+        .unwrap();
+    let rows = [
+        ("src/%literal_/shared.md", h(shared), 0.95_f32),
+        ("src/%literal_/desired.rs", h(shared), 0.8),
+        ("src/%literal_/closest.md", h(bodies[1]), 1.0),
+        ("src/%literal_/next.md", h(bodies[2]), 0.99),
+        ("src/%literal_/unknown.bin", h(unavailable), 0.7),
+        ("src/%literal_/explicit.txt", h(neutral), 0.7),
+        ("outside/closest.rs", h(bodies[4]), 1.0),
+        ("src/%literal_/ordinary.unknown", h(neutral), 0.7),
+    ];
+    let input_for = |file: &str, hash: ContentHash| {
+        if per_path {
+            h(&format!("per-path occurrence language input {file}"))
+        } else {
+            chunks
+                .iter()
+                .find(|chunk| chunk.content_hash == hash)
+                .unwrap()
+                .prepared_input_hash
+        }
+    };
+    let generation = views::begin_generation(&mut c, fx.view.id, None)
+        .await
+        .unwrap();
+    let pin = GenerationPin {
+        view: fx.view.id,
+        generation,
+    };
+    let changes: Vec<_> = rows
+        .iter()
+        .map(|(file, hash, _)| FileChange::Upsert {
+            path: path(file),
+            content_hash: *hash,
+            renamed_from: None,
+        })
+        .collect();
+    content::apply_file_changes(&mut c, fx.view.id, generation, &changes)
+        .await
+        .unwrap();
+    if per_path {
+        let paths: Vec<_> = rows.iter().map(|(file, _, _)| path(file)).collect();
+        let inputs: Vec<_> = rows
+            .iter()
+            .map(|(file, hash, _)| content::NewChunkInput {
+                path: path(file),
+                content_hash: *hash,
+                ordinal: 0,
+                prepared_input_hash: input_for(file, *hash),
+                embed: true,
+            })
+            .collect();
+        content::replace_chunk_inputs(&mut c, pin, parser, &paths, &inputs)
+            .await
+            .unwrap();
+    }
+    views::activate_generation(&mut c, fx.view.id, generation)
+        .await
+        .unwrap();
+    let files = content::files_at(&mut c, pin).await.unwrap();
+    let language_at = |file: &str| {
+        files
+            .iter()
+            .find(|version| version.path.as_str() == file)
+            .unwrap()
+            .language
+            .as_deref()
+    };
+    assert_eq!(language_at(rows[0].0), Some("markdown"));
+    assert_eq!(language_at(rows[1].0), Some("rust"));
+    assert_eq!(language_at(rows[4].0), None);
+    assert_eq!(language_at(rows[5].0), Some("text"));
+    assert_eq!(language_at(rows[7].0), Some("text"));
+    let aligned = |cosine: f32| {
+        vec![
+            cosine,
+            (1.0 - cosine * cosine).sqrt(),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ]
+    };
+    let query = aligned(1.0);
+    let legacy_similarities = [if per_path { 1.0 } else { 0.8 }, 1.0, 0.99, 0.7, 1.0, 0.7];
+    fill(
+        &mut c,
+        &profile,
+        chunks
+            .iter()
+            .zip(legacy_similarities)
+            .map(|(chunk, similarity)| (chunk.prepared_input_hash, aligned(similarity))),
+    )
+    .await;
+    if per_path {
+        fill(
+            &mut c,
+            &profile,
+            rows.iter()
+                .map(|(file, hash, similarity)| (input_for(file, *hash), aligned(*similarity))),
+        )
+        .await;
+    }
+    let options = NearestOptions {
+        scope: Some(vec![pin]),
+        path_prefixes: vec!["src/%literal_/".into()],
+        languages: vec!["rust".into()],
+        ..NearestOptions::new(1)
+    };
+    let expected = input_for(rows[1].0, rows[1].1);
+    let unfiltered = NearestOptions {
+        languages: Vec::new(),
+        ..options.clone()
+    };
+    let closer = nearest(&mut c, &profile, &query, &unfiltered)
+        .await
+        .unwrap();
+    assert_eq!(closer.len(), 1);
+    assert_eq!(
+        closer[0].prepared_input_hash,
+        input_for(rows[2].0, rows[2].1)
+    );
+    let hits = nearest(&mut c, &profile, &query, &options).await.unwrap();
+    assert_eq!(hits.len(), 1, "a filtered Rust occurrence must survive k=1");
+    assert_eq!(hits[0].prepared_input_hash, expected);
+    let located = content::locate_chunk_inputs(&mut c, fx.org.id, &[pin], &[expected])
+        .await
+        .unwrap();
+    let located_paths: Vec<_> = located.iter().map(|item| item.path.as_str()).collect();
+    if per_path {
+        // The closer content-level vector is shadowed by both per-path inputs.
+        assert_ne!(expected, chunks[0].prepared_input_hash);
+        assert_eq!(located_paths, vec![rows[1].0]);
+    } else {
+        // ANN admits an input if one occurrence qualifies. Localization still
+        // returns both bindings; the engine applies the language filter again.
+        assert_eq!(located_paths, vec![rows[1].0, rows[0].0]);
+    }
+    for (file, hash, language, admitted) in [
+        (rows[0].0, rows[0].1, "rust", false),
+        (rows[4].0, rows[4].1, "text", false),
+        (rows[5].0, rows[5].1, "text", true),
+        (rows[7].0, rows[7].1, "text", true),
+    ] {
+        let filtered = NearestOptions {
+            path_prefixes: vec![file.into()],
+            languages: vec![language.into()],
+            ..options.clone()
+        };
+        let result = nearest(&mut c, &profile, &query, &filtered).await.unwrap();
+        assert_eq!(
+            result.len(),
+            if admitted { 1 } else { 0 },
+            "{file}: {language}"
+        );
+        if admitted {
+            assert_eq!(result[0].prepared_input_hash, input_for(file, hash));
+        }
+    }
+
+    content::upsert_contents(&mut c, foreign.org.id, &[blobs[0].clone()])
+        .await
+        .unwrap();
+    content::upsert_chunks(&mut c, foreign.org.id, &[chunks[0].clone()])
+        .await
+        .unwrap();
+    let foreign_generation = views::begin_generation(&mut c, foreign.view.id, None)
+        .await
+        .unwrap();
+    let foreign_pin = GenerationPin {
+        view: foreign.view.id,
+        generation: foreign_generation,
+    };
+    let foreign_path = path("src/%literal_/foreign.rs");
+    content::apply_file_changes(
+        &mut c,
+        foreign.view.id,
+        foreign_generation,
+        &[FileChange::Upsert {
+            path: foreign_path.clone(),
+            content_hash: h(shared),
+            renamed_from: None,
+        }],
+    )
+    .await
+    .unwrap();
+    if per_path {
+        content::replace_chunk_inputs(
+            &mut c,
+            foreign_pin,
+            parser,
+            std::slice::from_ref(&foreign_path),
+            &[content::NewChunkInput {
+                path: foreign_path.clone(),
+                content_hash: h(shared),
+                ordinal: 0,
+                prepared_input_hash: expected,
+                embed: true,
+            }],
+        )
+        .await
+        .unwrap();
+    }
+    views::activate_generation(&mut c, foreign.view.id, foreign_generation)
+        .await
+        .unwrap();
+    let only_foreign = NearestOptions {
+        scope: Some(vec![foreign_pin]),
+        ..options.clone()
+    };
+    assert!(
+        nearest(&mut c, &profile, &query, &only_foreign)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let mixed = NearestOptions {
+        scope: Some(vec![foreign_pin, pin]),
+        ..options.clone()
+    };
+    assert_eq!(
+        nearest(&mut c, &profile, &query, &mixed).await.unwrap(),
+        hits
+    );
+    let next_generation = views::begin_generation(&mut c, fx.view.id, None)
+        .await
+        .unwrap();
+    content::apply_file_changes(
+        &mut c,
+        fx.view.id,
+        next_generation,
+        &[FileChange::Delete {
+            path: path(rows[1].0),
+        }],
+    )
+    .await
+    .unwrap();
+    views::activate_generation(&mut c, fx.view.id, next_generation)
+        .await
+        .unwrap();
+    let latest = NearestOptions {
+        scope: Some(vec![
+            GenerationPin {
+                view: fx.view.id,
+                generation: next_generation,
+            },
+            foreign_pin,
+        ]),
+        ..options.clone()
+    };
+    assert!(
+        nearest(&mut c, &profile, &query, &latest)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        nearest(&mut c, &profile, &query, &options).await.unwrap(),
+        hits
     );
 }

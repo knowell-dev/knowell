@@ -30,14 +30,14 @@ each other's view; a context pins one commit per project for its whole life.
 
 | Tool | Kind | Use it to | Key inputs | Returns |
 |---|---|---|---|---|
-| `open_workspace` | read | Start every session | `workspace?`, `views`, `working_directory?`, `summary_budget_tokens?` | `context_id`, view manifest, projects and roles, accepted rules, open tasks, recent decisions |
-| `search` | read | Find code, docs, contracts, memory | `query`, `kinds`, `projects`, `path_prefixes`, `languages`, `limit` | `hits` (with evidence and snippets), `memory_hits`, `query_class` |
+| `open_workspace` | read | Open or refresh a pinned context | `workspace?`, `views`, `working_directory?`, `summary_budget_tokens?` | `context_id`, view manifest, projects and roles, accepted rules, open tasks, recent decisions |
+| `search` | read | Find code, docs, contracts, memory | `query`, `kinds`, `projects`, `path_prefixes`, `languages`, `limit`, `token_budget`, `include_snippets`, `include_diagnostics` | `hits` (with evidence and snippets), `memory_hits`, `query_class` |
 | `fetch` | read | Read exact versioned source | `ids` and/or `paths` (`project`, `path`, `lines?`), `context_lines` | `items` with content, evidence and `status` (current / changed / deleted) |
 | `inspect_symbol` | read | Definition, signature, doc, references, implementations, tests | `symbol` or `id`, `project?`, `include`, `limit` | `symbols` (several when ambiguous), `analysis` level |
 | `trace_flow` | read | Follow relations across projects | `id`, `symbol` or `contract`; `direction`, `max_depth` (1-5), `relations` | `nodes` and evidenced `edges`; may return a `job` |
 | `analyze_impact` | read | What a change breaks | `change`: `symbol` / `file` / `diff` (`base`, `head?`) / `patch` (unified diff, at most 1 MiB) | `changed`, `impacted`, `tests`, `risk` with factors; patches return a `job` |
 | `contracts` | read | Endpoints, topics, RPCs, tables, env names, i18n keys, packages | `query`, `kinds`, `project`, `only_drift` | `contracts` with participants and `drift` findings |
-| `build_context` | read | A source pack for a task | `task`, `token_budget` (256-200000, default 8000), `focus_paths`, `focus_symbols`, `include` | `entries` (each with `why_relevant`), `budget`, `uncertainties` |
+| `build_context` | read | A source pack for a task | `task`, `token_budget` (256-200000, default 8000), `projects`, `path_prefixes`, `languages`, `focus_paths`, `focus_symbols`, `include` | `entries` (each with `why_relevant`), `budget`, `uncertainties` |
 | `history` | read | Blame, commits, co-changes, rationale | `project` + `path` (+ `lines`) or `symbol`, or `id`; `include` | `commits`, `blame`, `co_changed`, `rationale` |
 | `read_memory` | read | Decisions, rules, notes, findings | `ids`, `query`, `scopes`, `project`, `task_id`, `kinds`, `statuses` | `records` (scope, status, author, evidence, version) |
 | `write_memory` | **write** | Record a finding or decision | `scope`, `kind`, `title`, `body`, `evidence` (result ids), `supersedes?`, `idempotency_key?` | the stored `record` (agent writes are `proposed`) |
@@ -45,15 +45,49 @@ each other's view; a context pins one commit per project for its whole life.
 | `save_checkpoint` | **write** | Save progress (or start a task) | `task_id?` (or `goal`), `progress`, `decisions`, `open_questions`, `next_steps`, `status?`, `idempotency_key?` | `task_id`, `checkpoint_id`, recorded manifest, decision records |
 | `index_status` | read | Freshness, coverage, jobs | `projects`, `job_ids` | per-project tiers, languages, latest-seen vs indexed commit; `jobs` |
 
+`build_context` uses the same hard source filters as `search`: `projects`,
+literal `path_prefixes` and `languages` constrain retrieval, expansion and
+packing. Prefixes are source-root-relative and case-sensitive; a trailing `/`
+requires a directory boundary. Sources without a known language do not pass
+an explicit language filter. `include` also controls source admission before
+body acquisition. Accepted workspace rules remain applicable; an explicit
+project filter excludes other projects' memory records.
+
+`focus_paths` and `focus_symbols` remain preferred sources, rather than an
+implicit restriction on the rest of the pack. A focus path outside explicit
+project/path filters is rejected; language or section exclusions are reported
+without acquiring that body's text. The live engine resolves focus symbols
+within the selected source scope. A unique definition becomes an actual
+pinned source anchor; ambiguous or unmatched names remain uncertainties and
+are not replaced with another symbol. Use an in-file qualified name or
+`src/native/mapping.rs#to_document` to disambiguate, together with `projects`
+when several projects contain that path. This verifies a source definition,
+not compiler-grade call resolution. Explicit ranges and selected definitions
+keep the context's personal-layer version when one shadows the shared file.
+Whole focus files or definitions that exceed the budget are omitted with an
+actionable gap; source is never silently clipped to make them fit. Regions
+already covered by an emitted focus source are not packed a second time.
+
 Annotations: every tool is `readOnlyHint: true`, `idempotentHint: true`,
 except `write_memory` and `save_checkpoint` (`readOnlyHint: false`,
 `idempotentHint: false`). No tool is destructive (writes add records and
 versions, never delete), and none is open-world (`openWorldHint: false`).
 
-Server `instructions` describe the workflow: `open_workspace` first, then
-`search` / `fetch` / `inspect_symbol` / `trace_flow` / `contracts`; before a
-change `analyze_impact` and `build_context`; save with `write_memory` and
-`save_checkpoint`; resume with `resume_task`.
+Server `instructions` describe adaptive navigation. Use scoped local reads or
+`rg` for concrete targets and bounded `search` for unknown ownership or behavior.
+Open or reuse a workspace context for related Knowell calls, verify project roots
+before local reads, and reconcile relevant pinned evidence with the checkout before
+editing. Reuse useful returned source; `fetch` is conditional on missing passages
+or required retained versions. Symbol, graph, impact and context tools answer
+specific unresolved questions instead of forming a mandatory sequence. Persistence
+with `write_memory` or `save_checkpoint` must be within the authorized task;
+`resume_task` is relevant when continuing earlier work.
+
+The portable [`knowell` skill](../../skills/knowell/SKILL.md) gives coding agents
+the same routing and source-version guidance, with conditional cross-project
+patterns. Its repository files do not install a skill or change existing client
+configuration. Client-specific discovery and installation remain separate from
+the MCP connection.
 
 ### Size of the tool listing
 
@@ -68,25 +102,125 @@ leaves out (patterns, text lengths, exclusive fields). The test
 `model_facing_size_stays_within_budget` fails above **14 000 bytes** in total.
 Measure with `python scripts/buildlock.py cargo run -q -p knowell-mcp --example tool_size`.
 
-| Tool | input+desc (bytes) | Tool | input+desc (bytes) |
-|---|---:|---|---:|
-| `open_workspace` | 642 | `history` | 937 |
-| `search` | 987 | `read_memory` | 1087 |
-| `fetch` | 935 | `write_memory` | 1353 |
-| `inspect_symbol` | 770 | `resume_task` | 777 |
-| `trace_flow` | 1307 | `save_checkpoint` | 1353 |
-| `analyze_impact` | 1112 | `index_status` | 506 |
-| `contracts` | 814 | `build_context` | 1272 |
-| **Total** | **13 852 (~3.5k tokens)** | | |
-
 ### Results
 
-Each successful call returns the full output as `structuredContent` and a short
-text rendering as its text content (ids, evidence, reasons, gaps, fenced
-untrusted text). The rendering is deliberately not a second copy of the JSON,
-to save the agent's context. Output schemas are advertised (compacted: no
-descriptions, enums as plain `enum` lists) so clients can validate results;
-they are not part of the size budget above.
+The default **source** mode returns successful read tools as one TextContent
+block, without `structuredContent` or a structured output schema. Source-returning
+tools show shared project/view/commit provenance, actual displayed source ranges,
+and fenced code, documentation or tests. Search hides ordinary fetch handles by
+default; `include_handles: true` shows exact pinned handles. Continuation and
+next-omitted handles remain visible when needed to acquire missing source. They omit repeated
+hashes, ranking signals on source bodies and generic reference-resolution warnings. Real missing
+index, stale-version, acquisition-limit and budget limitations remain explicit.
+No generative model writes the response. Analytical source views share version
+pins and show compact nodes, relation evidence and proof locations rather than
+repeating full provenance. Their exact read handles, resolution states, risk
+factors, pending jobs and material gaps remain visible. Write tools keep
+schema-valid typed receipts.
+
+`search` with `include_snippets: false` returns locators: matched anchor ranges,
+the verified enclosing symbol when available, and compact acquisition signals
+(`exact symbol`, `exact path`, `lexical(terms)`, `vector`, or evidenced relations).
+An anchor is not a claim that the whole declaration was read. Titles do not
+replace verified symbols, and vector similarity is not a dependency. One note
+explains omitted bodies instead of repeating it for every hit. Request
+`include_handles: true` to expose exact pinned source identities for subsequent
+reads. Path-based reads alone do not reproduce saved personal source versions;
+personal locations also show a compact file-content prefix, which is a display
+hint rather than an exact replay identity.
+
+Locator output avoids body packing and can skip selected-path source hydration;
+it still uses the configured hybrid retrieval, including query embeddings and
+ANN when applicable. It does not promise zero provider calls or local-only
+latency. Opt-in `include_diagnostics: true` reports actual retrieval counters,
+hydrated and skipped paths, preparation scope, timings and embedding usage.
+
+`search` (default 4000 estimated tokens) and `build_context` in source mode budget
+the complete rendered response, including
+headers, IDs, fences and notes, at four UTF-8 bytes per estimated token, with an
+800,000-byte hard cap. It retains complete selected entries; an entry that does
+not fit is omitted explicitly rather than silently clipping a body or losing a
+late guard. The next omitted fetch ID is included when it fits. This is a
+model-agnostic byte estimate, not an assertion about a client's actual tokenizer.
+The query engine owns excerpt selection. `content_lines` and `snippet_lines`
+describe actual shown lines; `snippet_id`, when supplied, identifies the exact
+shown range separately from the original hit's ID. An extracted skeleton or
+contract summary is labelled as an extracted representation, not raw source.
+Partial source blocks include distinct exact continuation IDs, displayed as
+`More source: fetch ...`; fetching the displayed excerpt ID alone does not
+advance. Older engines without these handles are identified explicitly.
+Source scope headers use 12-digit commit prefixes unless two pins for the same
+project/view/layer share a prefix, in which case the full commits are shown.
+Full commit and file-content identities remain bound by fetch handles.
+
+Agent connections use `know mcp --output-mode source`. Source is also the
+`KnowellServer::new` and `serve_stdio` default. Existing running or installed
+clients require reconnection/configuration verification; changing this library
+does not rewrite their settings.
+
+Explicit **full** mode returns each successful call's typed output as
+`structuredContent` and the existing text rendering (ids, evidence, reasons,
+gaps and fenced untrusted text). Some clients expose the structured JSON to the
+model, so TextContent alone does not bound what the agent reads in full mode.
+
+Agent connections can explicitly select `know mcp --output-mode compact`.
+In **compact** mode, successful read tools return only `{"text": "..."}` as
+structured content, containing exactly the same rendering as TextContent.
+Each read tool advertises the corresponding schema with one required string
+field and no extra properties. `write_memory` and `save_checkpoint` keep their
+full typed receipts; errors, source resources and prompts are unchanged.
+
+Library users select the same mode with
+`KnowellServer::new(tools).with_output_mode(OutputMode::Compact)` and use
+`serve_stdio_with` or the configured Streamable HTTP router. `serve_stdio`,
+`KnowellServer::new` uses source mode; the standalone `tool_definition` and
+`tool_definitions` helpers retain full schemas for programmatic compatibility.
+The table above describes the full data model; compact mode
+renders it for agents instead of retaining its machine-readable fields.
+Programmatic clients needing those fields or search diagnostics should use
+full mode. Historical commit and blame IDs are displayed in full, including
+memory evidence and saved task manifests. Memory conflicts and successor IDs
+remain explicit. Task resumption renders every returned checkpoint in order,
+with the saved manifest and both paths and full commits for source renames.
+
+The mode is fixed for one server instance and its clones. Refresh the tool
+catalogue when changing it so a cached full schema is not reused for source or
+compact results. Structured output schemas in full/compact mode are compacted
+(no descriptions, enums as plain `enum` lists). Source read tools omit them
+because they return no structured content. They are not
+part of the size budget above. As with the existing full mode, TextContent
+uses the human rendering instead of duplicating serialized structured JSON.
+Compact mode reduces repeated metadata; it does not enforce a source-text
+budget or prove model-token, task-quality or latency improvements.
+
+Source rendering uses Markdown fences longer than any same-character run in
+the body, choosing backticks or tildes to minimize the delimiter. Source text is
+retained verbatim inside the fence; path and other header values are escaped
+to prevent hostile metadata from forging source blocks. Instruction-like source
+text is flagged, and all repository and memory text remains untrusted data.
+
+The full/compact search text shares source provenance within one response. A `v1`, `v2`, ...
+header identifies the full project, view, layer, commit, analysis tier and
+index state. Hits with different values get different headers, including
+commits whose first 12 digits coincide. Each hit still includes its complete
+fetchable `id`, path, full evidence range, file-hash prefix, retrieval reasons
+and fenced untrusted snippet. Semantic profiles are named once as `p1`, `p2`,
+...; these labels are local display references, not fetch ids. The structured
+output in full mode retains every evidence field on every hit.
+
+When the displayed snippet covers the full evidence range, search text avoids
+a duplicate `shown` range. Shorter snippets keep both ranges, and truncation
+is stated explicitly with a reminder to fetch the original id. The id always
+addresses the full evidence range.
+
+The deterministic `search_text_bytes_shrink_for_twelve_hits_with_shared_pin`
+unit fixture compares the former per-hit text layout with the shared-header
+layout, using 12 synthetic three-line Rust hits at one pin and one embedding
+profile. Its UTF-8 text sizes are **5,325 bytes before** and **4,267 bytes
+after**: **1,058 bytes (19.87%) less** with all ids, source bodies and fences
+retained. This measures text rendering only; it does not measure model tokens,
+client context usage, JSON size, retrieval quality or latency. Results vary
+with source length and the number of distinct pins and profiles.
 
 ## Evidence
 
@@ -192,8 +326,8 @@ error (-32602).
 
 - Prompt `onboard` (`workspace?`, `focus?`): get oriented: projects, rules,
   decisions, open tasks, then an optional focus area.
-- Prompt `impact-review` (`change`, `project?`, `workspace?`): impact of a
-  change across projects, then record the finding.
+- Prompt `impact-review` (`change`, `project?`, `workspace?`): review a change's
+  impact across projects with evidence and gaps; persist only when authorized.
 - Resource template `knowell://{workspace}/{project}/{view}/{path}`: a file at
   a view. `view` is a ref with `/` percent-encoded (`branch:feature%2Fx`);
   `path` keeps `/`; `#L10-L20` selects lines. Contents are `text/plain` with
@@ -205,7 +339,8 @@ error (-32602).
 
 - **stdio** (edge, standalone): `serve_stdio(tools)`, or `serve_stdio_with(server)`
   for a custom caller resolver. stdout carries protocol messages; the binary
-  must log to stderr.
+  must log to stderr. `serve_stdio_with_io(server, reader, writer)` serves the
+  same protocol over owned byte streams for embedding or client checks.
 - **Streamable HTTP** (hub): `streamable_http_router(server, &options)` returns
   an `axum::Router` serving `/mcp` (nest it to mount elsewhere);
   `streamable_http_service` returns the rmcp tower service itself, whose
@@ -227,8 +362,14 @@ error (-32602).
 
 rmcp 3.5 negotiates every MCP revision it knows: 2024-11-05, 2025-03-26,
 2025-06-18 and 2025-11-25 through the `initialize` handshake, and 2026-07-28
-through `server/discover` with per-request metadata. The tests cover
-2025-11-25 (initialize, stdio-style duplex and HTTP) and 2026-07-28 (discover).
+through `server/discover` with per-request metadata. A stdio client can probe
+discovery and then choose an `initialize` handshake on the same pipe, including
+pipelined requests. The probe is answered before rmcp establishes its peer, so
+the chosen legacy session does not inherit an inline metadata requirement.
+Clients that continue with discovery keep full per-request validation; no
+client capabilities are synthesized. HTTP negotiation is unchanged.
+Raw-wire tests cover all four handshake versions, discovery-to-initialize
+fallback, modern metadata errors and recovery, and actual Source tool content.
 Clients on 2024-11-05 ignore annotations, output schemas and structured content
 and read the text rendering.
 

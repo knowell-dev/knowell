@@ -10,13 +10,16 @@ mod evidence;
 mod graph;
 mod ids;
 mod memory;
+mod parse_product;
 mod patch;
+mod precise;
 mod profiles;
 mod rest;
 mod scope;
 mod search;
 mod settings;
 mod snapshot;
+mod source_region;
 mod tools;
 mod usage;
 
@@ -29,4 +32,4 @@ pub use memory::{
     MemoryRepo, RecordQuery, RecordRow, StoreMemory, TaskRow,
 };
 pub use profiles::{ProfileMetadata, ProfileSelector};
-pub use settings::{DomainConfig, EngineSettings, RelationStageInfo};
+pub use settings::{DomainConfig, EngineSettings, ParseProductCacheSettings, RelationStageInfo};

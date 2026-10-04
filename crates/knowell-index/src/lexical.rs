@@ -9,8 +9,9 @@
 //!
 //! Generation `g` is built by copying the complete directory of the active
 //! generation, then deleting the documents of changed and removed paths and
-//! adding the new versions. Tantivy segments are immutable, so the copy is
-//! a plain file copy and the base directory is never written to; queries on
+//! adding the new versions. Immutable segment components are hard-linked
+//! when supported; mutable metadata is copied. On unsupported filesystems
+//! segment components are copied, with a diagnostic counter. Queries on
 //! the active generation are unaffected while `g` builds. When no complete
 //! base exists (first build, data directory lost, base garbage-collected)
 //! the index is rebuilt from the store's redacted text instead — slower,
@@ -188,24 +189,76 @@ impl LexicalStore {
     }
 }
 
-/// Copies the files of a complete index (not its lock files or marker).
+/// Shares only immutable Tantivy segment components. Metadata, locks and
+/// completion markers must never share writable storage between generations.
+fn immutable_segment(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let mut parts = name.split('.');
+    let Some(id) = parts.next() else {
+        return false;
+    };
+    if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return false;
+    }
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some("fast" | "fieldnorm" | "idx" | "pos" | "store" | "term"), None, None) => true,
+        (Some(stamp), Some("del"), None) => {
+            !stamp.is_empty() && stamp.bytes().all(|b| b.is_ascii_digit())
+        }
+        _ => false,
+    }
+}
+
+/// Copies mutable files and shares immutable segments of a complete index.
 fn copy_index(from: &Path, to: &Path) -> Result<(), IndexError> {
     std::fs::create_dir_all(to).map_err(|e| IndexError::io("creating a lexical index", e))?;
     let entries =
         std::fs::read_dir(from).map_err(|e| IndexError::io("reading the base lexical index", e))?;
+    let mut linked_bytes = 0u64;
+    let mut copied_bytes = 0u64;
     for entry in entries {
         let entry = entry.map_err(|e| IndexError::io("reading the base lexical index", e))?;
         let name = entry.file_name();
         let skip = name
             .to_str()
             .is_some_and(|n| n == COMPLETE_MARKER || n.ends_with(".lock"));
-        let is_file = entry.file_type().is_ok_and(|t| t.is_file());
+        let is_file = entry
+            .file_type()
+            .map_err(|e| IndexError::io("reading a lexical file type", e))?
+            .is_file();
         if skip || !is_file {
             continue;
         }
-        std::fs::copy(entry.path(), to.join(&name))
-            .map_err(|e| IndexError::io("copying the base lexical index", e))?;
+        let source = entry.path();
+        let destination = to.join(&name);
+        if immutable_segment(&name) {
+            match std::fs::hard_link(&source, &destination) {
+                Ok(()) => {
+                    linked_bytes = linked_bytes.saturating_add(
+                        entry
+                            .metadata()
+                            .map_err(|e| IndexError::io("reading a lexical segment size", e))?
+                            .len(),
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    tracing::debug!(error_kind = ?error.kind(), "lexical segment sharing unavailable; copying")
+                }
+            }
+        }
+        copied_bytes = copied_bytes.saturating_add(
+            std::fs::copy(source, destination)
+                .map_err(|e| IndexError::io("copying the base lexical index", e))?,
+        );
     }
+    tracing::debug!(
+        linked_bytes,
+        copied_bytes,
+        "prepared lexical generation files"
+    );
     Ok(())
 }
 
@@ -215,6 +268,63 @@ mod tests {
 
     fn text(s: &str) -> Arc<str> {
         Arc::from(s)
+    }
+
+    #[test]
+    fn only_known_immutable_segment_names_are_shared() {
+        let id = "0123456789abcdef0123456789abcdef";
+        for ext in ["fast", "fieldnorm", "idx", "pos", "store", "term", "42.del"] {
+            assert!(immutable_segment(std::ffi::OsStr::new(&format!(
+                "{id}.{ext}"
+            ))));
+        }
+        for name in [
+            "meta.json",
+            ".managed.json",
+            "writer.lock",
+            "KNOWELL_COMPLETE",
+            "unknown.fast",
+            "../meta.json",
+        ] {
+            assert!(!immutable_segment(std::ffi::OsStr::new(name)));
+        }
+        for ext in ["json", "del", "bad.del", "42.del.extra", "store.extra"] {
+            assert!(!immutable_segment(std::ffi::OsStr::new(&format!(
+                "{id}.{ext}"
+            ))));
+        }
+    }
+
+    #[test]
+    fn generation_metadata_and_completion_are_isolated() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().join("base");
+        let next = directory.path().join("next");
+        std::fs::create_dir_all(&base).unwrap();
+        let component = "0123456789abcdef0123456789abcdef.store";
+        std::fs::write(base.join(component), b"immutable body").unwrap();
+        std::fs::write(base.join("meta.json"), b"old metadata").unwrap();
+        std::fs::write(base.join(".managed.json"), b"old management").unwrap();
+        std::fs::write(base.join(COMPLETE_MARKER), b"complete").unwrap();
+        std::fs::write(base.join("writer.lock"), b"lock").unwrap();
+        copy_index(&base, &next).unwrap();
+        std::fs::write(next.join("meta.json"), b"new metadata").unwrap();
+        std::fs::write(next.join(".managed.json"), b"new management").unwrap();
+        assert_eq!(
+            std::fs::read(base.join("meta.json")).unwrap(),
+            b"old metadata"
+        );
+        assert_eq!(
+            std::fs::read(base.join(".managed.json")).unwrap(),
+            b"old management"
+        );
+        assert!(!next.join(COMPLETE_MARKER).exists());
+        assert!(!next.join("writer.lock").exists());
+        std::fs::remove_file(base.join(component)).unwrap();
+        assert_eq!(
+            std::fs::read(next.join(component)).unwrap(),
+            b"immutable body"
+        );
     }
 
     #[test]
