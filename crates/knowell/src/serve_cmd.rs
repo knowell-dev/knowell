@@ -163,9 +163,9 @@ async fn serve(
     let indexing = CancellationToken::new();
     let built = tools::build_engine(&deps).await?;
     let engine_ref = built.as_ref().map(|(engine, _)| engine);
-    if let Some((engine, workspaces)) = &built {
-        tools::start_indexing(engine, workspaces.clone(), &indexing);
-    }
+    let background = built
+        .as_ref()
+        .map(|(engine, workspaces)| tools::start_indexing(engine, workspaces.clone(), &indexing));
     let mcp_server = KnowellServer::new(Arc::new(tools::Tools::new(engine_ref)))
         .with_caller_resolver(Arc::new(knowell_server::AuthenticatedCallers));
     let mcp = knowell_mcp::streamable_http_router(mcp_server, &mcp_options(&config));
@@ -219,12 +219,21 @@ async fn serve(
     out.line("press Ctrl+C to stop")?;
     out.flush()?;
 
-    let shutdown = shutdown_signal(args.stop_on_stdin_close);
+    let parent_shutdown = env.parent_shutdown.clone();
+    let shutdown = async move {
+        tokio::select! {
+            _ = shutdown_signal(args.stop_on_stdin_close) => {}
+            _ = parent_shutdown.cancelled() => {}
+        }
+    };
     let router = knowell_server::build_router(state.clone());
     let served = knowell_server::serve(listener, router, shutdown)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"));
     indexing.cancel();
+    if let Some(background) = background {
+        background.finish().await?;
+    }
     // Queued audit events and buffered tool usage reach the database before
     // the pool closes.
     state.flush_audit().await;
@@ -264,9 +273,9 @@ pub(crate) async fn open_store(env: &Env, engine: &EngineConfig) -> anyhow::Resu
         Err(err) => tracing::warn!("cannot check the database server: {err}"),
     }
     store
-        .migrate()
+        .validate_schema()
         .await
-        .context("cannot apply the database migrations")?;
+        .context("database upgrade required; run an explicit maintenance migration")?;
     Ok(store)
 }
 

@@ -13,8 +13,9 @@ use knowell_config::{DatabaseMode, EngineConfig, ServerRole};
 use knowell_core::SecretRef;
 use knowell_pg_managed::Status as PgStatus;
 use knowell_setup::{Client, ConnectOptions, Scope};
-use knowell_store::{ServerInfo, Store, StoreOptions};
+use knowell_store::{SchemaIdentity, ServerInfo, Store, StoreError, StoreOptions};
 use serde::Serialize;
+use uuid::Uuid;
 
 use crate::connect_cmd;
 use crate::db::{self, DATABASE_NAME};
@@ -81,6 +82,8 @@ pub(crate) fn run(args: DoctorArgs, env: &Env, out: &mut Output) -> anyhow::Resu
     let rt = db::runtime()?;
     let mut checks = Vec::new();
 
+    checks.push(software_check());
+
     let engine = engine_check(env, &mut checks);
     workspace_check(env, engine.as_ref(), &mut checks);
     match &engine {
@@ -127,6 +130,69 @@ pub(crate) fn run(args: DoctorArgs, env: &Env, out: &mut Output) -> anyhow::Resu
     } else {
         ExitCode::SUCCESS
     })
+}
+
+fn software_check() -> Check {
+    const NAME: &str = "software_admission";
+    let inspected = (|| -> knowell_update::Result<Option<Check>> {
+        let executable = std::env::current_exe()?;
+        let Some(install) = knowell_update::install::Install::for_executable(&executable)? else {
+            return Ok(None);
+        };
+        if install.launcher_pending()? {
+            return Ok(Some(Check::fail(
+                NAME,
+                "launcher replacement is interrupted",
+                "repair with the active retained raw engine: update --launcher --install-root PATH",
+            )));
+        }
+        let phase = install.transaction()?.map(|transaction| transaction.phase);
+        let check = software_phase_check(phase);
+        if check.status == Status::Fail {
+            return Ok(Some(check));
+        }
+        install.verify_launcher()?;
+        if install.verify(&install.current()?)?.canonicalize()? != executable.canonicalize()? {
+            return Ok(Some(Check::fail(
+                NAME,
+                "this retained engine is not the active installed engine",
+                "run doctor through the active launcher after completing update recovery",
+            )));
+        }
+        Ok(Some(check))
+    })();
+    match inspected {
+        Ok(Some(check)) => check,
+        Ok(None) => Check::ok(
+            NAME,
+            "software is owned by the original package manager or source build",
+        ),
+        Err(error) => Check::fail(
+            NAME,
+            error.to_string(),
+            "inspect update --status and repair the owned installation before serving",
+        ),
+    }
+}
+
+fn software_phase_check(phase: Option<knowell_update::install::Phase>) -> Check {
+    use knowell_update::install::Phase;
+    if phase.is_some_and(|phase| phase != Phase::Prepared) {
+        Check::fail(
+            "software_admission",
+            "software activation is interrupted; ordinary runtime admission is closed",
+            "inspect update --status, then explicitly select --recover old or --recover new",
+        )
+    } else {
+        Check::ok(
+            "software_admission",
+            if phase.is_some() {
+                "update is prepared; the current engine remains available"
+            } else {
+                "no software update is pending"
+            },
+        )
+    }
 }
 
 fn engine_check(env: &Env, checks: &mut Vec<Check>) -> Option<EngineConfig> {
@@ -383,8 +449,31 @@ async fn database_checks(env: &Env, cfg: &EngineConfig, checks: &mut Vec<Check>)
             return;
         }
     };
-    let info = store.check_server().await;
-    store.close().await;
+    // Administrative probes remain available while runtime admission is closed.
+    // Doctor must report schema/maintenance failures without migrating or draining.
+    let readiness = tokio::time::timeout(DB_TIMEOUT, async {
+        let info = store.check_server().await;
+        let owner = store.maintenance_owner().await;
+        let schema = store.validate_schema().await;
+        (info, owner, schema)
+    })
+    .await;
+    // A cancelled SQLx probe can still be returning its connection to the pool.
+    // Cleanup must not turn a bounded diagnostic into an unbounded wait.
+    let _ = tokio::time::timeout(Duration::from_secs(1), store.close()).await;
+    let (info, owner, schema) = match readiness {
+        Ok(readiness) => readiness,
+        Err(_) => {
+            checks.push(Check::fail(
+                DB,
+                "database readiness checks timed out",
+                "check database availability and pending maintenance",
+            ));
+            return;
+        }
+    };
+    checks.push(database_maintenance_check(owner));
+    checks.push(database_schema_check(schema));
     let info = match info {
         Ok(info) => info,
         Err(err) => {
@@ -405,6 +494,41 @@ async fn database_checks(env: &Env, cfg: &EngineConfig, checks: &mut Vec<Check>)
         ));
     }
     checks.push(pgvector_check(&info, cfg.database.mode));
+}
+
+fn database_maintenance_check(owner: Result<Option<Uuid>, StoreError>) -> Check {
+    const NAME: &str = "database_maintenance";
+    match owner {
+        Ok(None) => Check::ok(NAME, "no persistent maintenance operation is pending"),
+        Ok(Some(owner)) => Check::fail(
+            NAME,
+            format!("maintenance {owner} is pending; runtime admission is closed"),
+            "finish or recover the recorded operation before serving; inspect with `know maintain --status`",
+        ),
+        Err(error) => Check::fail(
+            NAME,
+            error.to_string(),
+            "inspect the database admission protocol before serving",
+        ),
+    }
+}
+
+fn database_schema_check(schema: Result<SchemaIdentity, StoreError>) -> Check {
+    const NAME: &str = "database_schema";
+    match schema {
+        Ok(schema) => Check::ok(
+            NAME,
+            format!(
+                "schema {} matches this engine; runtime admission protocol {}",
+                schema.version, schema.runtime_protocol
+            ),
+        ),
+        Err(error) => Check::fail(
+            NAME,
+            error.to_string(),
+            "stop affected runtimes and perform explicit initialization or maintenance; inspect with `know maintain --status`",
+        ),
+    }
 }
 
 fn pgvector_check(info: &ServerInfo, mode: DatabaseMode) -> Check {
@@ -623,5 +747,69 @@ fn agents_check(env: &Env) -> Check {
             NAME,
             format!("source-output settings ready: {}", connected.join(", ")),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_maintenance_fails_readiness_even_with_a_current_schema() {
+        let owner = Uuid::from_u128(1);
+        let maintenance = database_maintenance_check(Ok(Some(owner)));
+        let schema = database_schema_check(Ok(Store::latest_schema()));
+        assert_eq!(maintenance.status, Status::Fail);
+        assert!(maintenance.summary.contains(&owner.to_string()));
+        assert_eq!(schema.status, Status::Ok);
+    }
+
+    #[test]
+    fn unreachable_or_incompatible_readiness_probes_fail() {
+        let maintenance = database_maintenance_check(Err(StoreError::MaintenanceBusy));
+        assert_eq!(maintenance.status, Status::Fail);
+        for error in [
+            StoreError::SchemaUninitialized,
+            StoreError::SchemaMigrationRequired {
+                current: 12,
+                required: 13,
+            },
+            StoreError::SchemaNewer {
+                current: 14,
+                supported: 13,
+            },
+            StoreError::Corrupt("synthetic invalid migration history".into()),
+        ] {
+            let schema = database_schema_check(Err(error));
+            assert_eq!(schema.status, Status::Fail);
+            assert!(schema.remediation.is_some());
+        }
+    }
+
+    #[test]
+    fn current_schema_without_maintenance_passes_readiness() {
+        assert_eq!(database_maintenance_check(Ok(None)).status, Status::Ok);
+        assert_eq!(
+            database_schema_check(Ok(Store::latest_schema())).status,
+            Status::Ok
+        );
+    }
+
+    #[test]
+    fn software_activation_stays_unready_through_pointer_and_database_recovery() {
+        use knowell_update::install::Phase;
+        assert_eq!(software_phase_check(None).status, Status::Ok);
+        assert_eq!(
+            software_phase_check(Some(Phase::Prepared)).status,
+            Status::Ok
+        );
+        for phase in [
+            Phase::Activating,
+            Phase::Activated,
+            Phase::RecoveredOld,
+            Phase::RecoveredNew,
+        ] {
+            assert_eq!(software_phase_check(Some(phase)).status, Status::Fail);
+        }
     }
 }

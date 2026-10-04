@@ -293,6 +293,28 @@ async fn connect(url: &SecretString) -> anyhow::Result<Store> {
 
 async fn migrate(url: &SecretString, out: &mut Output) -> anyhow::Result<()> {
     let store = connect(url).await?;
+    let schema = store
+        .inspect_schema()
+        .await
+        .context("cannot inspect the database schema before initialization")?;
+    let required = Store::latest_schema().version;
+    if schema.version > 0 && schema.version != required {
+        store.close().await;
+        bail!(
+            "database schema {} requires upgrade to {}; stop affected runtimes and use `know maintain --operation UUID --migrate` with a fresh managed `--backup FILE`, or `--external-backup-confirmed --session-gates-confirmed` for an external database; `know init` only bootstraps a fresh database or the current schema",
+            schema.version,
+            required
+        );
+    }
+    if schema.version > 0 {
+        // The highest migration number alone does not prove complete history.
+        // Initialization must not repair missing earlier migrations as a side
+        // effect of enabling optional vector storage on the current schema.
+        store
+            .validate_schema()
+            .await
+            .context("cannot validate the existing database schema; inspect its history and use explicit maintenance before initialization")?;
+    }
     store
         .migrate()
         .await

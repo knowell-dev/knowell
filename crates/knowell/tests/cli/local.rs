@@ -608,6 +608,15 @@ fn database_fixture(test: &str) -> Option<(Sandbox, ScratchDb, Fixture)> {
     let mut sb = Sandbox::new();
     sb.set_env("KNOWELL_CLI_LOCAL_DB_URL", &db.url);
     sb.write_engine(ENGINE);
+    let initialized = sb.run_with_timeout(&["init"], Duration::from_secs(120));
+    assert!(
+        !initialized.all().contains(&db.url),
+        "database url leaked during explicit local fixture initialization"
+    );
+    assert_eq!(
+        initialized.code, 0,
+        "explicit local fixture database initialization failed"
+    );
     let fixture = fixture(&sb);
     Some((sb, db, fixture))
 }

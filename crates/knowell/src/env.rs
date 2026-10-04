@@ -31,6 +31,8 @@ pub(crate) struct Env {
     home_override: bool,
     /// Relative homes cannot retain their meaning across client working directories.
     relative_home_override: bool,
+    /// Supervisor lifetime cancellation; absent supervisors leave it uncancelled.
+    pub(crate) parent_shutdown: tokio_util::sync::CancellationToken,
 }
 
 impl Env {
@@ -52,6 +54,7 @@ impl Env {
             relative_home_override: home_override
                 .as_deref()
                 .is_some_and(|value| !Path::new(value).is_absolute()),
+            parent_shutdown: tokio_util::sync::CancellationToken::new(),
         })
     }
 

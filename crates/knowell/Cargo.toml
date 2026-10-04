@@ -37,11 +37,13 @@ knowell-server.workspace = true
 knowell-setup.workspace = true
 knowell-source.workspace = true
 knowell-store.workspace = true
+knowell-update.workspace = true
 # `know login` verifies the hub over HTTPS.
 reqwest = { workspace = true, features = ["rustls"] }
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+semver.workspace = true
 sqlx.workspace = true
 tempfile.workspace = true
 time.workspace = true
@@ -57,6 +59,9 @@ url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+aws-lc-rs.workspace = true
+sha2.workspace = true
+tough.workspace = true
 # Creates and drops a scratch database for the external-mode `know init` test.
 sqlx.workspace = true
 tokio.workspace = true

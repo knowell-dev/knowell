@@ -22,6 +22,7 @@ mod hierarchy;
 mod identity;
 mod jobs;
 mod knowledge;
+mod maintenance;
 mod migrations;
 mod switches;
 mod tasks;

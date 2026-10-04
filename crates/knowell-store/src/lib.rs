@@ -42,6 +42,7 @@ pub mod identity;
 mod ids;
 pub mod jobs;
 pub mod knowledge;
+mod maintenance;
 mod migrations;
 mod store;
 pub mod switches;
@@ -57,6 +58,8 @@ pub use ids::{
     JobId, KnowledgeRecordId, ManifestId, OccurrenceId, OrganizationId, PrincipalId, ProfileId,
     ProfileSwitchId, ProjectId, SourceId, SymbolId, TaskId, ViewId, WorkspaceId,
 };
+pub use maintenance::Maintenance;
+pub use migrations::{LATEST_SCHEMA_VERSION, RUNTIME_PROTOCOL_VERSION, SchemaIdentity};
 pub use store::{ServerInfo, ServerIssue, Store, StoreOptions, VectorExtension};
 pub use types::{
     ApiTokenScope, ContractKind, ContractRole, EvidenceType, GenerationState, GrantRole, JobState,

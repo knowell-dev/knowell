@@ -98,7 +98,7 @@ pub(crate) fn run(cmd: TokenCommand, env: &Env, out: &mut Output) -> anyhow::Res
     let config = env.require_engine()?;
     db::runtime()?.block_on(async {
         let store = db::connect(env, &config, std::time::Duration::from_secs(15), 2).await?;
-        store.migrate().await?;
+        store.validate_schema().await?;
         let result = match cmd {
             TokenCommand::Create(args) => create(&store, &config, args, out).await,
             TokenCommand::List(args) => list(&store, args, out).await,

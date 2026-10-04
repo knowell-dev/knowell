@@ -26,9 +26,11 @@ mod index_cmd;
 mod init_cmd;
 mod local_engine;
 mod login_cmd;
+mod maintain_cmd;
 mod mcp_cmd;
 mod memory_cmd;
 mod output;
+mod parent;
 mod profile_cmd;
 mod project_cmd;
 mod registry;
@@ -40,6 +42,7 @@ mod task_cmd;
 mod token_cmd;
 mod tools;
 mod trace_cmd;
+mod update_cmd;
 mod workspace_cmd;
 
 use std::path::PathBuf;
@@ -105,6 +108,10 @@ enum Command {
     /// Check the installation: configuration, database, pgvector, git, panel,
     /// providers and agent clients.
     Doctor(doctor_cmd::DoctorArgs),
+    /// Inspect, prepare, activate or recover an authenticated Knowell release.
+    Update(update_cmd::UpdateArgs),
+    /// Explicitly migrate or recover database maintenance, for every installation method.
+    Maintain(maintain_cmd::MaintainArgs),
     /// Run the server: REST API, panel and MCP over Streamable HTTP.
     Serve(serve_cmd::ServeArgs),
     /// Serve MCP over stdin/stdout for an agent client.
@@ -161,11 +168,45 @@ fn main() -> ExitCode {
     if let Command::Context(args) = &cli.command {
         return context_cmd::run(args, &cli.global, &mut out);
     }
-    let env = match Env::from_globals(&cli.global) {
+    let mut env = match Env::from_globals(&cli.global) {
         Ok(env) => env,
         Err(err) => {
             tracing::error!("{err:#}");
             return ExitCode::from(2);
+        }
+    };
+    let parent = match parent::Parent::connect() {
+        Ok(parent) => parent,
+        Err(err) => {
+            tracing::error!("{err:#}");
+            return ExitCode::from(2);
+        }
+    };
+    if let Some(parent) = &parent {
+        env.parent_shutdown = parent.token();
+    }
+    // Every engine entry path participates, including direct execution from a
+    // retained version directory. The updater itself is control-plane work.
+    let _runtime = if matches!(
+        &cli.command,
+        Command::Update(_) | Command::Maintain(_) | Command::Doctor(_)
+    ) {
+        None
+    } else {
+        match std::env::current_exe()
+            .map_err(anyhow::Error::from)
+            .and_then(|exe| {
+                let install = knowell_update::install::Install::for_executable(&exe)?;
+                install
+                    .map(|install| install.admit_executable(&exe))
+                    .transpose()
+                    .map_err(Into::into)
+            }) {
+            Ok(lease) => lease,
+            Err(err) => {
+                tracing::error!("{err:#}");
+                return ExitCode::from(1);
+            }
         }
     };
     let result = match cli.command {
@@ -176,6 +217,8 @@ fn main() -> ExitCode {
         Command::Disconnect(args) => connect_cmd::run(args, false, &env, &mut out),
         Command::Ci(cmd) => ci_cmd::run(cmd, &mut out),
         Command::Doctor(args) => doctor_cmd::run(args, &env, &mut out),
+        Command::Update(args) => update_cmd::run(args, &env, &mut out),
+        Command::Maintain(args) => maintain_cmd::run(args, &env, &mut out),
         Command::Serve(args) => serve_cmd::run(args, &env, &mut out),
         Command::Mcp(args) => mcp_cmd::run(args, &env),
         Command::Check(args) => check_cmd::run(args, &env, &mut out),

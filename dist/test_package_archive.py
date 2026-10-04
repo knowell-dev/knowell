@@ -62,6 +62,19 @@ class Packaging(unittest.TestCase):
             archive = pa.build("1.2.3", target, self.binary, self.tmp / key, self.root)
             self.assertEqual(archive.name, render.archive_name("1.2.3", key))
 
+    def test_optional_launcher_keeps_manager_runtime_name(self):
+        launcher = self.tmp / "bootstrap"
+        launcher.write_bytes(b"KNOWELL_CANARY_LAUNCHER")
+        archive = pa.build("1.2.3", "x86_64-unknown-linux-gnu", self.binary, self.tmp / "with-launcher", self.root, launcher)
+        with tarfile.open(archive) as tf:
+            runtime = tf.extractfile("knowell-1.2.3-x86_64-unknown-linux-gnu/know")
+            bootstrap = tf.extractfile("knowell-1.2.3-x86_64-unknown-linux-gnu/know-launcher")
+            self.assertEqual(runtime.read(), self.binary.read_bytes())
+            self.assertEqual(bootstrap.read(), launcher.read_bytes())
+        missing = self.tmp / "absent"
+        with self.assertRaises(pa.PackageError):
+            pa.build("1.2.3", "x86_64-unknown-linux-gnu", self.binary, self.tmp / "bad", self.root, missing)
+
 
 if __name__ == "__main__":
     unittest.main()

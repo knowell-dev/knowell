@@ -9,6 +9,16 @@ fn configured(url: &str) -> Sandbox {
     sb.set_env("KNOWELL_CLI_DB_URL", url);
     sb.set_env("KNOWELL_CLI_PEPPER", PEPPER);
     sb.write_engine("version = 1\n[server]\nrole = 'hub'\ntoken_pepper = 'env:KNOWELL_CLI_PEPPER'\n[database]\nmode = 'external'\nurl = 'env:KNOWELL_CLI_DB_URL'\n");
+    let initialized = sb.run_with_timeout(&["init"], std::time::Duration::from_secs(120));
+    assert!(
+        !initialized.all().contains(url),
+        "database url leaked during explicit token fixture initialization"
+    );
+    assert!(!initialized.all().contains(PEPPER));
+    assert_eq!(
+        initialized.code, 0,
+        "explicit token fixture database initialization failed"
+    );
     sb
 }
 
@@ -152,6 +162,8 @@ fn failed_bootstrap_rolls_back_and_pepper_is_required() {
         missing_dir.to_str().unwrap(),
     ]);
     assert_eq!(failed.code, 2, "{failed:?}");
+    assert!(failed.stderr.contains("cannot create the credential file"));
+    assert!(!missing_dir.exists());
     let output = hub.work().join("token.secret");
     let retry = hub.run(&[
         "token",

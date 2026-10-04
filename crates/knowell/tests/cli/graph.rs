@@ -244,6 +244,15 @@ fn database_fixture(test: &str) -> Option<(Sandbox, ScratchDb, Fixture)> {
     let mut sb = Sandbox::new();
     sb.write_engine(ENGINE);
     sb.set_env("KNOWELL_CLI_GRAPH_DB_URL", &db.url);
+    let initialized = sb.run_with_timeout(&["init"], Duration::from_secs(120));
+    assert!(
+        !initialized.all().contains(&db.url),
+        "database url leaked during explicit graph fixture initialization"
+    );
+    assert_eq!(
+        initialized.code, 0,
+        "explicit graph fixture database initialization failed"
+    );
     workspace(&sb, WORKSPACE);
     let repository = sb.work().join("repo");
     write(&repository.join("packages/app/src/scope.ts"), SCOPE);

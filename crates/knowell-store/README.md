@@ -46,8 +46,11 @@ configured providers and no embedding calls.
 ## Using it
 
 ```rust,ignore
-let store = Store::connect(&url /* SecretString */, &StoreOptions::default()).await?;
-store.migrate().await?;
+// Initialization is an explicit administrator operation while runtimes are stopped.
+let admin = Store::connect(&url /* SecretString */, &StoreOptions::default()).await?;
+admin.migrate().await?;
+admin.close().await;
+let store = Store::connect_runtime(&url, &StoreOptions::default()).await?;
 let info = store.check_server().await?;          // versions, pgvector, issues()
 
 let mut conn = store.acquire().await?;
@@ -121,6 +124,37 @@ classified unknown. An explicit same-path/hash upsert can repair that unknown re
 when its own tenant's redacted source becomes available, without changing the interval.
 This metadata-only upgrade does not rewrite content, chunks, prepared inputs or vectors,
 and does not call an embedding provider.
+Runtime constructors (`connect_runtime`, `connect_runtime_with`) validate exact
+schema 15, accepting the immutable original and core-only migration checksums.
+Every physical pooled connection, including a reconnect, holds a database-wide
+shared advisory admission lock until it closes. `validate_schema` never applies
+DDL. `inspect_schema` accepts known incomplete history for administrator planning
+(version zero for uninitialized storage), but still rejects corrupt/dirty/unknown
+history. Runtime `migrate` and `begin_maintenance` calls are rejected explicitly.
+
+An administrator starts or recovers an operation with `begin_maintenance(uuid)`.
+Its detached `Maintenance` connection persists that UUID in the fixed
+`_knowell_maintenance` protocol table before draining runtimes. New runtime
+admissions and subsequent `Store::acquire`/`begin` operations report deliberate
+maintenance. `acquire_exclusive(timeout)` proves all participating physical runtime
+connections have closed before `migrate` can run. The guard uses its own connection
+for schema inspection/migration, avoiding a shared-pool/exclusive-gate deadlock.
+`finish` validates the exact schema and explicitly clears ownership. Dropping or
+timing out the guard retains the UUID for recovery; no timestamp expires it.
+`maintenance_owner` lets existing runtimes inspect the request through a bounded,
+read-only control connection even when their pool is exhausted or new data
+connections are refused. It does not admit data access or automatically stop an
+engine; operators must close other hosts' active runtime pools before maintenance.
+
+This is a cooperative application protocol. `connect`, `connect_with`,
+`from_pool`, externally created raw SQL connections and old builds are
+administrative/legacy access and do not carry runtime locks; bootstrap upgrades
+must stop them explicitly. Direct `pool()` access on a runtime retains physical
+connection fencing but bypasses the per-operation intent check. Engine entry
+points use the runtime constructors and must close the pool after draining jobs,
+requests, watchers and lexical handles. The application schema migrations remain
+unchanged; the maintenance table is protocol infrastructure rather than a domain
+schema version.
 
 `check_server().supports_core()` reports PostgreSQL compatibility;
 `semantic_enabled()` reports a supported installed extension. Use

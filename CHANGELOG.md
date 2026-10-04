@@ -10,6 +10,15 @@ is released. Nothing has been released yet.
 
 ### Fixed
 
+- Return version-pinned source bodies and complementary code, test and document
+  regions by default over MCP, with exact displayed ranges and advancing fetch
+  continuations instead of duplicate diagnostic JSON.
+- Preserve historical source commits after changes or deletion, reject ambiguous
+  retained commit prefixes, and distinguish source acquisition failures from no matches.
+- Hydrate only admitted source paths during ordinary search, retain occurrence-specific
+  language metadata and declaration ranges, and aggregate relevant capability caveats.
+- Carry explicit configuration and workspace routing into agent launchers and select
+  Source output consistently for Claude Code, Codex and Cursor.
 - Switch estimates no longer claim that a dimension reduction needs no re-embedding:
   vectors are not derived from another profile, so chunks the target does not cover
   are counted. A profile switch no longer reverts when the engine restarts.
@@ -88,6 +97,22 @@ is released. Nothing has been released yet.
 
 ### Added
 
+- Add source hierarchy and optional redacted line counts in schema 15, retaining
+  existing chunk/vector identities and requiring explicit database maintenance to upgrade.
+- Add bounded source selection without a generative model, explicit comparator
+  policies and opt-in persisted parse products; agent benefit and large-corpus scale
+  remain unmeasured.
+- Explicit signed software updates for direct installer-owned installations, with
+  immutable engine versions, a stable launcher, verified preparation, activation,
+  rollback and interruption recovery. Package-managed installations retain their
+  original update method; no background updater or forced MCP restart is installed.
+- TUF repository verification and an offline threshold-signing publisher, with
+  persistent trust history, release revocations and reviewed compatibility contracts.
+  Production root keys, metadata hosting and renewal remain release prerequisites.
+- Explicit database maintenance with persistent operation ownership, runtime admission
+  gates, exact schema-history validation and protected fresh managed backups. Ordinary
+  startup never migrates an existing schema; restored maintenance backups require
+  explicit recovery before runtime admission reopens.
 - Restart-safe blue-green embedding profile switches (migration 0013). Switches and each
   view's serving profile are stored; T2 builds the old and the target profile while a
   switch builds, so semantic search never has a gap; all member views flip in one

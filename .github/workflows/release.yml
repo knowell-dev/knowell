@@ -10,8 +10,9 @@
 #
 # Order of a real release:
 #   meta -> panel -> build (8 targets) -> packages / sbom / pgvector / checks -> assemble
-#   (checksums, attestations) -> github-release (DRAFT, all assets) -> crates + ghcr ->
-#   publish-release (undraft) -> npm, homebrew, scoop, winget
+#   (raw contracts, checksums, attestations) -> github-release (DRAFT, all assets) ->
+#   crates + ghcr -> publish-release (undraft, public bytes + provenance verified) ->
+#   npm, homebrew, scoop, winget. TUF signing/static promotion is a separate owner step.
 name: Release
 
 on:
@@ -62,6 +63,8 @@ jobs:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
@@ -71,6 +74,7 @@ jobs:
           dry_run=false
           if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$DRY_RUN_INPUT" != "false" ]; then dry_run=true; fi
           if [ "$dry_run" = "false" ]; then
+            python dist/update_assets.py check-version --version "$version"
             if [ "$REF_TYPE" != "tag" ]; then
               echo "::error::a real release must run from a v* tag, not from '$REF_NAME'"; exit 1
             fi
@@ -84,6 +88,10 @@ jobs:
           fi
           prerelease=false
           case "$version" in *-*) prerelease=true ;; esac
+          if [ "$dry_run" = "false" ] && [ "$prerelease" = "true" ]; then
+            # Preview publication is forbidden until the first stable release exists.
+            test "$(gh release view v1.0.0 --json isDraft,isPrerelease --jq '.isDraft == false and .isPrerelease == false')" = "true"
+          fi
           {
             echo "version=$version"
             echo "tag=v$version"
@@ -120,7 +128,7 @@ jobs:
           PYTHONPATH: wrappers/pypi/src
       - name: npm launcher tests
         working-directory: wrappers/npm
-        run: npm test
+        run: python ../../scripts/buildlock.py npm test
 
   # --------------------------------------------------------------------------------------
   panel:
@@ -141,8 +149,8 @@ jobs:
       - name: Build the static panel
         working-directory: panel
         run: |
-          npm ci --ignore-scripts --no-audit --no-fund
-          npm run build
+          python ../scripts/buildlock.py npm ci --ignore-scripts --no-audit --no-fund
+          python ../scripts/buildlock.py npm run build
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: panel-dist
@@ -184,6 +192,7 @@ jobs:
       VERSION: ${{ needs.meta.outputs.version }}
       TARGET: ${{ matrix.target }}
       EXE: ${{ matrix.exe }}
+      DRY_RUN: ${{ needs.meta.outputs.dry_run }}
       CARGO_PROFILE_RELEASE_STRIP: symbols
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -191,7 +200,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
-          toolchain: stable
+          toolchain: "1.96.0"
           targets: ${{ matrix.target }}
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -212,15 +221,29 @@ jobs:
           set -euo pipefail
           # Map the checkout path out of the binary (reproducible, no runner paths).
           export RUSTFLAGS="--remap-path-prefix=${GITHUB_WORKSPACE}=/build ${MATRIX_RUSTFLAGS:-}"
-          cargo build --release --locked -p knowell --target "$TARGET"
+          python scripts/buildlock.py cargo build --release --locked -p knowell -p knowell-launcher --target "$TARGET"
       - name: Smoke test the binary
         run: |
           set -euo pipefail
           out=$("target/$TARGET/release/$EXE" --version)
           echo "$out"
           printf '%s' "$out" | grep -F "$VERSION"
-      - name: Package archive
-        run: python dist/package_archive.py --version "$VERSION" --target "$TARGET" --binary "target/$TARGET/release/$EXE" --out out
+      - name: Package manager archive and direct update components
+        run: |
+          set -euo pipefail
+          launcher=know-launcher
+          if [ "$EXE" = "know.exe" ]; then launcher=know-launcher.exe; fi
+          python dist/package_archive.py --version "$VERSION" --target "$TARGET" --binary "target/$TARGET/release/$EXE" --launcher "target/$TARGET/release/$launcher" --out out
+          flags=()
+          if [ "$DRY_RUN" = "true" ]; then flags+=(--allow-unreleased); fi
+          "target/$TARGET/release/$EXE" update --inspect-binary > engine-info.json
+          python dist/update_assets.py build --version "$VERSION" --target "$TARGET" --binary "target/$TARGET/release/$EXE" --launcher "target/$TARGET/release/$launcher" --binary-info engine-info.json --out out "${flags[@]}"
+      - name: Native bootstrap and launcher smoke test
+        if: "!startsWith(needs.meta.outputs.version, '0.') && !startsWith(needs.meta.outputs.version, '1.0.0-')"
+        run: python dist/smoke_install.py --version "$VERSION" --target "$TARGET" --assets out
+      - name: Windows installer fixture tests
+        if: runner.os == 'Windows'
+        run: python -m unittest discover -s dist -p test_install_ps1.py -v
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist-${{ matrix.target }}
@@ -245,13 +268,13 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
-          toolchain: stable
+          toolchain: "1.96.0"
       # install-action verifies the downloaded tool against pinned checksums.
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-deb@3.8.0
       - name: Install cargo-generate-rpm
-        run: cargo install --locked --version 0.21.0 cargo-generate-rpm
+        run: python scripts/buildlock.py cargo install --locked --version 0.21.0 cargo-generate-rpm
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: dist-*-unknown-linux-gnu
@@ -287,14 +310,14 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
-          toolchain: stable
+          toolchain: "1.96.0"
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: cargo-cyclonedx@0.5.9
       - name: Generate the CycloneDX SBOM of the `know` binary crate
         run: |
           set -euo pipefail
-          cargo cyclonedx --format json --spec-version 1.5 --target all --override-filename knowell-sbom.cdx
+          python scripts/buildlock.py cargo cyclonedx --format json --spec-version 1.5 --target all --override-filename knowell-sbom.cdx
           mkdir out
           cp crates/knowell/knowell-sbom.cdx.json "out/knowell-$VERSION.cdx.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -343,7 +366,7 @@ jobs:
           mkdir -p docker-bin/linux/amd64
           tar -xzf "in/knowell-$VERSION-$target.tar.gz" -C in
           install -m 0755 "in/knowell-$VERSION-$target/know" docker-bin/linux/amd64/know
-          docker build -f deploy/Dockerfile --target runtime-prebuilt --platform linux/amd64 -t knowell:smoke .
+          python scripts/buildlock.py docker build -f deploy/Dockerfile --target runtime-prebuilt --platform linux/amd64 -t knowell:smoke .
           docker run --rm knowell:smoke --version | grep -F "$VERSION"
           test "$(docker run --rm --entrypoint id knowell:smoke -u)" = "10001"
 
@@ -360,7 +383,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
-          toolchain: stable
+          toolchain: "1.96.0"
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
@@ -373,7 +396,7 @@ jobs:
             exit 0
           fi
           echo "$order"
-          cargo publish --workspace --dry-run --locked
+          python scripts/buildlock.py cargo publish --workspace --dry-run --locked
 
   npm-check:
     name: npm package check
@@ -397,9 +420,9 @@ jobs:
         run: |
           set -euo pipefail
           cp ../../LICENSE-MIT ../../LICENSE-APACHE .
-          npm test
-          npm version "$VERSION" --no-git-tag-version --allow-same-version
-          npm pack --dry-run
+          python ../../scripts/buildlock.py npm test
+          python ../../scripts/buildlock.py npm version "$VERSION" --no-git-tag-version --allow-same-version
+          python ../../scripts/buildlock.py npm pack
 
   # --------------------------------------------------------------------------------------
   # Gather everything, write SHA256SUMS, attest, and prove the assets work end to end.
@@ -445,31 +468,43 @@ jobs:
           if [ "$bundles" -ne 10 ] || [ "$manifests" -ne 10 ]; then
             echo "::error::expected 10 pgvector bundles and 10 manifests, found $bundles and $manifests"; exit 1
           fi
-          for pattern in '*.deb' '*.rpm' '*.cdx.json'; do
-            if [ -z "$(find . -maxdepth 1 -name "$pattern")" ]; then echo "::error::no $pattern asset"; exit 1; fi
+          for pattern in '*.deb' '*.rpm'; do
+            count=$(find . -maxdepth 1 -name "$pattern" | wc -l)
+            if [ "$count" -ne 2 ]; then echo "::error::expected both Linux package architectures for $pattern"; exit 1; fi
           done
+          test "$(find . -maxdepth 1 -name '*.cdx.json' | wc -l)" -eq 1
           # Nothing that looks like a secret or local state may be in a release asset.
           if find . -name '.env*' -o -name '*.pem' -o -name '*.key' | grep -q .; then
             echo "::error::release assets contain a sensitive-looking file"; exit 1
           fi
+      - name: Validate complete raw targets and the reviewed compatibility contract
+        run: |
+          set -euo pipefail
+          flags=()
+          if [ "$DRY_RUN" = "true" ]; then flags+=(--allow-unreleased); fi
+          python dist/update_assets.py assemble --version "$VERSION" --assets release --out update-input "${flags[@]}"
+      # This artifact has no signatures and is never an advertised native update.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: unsigned-update-input
+          path: update-input/unsigned-update-targets.json
+          if-no-files-found: error
+          retention-days: 14
       - name: Write SHA256SUMS
         working-directory: release
         run: |
           set -euo pipefail
           rm -f SHA256SUMS
-          find . -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort | xargs sha256sum > SHA256SUMS
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | LC_ALL=C sort | xargs sha256sum > "$RUNNER_TEMP/knowell-SHA256SUMS"
+          mv "$RUNNER_TEMP/knowell-SHA256SUMS" SHA256SUMS
           cat SHA256SUMS
       - name: Every platform archive is listed
         run: python dist/render.py check --version "$VERSION" --sums release/SHA256SUMS
       - name: Render package-manager manifests (validates the templates against real checksums)
         run: python dist/render.py --version "$VERSION" --sums release/SHA256SUMS --out rendered
-      - name: install.sh installs the release archive end to end
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/dl/v$VERSION"
-          cp release/* "$RUNNER_TEMP/dl/v$VERSION/"
-          KNOWELL_DOWNLOAD_BASE="file://$RUNNER_TEMP/dl" sh scripts/install.sh --version "$VERSION" --install-dir "$RUNNER_TEMP/bin" --attestation skip
-          "$RUNNER_TEMP/bin/know" --version | grep -F "$VERSION"
+      - name: Linux direct bootstrap and launcher smoke test
+        if: "!startsWith(needs.meta.outputs.version, '0.') && !startsWith(needs.meta.outputs.version, '1.0.0-')"
+        run: python dist/smoke_install.py --version "$VERSION" --target x86_64-unknown-linux-gnu --assets release
       - name: Attest build provenance of every asset
         if: needs.meta.outputs.dry_run == 'false'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -563,7 +598,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
-          toolchain: stable
+          toolchain: "1.96.0"
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
@@ -576,7 +611,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
           # After switching to trusted publishing, use this instead:
           # CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
-        run: python dist/publish_crates.py
+        run: python scripts/buildlock.py python dist/publish_crates.py
 
   ghcr:
     name: container image
@@ -671,6 +706,16 @@ jobs:
           else
             gh release edit "$TAG" --draft=false --latest
           fi
+      - name: Re-download and verify public release bytes and build identity
+        run: |
+          set -euo pipefail
+          mkdir verified
+          gh release download "$TAG" --dir verified
+          cd verified
+          sha256sum --strict -c SHA256SUMS
+          while read -r _digest asset; do
+            gh attestation verify "$asset" --repo "$GH_REPO" --signer-workflow "$GH_REPO/.github/workflows/release.yml" --source-ref "refs/tags/$TAG" >/dev/null
+          done < SHA256SUMS
 
   # --------------------------------------------------------------------------------------
   # Channels that download from the (now public) release.
@@ -703,11 +748,11 @@ jobs:
         run: |
           set -euo pipefail
           cp ../../LICENSE-MIT ../../LICENSE-APACHE .
-          npm test
-          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          python ../../scripts/buildlock.py npm test
+          python ../../scripts/buildlock.py npm version "$VERSION" --no-git-tag-version --allow-same-version
           tag=latest
           if [ "$PRERELEASE" = "true" ]; then tag=next; fi
-          npm publish --provenance --access public --tag "$tag"
+          python ../../scripts/buildlock.py npm publish --provenance --access public --tag "$tag"
 
   # Homebrew tap and Scoop bucket: one short-lived GitHub App token per repository.
   tap-bucket:
