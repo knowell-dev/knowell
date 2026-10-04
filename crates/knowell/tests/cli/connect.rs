@@ -230,13 +230,30 @@ fn relative_selections_resolve_before_the_client_changes_working_directory() {
     let config: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(project.join(".mcp.json")).unwrap()).unwrap();
     let entry = &config["mcpServers"]["knowell"];
+    let arguments = entry["args"].as_array().unwrap();
+    assert_eq!(arguments.len(), 7);
+    let engine = std::path::Path::new(arguments[1].as_str().unwrap());
+    let workspace = std::path::Path::new(arguments[3].as_str().unwrap());
+    // A process's working directory can resolve a filesystem alias, such as
+    // macOS's /var -> /private/var. The launcher must pin the same files using
+    // absolute paths, independently of which spelling the parent used.
+    for (actual, expected) in [
+        (engine, selected.join("engine.toml")),
+        (workspace, selected.join("knowell.toml")),
+    ] {
+        assert!(actual.is_absolute(), "launcher path must be absolute");
+        assert_eq!(
+            actual.canonicalize().unwrap(),
+            expected.canonicalize().unwrap()
+        );
+    }
     assert_eq!(
         entry["args"],
         serde_json::json!([
             "--config",
-            selected.join("engine.toml").to_str().unwrap(),
+            engine,
             "--workspace",
-            selected.join("knowell.toml").to_str().unwrap(),
+            workspace,
             "mcp",
             "--output-mode",
             "source",
@@ -244,6 +261,34 @@ fn relative_selections_resolve_before_the_client_changes_working_directory() {
     );
     assert_eq!(entry["env"].as_object().unwrap().len(), 1);
     assert_eq!(entry["env"]["KNOWELL_HOME"], "${KNOWELL_HOME}");
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(project.join(".claude/settings.json")).unwrap(),
+    )
+    .unwrap();
+    let hook = &settings["hooks"]["SessionStart"][0]["hooks"][0];
+    assert_eq!(
+        hook["args"],
+        serde_json::json!([
+            "--config",
+            engine,
+            "--workspace",
+            workspace,
+            "context",
+            "--session-start",
+        ])
+    );
+    let hook_args: Vec<_> = hook["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    let hook_result: Run = sb.command_in(&project, &hook_args).output().unwrap().into();
+    assert_eq!(hook_result.code, 0, "{hook_result:?}");
+    assert!(
+        hook_result.stdout.contains("selected-workspace"),
+        "{hook_result:?}"
+    );
 }
 
 #[test]

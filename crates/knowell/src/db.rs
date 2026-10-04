@@ -3,6 +3,9 @@
 //! Connection URLs are secrets: they are resolved from their reference at the
 //! moment of use, held as `SecretString`, and never printed. `StoreError`
 //! messages are scrubbed by `knowell-store`.
+//! Windows backup staging requires a successful ACL helper before any dump is
+//! created. The helper has a bounded execution budget and is killed and reaped
+//! on timeout; permission failures never permit backup creation.
 
 use std::time::Duration;
 
@@ -16,6 +19,14 @@ use crate::env::Env;
 
 /// Name of the database Knowell uses on its PostgreSQL server.
 pub(crate) const DATABASE_NAME: &str = "knowell";
+
+// PowerShell startup and ancestor ACL lookup can exceed 15 seconds when the
+// host is busy. The budget is bounded without relaxing the access checks.
+#[cfg(windows)]
+const BACKUP_ACL_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[cfg(windows)]
+const BACKUP_ACL_CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Handle to the managed PostgreSQL under `$KNOWELL_HOME/pg`.
 pub(crate) fn managed(env: &Env, cfg: &EngineConfig) -> anyhow::Result<ManagedPostgres> {
@@ -195,19 +206,9 @@ try {
     [IO.Directory]::SetAccessControl($path, $acl)
 } catch { exit 1 }
 "#;
-        let mut child = tokio::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
-            .env("KNOWELL_BACKUP_STAGING", directory)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .creation_flags(0x0800_0000)
-            .kill_on_drop(true)
-            .spawn()
+        let mut child = start_backup_acl_script(directory, SCRIPT)
             .context("cannot secure the private backup directory")?;
-        let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
-            .await
-            .context("securing the private backup directory timed out")??;
+        let status = wait_backup_acl_script(&mut child, BACKUP_ACL_TIMEOUT).await?;
         if !status.success() {
             bail!(
                 "cannot secure the private backup directory; choose a private parent without other users' delete or permission-changing access"
@@ -236,6 +237,41 @@ try {
         std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn start_backup_acl_script(
+    directory: &std::path::Path,
+    script: &str,
+) -> std::io::Result<tokio::process::Child> {
+    tokio::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .env("KNOWELL_BACKUP_STAGING", directory)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(0x0800_0000)
+        .kill_on_drop(true)
+        .spawn()
+}
+
+#[cfg(windows)]
+async fn wait_backup_acl_script(
+    child: &mut tokio::process::Child,
+    timeout: Duration,
+) -> anyhow::Result<std::process::ExitStatus> {
+    match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(status) => status.context("cannot wait for the backup security helper"),
+        Err(elapsed) => {
+            // Explicitly reap a timed-out child before returning. kill_on_drop
+            // also protects callers that cancel this operation during cleanup.
+            tokio::time::timeout(BACKUP_ACL_CLEANUP_TIMEOUT, child.kill())
+                .await
+                .context("backup security helper did not stop before the cleanup deadline")?
+                .context("cannot stop the timed out backup security helper")?;
+            Err(elapsed).context("securing the private backup directory timed out")
+        }
+    }
 }
 
 fn publish_backup(dump: &std::path::Path, destination: &std::path::Path) -> anyhow::Result<()> {
@@ -403,19 +439,31 @@ try {
     [IO.Directory]::SetAccessControl($path, $acl)
 } catch { exit 1 }
 "#;
-        let status = tokio::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", script])
-            .env("KNOWELL_BACKUP_STAGING", directory.path())
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .creation_flags(0x0800_0000)
-            .status()
+        let mut child = start_backup_acl_script(directory.path(), script).unwrap();
+        let status = wait_backup_acl_script(&mut child, BACKUP_ACL_TIMEOUT)
             .await
             .unwrap();
         assert!(status.success());
         let nested = tempfile::tempdir_in(directory.path()).unwrap();
         assert!(restrict_backup_staging(nested.path()).await.is_err());
         assert_eq!(std::fs::read_dir(nested.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn backup_staging_helper_timeout_is_an_error_and_reaps_the_child() {
+        let directory = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut child =
+            start_backup_acl_script(directory.path(), "Start-Sleep -Seconds 120").unwrap();
+        let error = wait_backup_acl_script(&mut child, Duration::from_millis(20))
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<tokio::time::error::Elapsed>()
+                .is_some()
+        );
+        assert!(child.try_wait().unwrap().is_some());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
     }
 }
