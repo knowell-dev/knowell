@@ -240,10 +240,11 @@ mod tests {
         ));
         assert!(validate_history(&missing, false).is_ok());
         let mut newer = history(true);
-        newer.push((14, true, vec![0; 48]));
+        let unsupported_version = LATEST_SCHEMA_VERSION + 1;
+        newer.push((unsupported_version, true, vec![0; 48]));
         assert!(matches!(
             validate_history(&newer, true),
-            Err(StoreError::SchemaNewer { current: 14, .. })
+            Err(StoreError::SchemaNewer { current, .. }) if current == unsupported_version
         ));
         let mut dirty = history(true);
         if let Some(entry) = dirty.first_mut() {

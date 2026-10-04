@@ -195,17 +195,20 @@ async fn replacement_connections_keep_typed_schema_and_maintenance_refusals() {
     maintenance.finish().await.unwrap();
 
     let mut conn = db.conn().await;
-    sqlx::query("DELETE FROM public._sqlx_migrations WHERE version = 13")
+    let required = knowell_store::Store::latest_schema().version;
+    let previous = required - 1;
+    sqlx::query("DELETE FROM public._sqlx_migrations WHERE version = $1")
+        .bind(required)
         .execute(&mut *conn)
         .await
         .unwrap();
-    assert_eq!(db.store.inspect_schema().await.unwrap().version, 12);
+    assert_eq!(db.store.inspect_schema().await.unwrap().version, previous);
     assert!(matches!(
         runtime(&db).await,
         Err(StoreError::SchemaMigrationRequired {
-            current: 12,
-            required: 13
-        })
+            current,
+            required: expected
+        }) if current == previous && expected == required
     ));
     drop(conn);
 }
