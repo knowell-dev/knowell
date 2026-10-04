@@ -853,3 +853,27 @@ entries. Windows rejects reparse points and relies on the installer root's prote
 Directory flush after rename is not provided by the current safe Rust implementation on
 Windows, so hardware power-loss durability still needs a platform-specific validation gate;
 process-crash recovery and deliberate filesystem corruption are tested separately.
+
+### Current source-navigation boundaries
+
+The canonical agent skill is `skills/knowell/SKILL.md`. It selects bounded semantic
+navigation for unfamiliar code and scoped native reads for known local targets; it
+does not require a fixed MCP tool sequence. Source-mode MCP returns actual excerpts
+with shared version provenance and actionable omission handles, without a generative
+model writing explanations. Locator-only searches avoid selected body hydration and
+packing while retaining normal hybrid query retrieval.
+
+Context project/path/language filters are hard admission constraints. Focus paths and
+symbols prioritize evidence inside those constraints; they do not replace scope.
+Explicit navigation traverses resolved relationships with syntactic-or-stronger
+provenance and keeps uncertain relationships as bounded candidate leaves. Missing
+analysis or a clipped traversal cannot establish absence of calls or tests.
+
+Already produced SCIP artifacts can be attached explicitly to a matching Git revision
+and build-input manifest. Durable staging strips source and documentation; activation
+verifies current original and redacted bytes, compiler/artifact identity and occurrence
+positions. Compiler evidence is generation-bound and never automatically inherited.
+The manifest attests inputs; it is not proof of complete compiler coverage. Automatic
+external indexer execution, distributed graph queries and billion-line capacity remain
+outside the implemented guarantee. Scoped SQL paging reduces admitted metadata, while
+unscoped catalogs and full graph preparation still grow with the selected generation.

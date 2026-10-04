@@ -67,7 +67,13 @@ two unowned endpoints). Removing a node removes every edge touching it, whoever 
 
 - `neighbors(node, direction, &EdgeFilter)` and `walk(start, &WalkSpec)`: bounded breadth-first
   exploration. Depth `1..=5`, a node budget, and an `EdgeFilter` (kinds, minimum evidence,
-  allow ambiguous, allow unresolved). Each visit carries the shortest path that reached it.
+  excluded evidence types, allow ambiguous, allow unresolved). Each visit carries the
+  shortest path that reached it.
+- `walk_navigation(start, &WalkSpec, per_node_limit, candidate_limit)`: opt-in navigation
+  over resolved edges with syntactic-or-stronger evidence. Per-node slots are shared
+  round-robin between relation kinds, with stable evidence and node ordering inside each
+  kind. Weak, ambiguous or unresolved relations can be returned as bounded candidate
+  leaves; those edges never carry expansion. Candidates share the total node budget.
 - `trace_flow(&FlowSpec)`: the k best paths from a node to another node, or all maximal
   flows from a node, downstream or upstream, across contract nodes (depth up to 10).
 - `impact(&ImpactSpec)`: reverse reachability with per-node risk, tests, grouping by project
@@ -88,6 +94,23 @@ ambiguous or unresolved edges, fewer first; (3) length, shorter first (open-ende
 longer first); (4) sum of evidence ranks; (5) edge key sequence. Ambiguous and unresolved
 edges are allowed but the path is flagged (`FlowPath::is_flagged`). Search is a bounded DFS
 with an expansion budget; `FlowTrace::truncated` says when the budget stopped it.
+
+### Navigation coverage
+
+Navigation preserves evidence and resolution separately. A resolved syntactic relation
+is a sourced investigation lead, not proof of runtime behavior. A semantically evidenced
+ambiguous edge is still a candidate, and a heuristically evidenced resolved edge does not
+become a primary link. `candidate_limit = 0` requests strong links only.
+
+`WalkResult` separately reports candidate leaves and counts of inspected adjacencies
+omitted by fanout, candidate/node and depth limits. Those counts do not enumerate the
+unseen graph; candidate descendants are not searched. Empty output does not prove that
+calls or dependencies are absent. `walk` retains its existing all-edge defaults, stable
+ordering and requested-depth boundary.
+
+Navigation streams adjacencies into bounded per-kind selections instead of allocating
+and sorting the whole fanout. It still inspects the node's degree, and the graph itself
+remains an in-memory graph; these bounds do not establish whole-repository scale.
 
 ### Impact and risk
 

@@ -30,14 +30,14 @@ each other's view; a context pins one commit per project for its whole life.
 
 | Tool | Kind | Use it to | Key inputs | Returns |
 |---|---|---|---|---|
-| `open_workspace` | read | Start every session | `workspace?`, `views`, `working_directory?`, `summary_budget_tokens?` | `context_id`, view manifest, projects and roles, accepted rules, open tasks, recent decisions |
+| `open_workspace` | read | Open or refresh a pinned context | `workspace?`, `views`, `working_directory?`, `summary_budget_tokens?` | `context_id`, view manifest, projects and roles, accepted rules, open tasks, recent decisions |
 | `search` | read | Find code, docs, contracts, memory | `query`, `kinds`, `projects`, `path_prefixes`, `languages`, `limit`, `token_budget`, `include_snippets`, `include_diagnostics` | `hits` (with evidence and snippets), `memory_hits`, `query_class` |
 | `fetch` | read | Read exact versioned source | `ids` and/or `paths` (`project`, `path`, `lines?`), `context_lines` | `items` with content, evidence and `status` (current / changed / deleted) |
 | `inspect_symbol` | read | Definition, signature, doc, references, implementations, tests | `symbol` or `id`, `project?`, `include`, `limit` | `symbols` (several when ambiguous), `analysis` level |
 | `trace_flow` | read | Follow relations across projects | `id`, `symbol` or `contract`; `direction`, `max_depth` (1-5), `relations` | `nodes` and evidenced `edges`; may return a `job` |
 | `analyze_impact` | read | What a change breaks | `change`: `symbol` / `file` / `diff` (`base`, `head?`) / `patch` (unified diff, at most 1 MiB) | `changed`, `impacted`, `tests`, `risk` with factors; patches return a `job` |
 | `contracts` | read | Endpoints, topics, RPCs, tables, env names, i18n keys, packages | `query`, `kinds`, `project`, `only_drift` | `contracts` with participants and `drift` findings |
-| `build_context` | read | A source pack for a task | `task`, `token_budget` (256-200000, default 8000), `focus_paths`, `focus_symbols`, `include` | `entries` (each with `why_relevant`), `budget`, `uncertainties` |
+| `build_context` | read | A source pack for a task | `task`, `token_budget` (256-200000, default 8000), `projects`, `path_prefixes`, `languages`, `focus_paths`, `focus_symbols`, `include` | `entries` (each with `why_relevant`), `budget`, `uncertainties` |
 | `history` | read | Blame, commits, co-changes, rationale | `project` + `path` (+ `lines`) or `symbol`, or `id`; `include` | `commits`, `blame`, `co_changed`, `rationale` |
 | `read_memory` | read | Decisions, rules, notes, findings | `ids`, `query`, `scopes`, `project`, `task_id`, `kinds`, `statuses` | `records` (scope, status, author, evidence, version) |
 | `write_memory` | **write** | Record a finding or decision | `scope`, `kind`, `title`, `body`, `evidence` (result ids), `supersedes?`, `idempotency_key?` | the stored `record` (agent writes are `proposed`) |
@@ -45,15 +45,49 @@ each other's view; a context pins one commit per project for its whole life.
 | `save_checkpoint` | **write** | Save progress (or start a task) | `task_id?` (or `goal`), `progress`, `decisions`, `open_questions`, `next_steps`, `status?`, `idempotency_key?` | `task_id`, `checkpoint_id`, recorded manifest, decision records |
 | `index_status` | read | Freshness, coverage, jobs | `projects`, `job_ids` | per-project tiers, languages, latest-seen vs indexed commit; `jobs` |
 
+`build_context` uses the same hard source filters as `search`: `projects`,
+literal `path_prefixes` and `languages` constrain retrieval, expansion and
+packing. Prefixes are source-root-relative and case-sensitive; a trailing `/`
+requires a directory boundary. Sources without a known language do not pass
+an explicit language filter. `include` also controls source admission before
+body acquisition. Accepted workspace rules remain applicable; an explicit
+project filter excludes other projects' memory records.
+
+`focus_paths` and `focus_symbols` remain preferred sources, rather than an
+implicit restriction on the rest of the pack. A focus path outside explicit
+project/path filters is rejected; language or section exclusions are reported
+without acquiring that body's text. The live engine resolves focus symbols
+within the selected source scope. A unique definition becomes an actual
+pinned source anchor; ambiguous or unmatched names remain uncertainties and
+are not replaced with another symbol. Use an in-file qualified name or
+`src/native/mapping.rs#to_document` to disambiguate, together with `projects`
+when several projects contain that path. This verifies a source definition,
+not compiler-grade call resolution. Explicit ranges and selected definitions
+keep the context's personal-layer version when one shadows the shared file.
+Whole focus files or definitions that exceed the budget are omitted with an
+actionable gap; source is never silently clipped to make them fit. Regions
+already covered by an emitted focus source are not packed a second time.
+
 Annotations: every tool is `readOnlyHint: true`, `idempotentHint: true`,
 except `write_memory` and `save_checkpoint` (`readOnlyHint: false`,
 `idempotentHint: false`). No tool is destructive (writes add records and
 versions, never delete), and none is open-world (`openWorldHint: false`).
 
-Server `instructions` describe the workflow: `open_workspace` first, then
-`search` / `fetch` / `inspect_symbol` / `trace_flow` / `contracts`; before a
-change `analyze_impact` and `build_context`; save with `write_memory` and
-`save_checkpoint`; resume with `resume_task`.
+Server `instructions` describe adaptive navigation. Use scoped local reads or
+`rg` for concrete targets and bounded `search` for unknown ownership or behavior.
+Open or reuse a workspace context for related Knowell calls, verify project roots
+before local reads, and reconcile relevant pinned evidence with the checkout before
+editing. Reuse useful returned source; `fetch` is conditional on missing passages
+or required retained versions. Symbol, graph, impact and context tools answer
+specific unresolved questions instead of forming a mandatory sequence. Persistence
+with `write_memory` or `save_checkpoint` must be within the authorized task;
+`resume_task` is relevant when continuing earlier work.
+
+The portable [`knowell` skill](../../skills/knowell/SKILL.md) gives coding agents
+the same routing and source-version guidance, with conditional cross-project
+patterns. Its repository files do not install a skill or change existing client
+configuration. Client-specific discovery and installation remain separate from
+the MCP connection.
 
 ### Size of the tool listing
 
@@ -68,27 +102,38 @@ leaves out (patterns, text lengths, exclusive fields). The test
 `model_facing_size_stays_within_budget` fails above **14 000 bytes** in total.
 Measure with `python scripts/buildlock.py cargo run -q -p knowell-mcp --example tool_size`.
 
-| Tool | input+desc (bytes) | Tool | input+desc (bytes) |
-|---|---:|---|---:|
-| `open_workspace` | 642 | `history` | 937 |
-| `search` | 987 | `read_memory` | 1087 |
-| `fetch` | 935 | `write_memory` | 1353 |
-| `inspect_symbol` | 770 | `resume_task` | 777 |
-| `trace_flow` | 1307 | `save_checkpoint` | 1353 |
-| `analyze_impact` | 1112 | `index_status` | 506 |
-| `contracts` | 814 | `build_context` | 1272 |
-| **Total** | **13 852 (~3.5k tokens)** | | |
-
 ### Results
 
 The default **source** mode returns successful read tools as one TextContent
 block, without `structuredContent` or a structured output schema. Source-returning
 tools show shared project/view/commit provenance, actual displayed source ranges,
-exact fetch handles and fenced code, documentation or tests. They omit repeated
-hashes, ranking signals and generic reference-resolution warnings. Real missing
+and fenced code, documentation or tests. Search hides ordinary fetch handles by
+default; `include_handles: true` shows exact pinned handles. Continuation and
+next-omitted handles remain visible when needed to acquire missing source. They omit repeated
+hashes, ranking signals on source bodies and generic reference-resolution warnings. Real missing
 index, stale-version, acquisition-limit and budget limitations remain explicit.
-No generative model writes the response. Analytical tools retain their deliberate
-text views; write tools keep schema-valid typed receipts.
+No generative model writes the response. Analytical source views share version
+pins and show compact nodes, relation evidence and proof locations rather than
+repeating full provenance. Their exact read handles, resolution states, risk
+factors, pending jobs and material gaps remain visible. Write tools keep
+schema-valid typed receipts.
+
+`search` with `include_snippets: false` returns locators: matched anchor ranges,
+the verified enclosing symbol when available, and compact acquisition signals
+(`exact symbol`, `exact path`, `lexical(terms)`, `vector`, or evidenced relations).
+An anchor is not a claim that the whole declaration was read. Titles do not
+replace verified symbols, and vector similarity is not a dependency. One note
+explains omitted bodies instead of repeating it for every hit. Request
+`include_handles: true` to expose exact pinned source identities for subsequent
+reads. Path-based reads alone do not reproduce saved personal source versions;
+personal locations also show a compact file-content prefix, which is a display
+hint rather than an exact replay identity.
+
+Locator output avoids body packing and can skip selected-path source hydration;
+it still uses the configured hybrid retrieval, including query embeddings and
+ANN when applicable. It does not promise zero provider calls or local-only
+latency. Opt-in `include_diagnostics: true` reports actual retrieval counters,
+hydrated and skipped paths, preparation scope, timings and embedding usage.
 
 `search` (default 4000 estimated tokens) and `build_context` in source mode budget
 the complete rendered response, including
@@ -281,8 +326,8 @@ error (-32602).
 
 - Prompt `onboard` (`workspace?`, `focus?`): get oriented: projects, rules,
   decisions, open tasks, then an optional focus area.
-- Prompt `impact-review` (`change`, `project?`, `workspace?`): impact of a
-  change across projects, then record the finding.
+- Prompt `impact-review` (`change`, `project?`, `workspace?`): review a change's
+  impact across projects with evidence and gaps; persist only when authorized.
 - Resource template `knowell://{workspace}/{project}/{view}/{path}`: a file at
   a view. `view` is a ref with `/` percent-encoded (`branch:feature%2Fx`);
   `path` keeps `/`; `#L10-L20` selects lines. Contents are `text/plain` with

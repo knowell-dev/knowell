@@ -9,7 +9,7 @@ use crate::StoreError;
 static ORIGINAL: Migrator = sqlx::migrate!();
 
 /// Latest numbered domain migration this binary reads and writes.
-pub const LATEST_SCHEMA_VERSION: i64 = 15;
+pub const LATEST_SCHEMA_VERSION: i64 = 16;
 
 /// Database runtime-admission protocol implemented by this build.
 pub const RUNTIME_PROTOCOL_VERSION: u32 = 1;

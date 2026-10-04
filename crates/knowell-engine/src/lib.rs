@@ -12,6 +12,7 @@ mod ids;
 mod memory;
 mod parse_product;
 mod patch;
+mod precise;
 mod profiles;
 mod rest;
 mod scope;

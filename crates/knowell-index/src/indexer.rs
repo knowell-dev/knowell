@@ -653,6 +653,7 @@ impl<E: Embedder + 'static> Inner<E> {
             priority: Priority::Background,
             force: false,
             profile: None,
+            scip_import: None,
         };
         let queued = self
             .enqueue_next(&mut conn, Tier::T2, &payload, generation)

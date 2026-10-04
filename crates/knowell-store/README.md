@@ -125,7 +125,7 @@ when its own tenant's redacted source becomes available, without changing the in
 This metadata-only upgrade does not rewrite content, chunks, prepared inputs or vectors,
 and does not call an embedding provider.
 Runtime constructors (`connect_runtime`, `connect_runtime_with`) validate exact
-schema 15, accepting the immutable original and core-only migration checksums.
+schema 16, accepting the immutable original and core-only migration checksums.
 Every physical pooled connection, including a reconnect, holds a database-wide
 shared advisory admission lock until it closes. `validate_schema` never applies
 DDL. `inspect_schema` accepts known incomplete history for administrator planning
@@ -378,3 +378,17 @@ on the domain crate and does not scan for secrets: the domain does that before w
   text (and with it secrets) cannot be written. UPDATE, DELETE and TRUNCATE are rejected by
   triggers; `prune_audit_log(org, before)` is the retention path (it opens the guard for
   its own transaction only). Entries survive the deletion of their organization.
+
+## Version-bound analysis
+
+Schema 16 adds immutable, tenant/view/revision-bound prepared SCIP imports and
+exact-generation per-file analysis coverage. Callers stage sanitized, source-free
+prepared data; the indexer validates artifact, source and compiler-input identities
+before the T1 transaction activates its generation. Coverage is not inherited by
+unchanged text, is hidden for failed generations and is deleted by generation pruning.
+
+Syntax and compiler occurrences have distinct origins. Retrying syntax analysis does
+not erase imported occurrences; ordinary new analysis builds retire prior compiler
+edges and occurrences unless an explicit matching import is attached. Existing
+migration checksums remain unchanged. Runtime schema admission still requires the
+exact current schema; applying this migration is an administrative operation.

@@ -56,8 +56,9 @@ dependencies; completion of the whole is defined by the acceptance scenarios at 
 
 - **Current surface:** local `know trace` and `impact` query the real saved engine
   graph, preserve evidence and gaps, and support JSON/text/Markdown reports.
-  Hub/OIDC transport, terminal unapplied patches and precise reference resolution
-  remain open; this does not complete the milestone.
+  Explicit revision/hash-bound SCIP imports and evidence-gated navigation are available.
+  Automatic language-tool execution, broad relation accuracy, Hub/OIDC transport and
+  terminal unapplied patches remain open; this does not complete the milestone.
 
 - **Deliverables:** SCIP import; edge evidence types; `trace_flow`, `analyze_impact`, and
   patch preview; rule packs; cross-project links; `know check`.

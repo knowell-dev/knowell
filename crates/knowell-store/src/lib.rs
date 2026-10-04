@@ -32,6 +32,7 @@
 //! the integration tests in `tests/` cover every one of them against a real
 //! PostgreSQL with pgvector.
 
+pub mod analysis;
 pub mod audit;
 pub mod content;
 pub mod embeddings;

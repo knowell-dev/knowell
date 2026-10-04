@@ -216,3 +216,61 @@ async fn references_are_recorded_with_their_evidence_and_imports_follow_the_file
     );
     drop(indexer);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rust_calls_aliases_zero_edge_coverage_and_deleted_targets_stay_honest() {
+    let db = require_db!();
+    if !git_available() {
+        return;
+    }
+    let ws = fixture_workspace(Some(&[PROJECT]));
+    let source = "mod helpers; mod zero; use crate::helpers::read_file as read; struct BitWriter; impl BitWriter { fn raw(&self) {} } fn layout() {} fn run() { let raw = 1; let layout = layout(); consume(raw, layout); read(); }\n";
+    let zero = "fn isolated() { let raw = 1; consume(raw); }\n";
+    ws.write(PROJECT, "src/rust-probes/lib.rs", source);
+    ws.write(
+        PROJECT,
+        "src/rust-probes/helpers.rs",
+        "pub fn read_file() {}\n",
+    );
+    ws.write(PROJECT, "src/rust-probes/zero.rs", zero);
+    ws.commit_all(PROJECT, "rust source reference probes");
+    let data = tempfile::tempdir().unwrap();
+    let embedder = Arc::new(CountingEmbedder::new());
+    let indexer = indexer(&db, data.path(), &embedder);
+    let (registration, _) = indexer
+        .index_workspace(&ws.resolved, Priority::Interactive)
+        .await
+        .unwrap();
+    let view = view_of(&registration, PROJECT);
+    let project = registration.views[0].project_id;
+    let pin = active_pin(&db, view).await;
+    let read = symbol(&db, project, "src/rust-probes/helpers.rs#read_file").await;
+    let calls = edges(&db, &NodeRef::Symbol(read), pin, "calls").await;
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].edge.evidence_type, EvidenceType::Syntactic);
+    assert_eq!(calls[0].edge.resolution, Resolution::Resolved);
+    let mut conn = db.conn().await;
+    let coverage = knowell_store::analysis::coverage_at(
+        &mut conn,
+        registration.organization,
+        pin,
+        &path("src/rust-probes/zero.rs"),
+        &knowell_core::ContentHash::of(zero.as_bytes()),
+    )
+    .await
+    .unwrap();
+    let syntax = coverage.iter().find(|c| c.provider == "syntax").unwrap();
+    assert_eq!(syntax.details["calls_written"], 0);
+    assert_eq!(syntax.details["calls_unresolved"], 1);
+    assert_eq!(syntax.details["calls_complete"], false);
+    drop(conn);
+    ws.git(PROJECT, &["rm", "-q", "src/rust-probes/helpers.rs"]);
+    ws.commit_all(PROJECT, "remove rust call target");
+    refresh(&indexer, view).await;
+    let next = active_pin(&db, view).await;
+    assert!(
+        edges(&db, &NodeRef::Symbol(read), next, "calls")
+            .await
+            .is_empty()
+    );
+}

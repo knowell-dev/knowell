@@ -87,8 +87,8 @@ contract participations as contract edges (`Exposes`, `Produces`, `Writes`, `Con
 | `open_workspace` | pins every visible project's active generation (or the ref `views` names; a missing ref is `ref_not_found`), attaches the caller's personal overlay when `working_directory` is inside a worktree of a project's repository, builds the start-up pack with `knowell_knowledge::bootstrap_pack` (accepted rules, decisions, open tasks; omitted items → `budget_exhausted`; conflicts reported) and returns a `context_id` (idle TTL 2 h, bound to the caller) |
 | `search` | the hybrid pipeline above; hits carry `Evidence` (project, ref, layer, 40-hex commit, path, lines, content hash, symbol, why, freshness T0–T2, index state) and a snippet; memory hits come from full-text search over readable scopes |
 | `fetch` | resolves result ids `kn:{project}:{commit12}:{hash16}:{path}#L{a}-L{b}` against the context: same version → `current`; another version found in `file_history` → `changed` + `current_id`; path gone → `deleted`; paths read the overlay first, then the pinned view; sensitive paths → `excluded_by_policy` |
-| `inspect_symbol` | snapshot symbols by name or id: signature, doc, references (stored `references`/`calls` edges, then file importers), tests (the same from test files); `references_complete` is always `false` and a `no_reference_resolution_for_language` gap says why |
-| `trace_flow` | walk of the code graph from a symbol (and its file), result id or contract key over the requested relations; synchronous (job ids are not issued) |
+| `inspect_symbol` | version-verified definitions/signatures plus bounded stored occurrences and evidenced calls, references, implementations and actual test associations; compiler analysis requires matching per-file import coverage; import navigation remains an import, and `references_complete` remains `false` with explicit inventory and clipping gaps |
+| `trace_flow` | walk from a symbol/file, verified result id or contract key; opt-in `navigation` gates expansion by evidence/resolution, bounds fanout and candidate leaves, and reports omitted or unavailable analysis; synchronous (job ids are not issued) |
 | `analyze_impact` | symbol / file → impact of the symbol and its file; **diff** → `git diff` between two refs of the project (renames tracked), changed symbols by parsing both blob versions; **patch** → the unified diff is parsed (untrusted input: validated paths and counts), applied to the pinned version in memory, changed and added symbols found by parsing both sides; then `CodeGraph::impact`; risk factors: cross-project consumers, public contract, many dependents, untested code, unresolved references |
 | `contracts` | the generation's contract participations (store `contracts_with_origins`) grouped by (kind, key), filtered by query substring, kinds and project; endpoint-without-client / event-without-consumer findings |
 | `build_context` | focus paths first, then accepted rules/decisions matching the task (≤ ¼ of the budget), then bounded body-only Source selection over hybrid results and related code; every shown region cites its version; caveats follow selected evidence |
@@ -310,11 +310,40 @@ default; they do not establish quality on public repositories or natural agent t
 
 `open_workspace` reads the pinned language catalog without building source snapshots.
 Source search hydrates admitted candidate paths and selects complementary shown bodies,
-including bounded related sources. Opt-in
-`include_diagnostics` returns phase durations in whole milliseconds, retrieval work,
-embedding calls/failures and successful provider usage. Failed-operation token usage
-is unknown, not zero; reported/estimated counts remain distinguishable. Durations are
-diagnostics for one call, not latency percentiles or a quality score.
+including bounded related sources. `search.include_snippets` defaults to `true`.
+Setting it to `false` selects locator retrieval: matched source coordinates, symbols,
+reasons and exact typed identities remain, while selected display-body hydration,
+parsing, graph expansion and body packing are skipped. This does not eliminate indexed
+lexical work or ordinary semantic query embeddings. Empty admitted catalogs and an
+answered exact full-path query need no embedding request. `include_handles` defaults
+to `false` for Source presentation; request it when an exact pinned fetch handle is
+useful. Handles for omitted continuation ranges remain available without requiring
+another read of source already shown.
+
+Opt-in `include_diagnostics` returns phase durations in whole milliseconds, retrieval
+work, embedding calls/failures and successful provider usage. `elapsed_ms` measures
+engine tool execution; MCP rendering, serialization, transport and client/model time
+are outside it. `snippet_read_ms` includes selected hydration and body acquisition/
+packing work, and is zero for locator retrieval. The phase durations do not partition
+all tool work. `prepared_file_occurrences` counts represented base and personal file
+occurrences, including warm cached metadata; it is not a count of database reads.
+`source_hydrated_paths` counts admitted pending base paths submitted to hydration;
+`source_hydration_skipped_paths` counts those intentionally left unhydrated in locator
+retrieval. Personal source is already held by its overlay and is excluded from both
+hydration counts. These counters do not establish complete source coverage or distinguish
+cache hits from database body reads. Failed-operation token usage is unknown, not zero;
+reported/estimated counts remain distinguishable. Durations describe one call, not
+latency percentiles, a measured speedup or a quality score.
+
+`build_context.projects`, `path_prefixes` and `languages` are hard source restrictions.
+They apply to preferred focus sources, retrieval, relation expansion and packing;
+requested sections also constrain source admission. Empty lists preserve the reachable
+workspace scope. Prefixes are normalized once, remain case-sensitive literal UTF-8
+source-root-relative prefixes and never interpret `%`, `_`, `*` or `?` as patterns.
+A trailing `/` restricts a directory; `src/pay` can also match `src/payments`.
+`focus_paths` and `focus_symbols` remain preferred evidence inputs, not restrictions on
+the rest of the pack. Explicit path/ranges and qualified names reduce ambiguity;
+ambiguous symbol names are reported rather than selecting an arbitrary component.
 
 `build_context.selection_strategy` defaults to body-only `source`. Explicit `rank`,
 metadata `mmr`, `role_coverage` and `bounded_bundles` remain research comparators. Source
@@ -322,6 +351,15 @@ packing uses actual body cues and source redundancy with bounded work and truthf
 contiguous excerpts; it does not certify semantic sufficiency. Normal `search` uses the
 same selector with a default 4000 estimated-token response budget. Inspection steps refer
 only to bodies actually shown at exact versioned spans. Missing roles remain unknown.
+Source budgeting uses a UTF-8 byte estimate (four bytes per token) with a framing
+allowance per selected body and space reserved for shared text. The renderer separately
+admits complete entries, provenance and limitation text under
+`min(requested * 4, 800000)` UTF-8 bytes; it does not silently cut a shown source body.
+`budget.used` is the engine's selected-body estimate, not final response consumption:
+headers, notes, memory hits and locator metadata are not included, and rendering can
+omit additional entries. Locator results can therefore report zero estimated body
+tokens while returning useful metadata. Neither estimate covers the MCP envelope or
+guarantees a real model-token limit; benchmark client-reported token usage separately.
 Source acquisition and packing share at most 64 admitted candidates. Region selection
 scans at most 20,000 lines within a retrieved declaration; query cues guide excerpts,
 not semantic completeness. Omitted declaration ranges have disjoint pinned fetch handles.
@@ -329,6 +367,15 @@ Imports and generic symbol references are never relabeled as calls or test cover
 Call/test roles require stronger proven relationships and located source endpoints;
 entry/config roles remain missing without an authoritative source relationship.
 Memory/rules-only context skips source retrieval and query embeddings.
+
+Supported source-only Rust calls are syntactic observations, not a compiler-complete
+or runtime call graph. Ambiguous or unsupported bindings retain their resolution and
+coverage limits. Imported SCIP compiler observations are admitted only when their
+generation, source path and hash match the pinned base snapshot; evidence type and
+resolution status remain separate. A personal overlay has no matching compiler-input
+identity, so base compiler graph evidence is not reused for it, including unchanged
+files whose bindings may depend on edited build inputs. Neither empty traversal nor
+a `resolved` label proves complete call/test coverage or runtime behavior.
 
 ## Optional persisted parse products
 
@@ -364,14 +411,36 @@ the configured directory must remain private and its retention is managed by its
 Unix-created cache directories/files use owner-only modes; Windows inherits directory ACLs.
 
 Search snapshots read file, chunk and relationship metadata in 1000-file keyset pages
-without transferring source bodies or parsing the generation. Source is hydrated only
-for admitted pinned paths, with a 1000-path and 64 MiB distinct-body bound per project
-hydration, and cached text is reused within the existing byte-bounded cache. Legacy
+without transferring source bodies or parsing the generation. Source/locator search
+preparation applies explicit path-prefix and stored occurrence-language restrictions
+before the database page limit. Immutable names, kinds and source anchors on versioned
+defines evidence preserve symbols in whole-file/grouped chunks without loading bodies;
+historical metadata does not borrow a later logical symbol name. Invalid or conflicting
+labels are rejected, while unlabeled older indexes retain conservative chunk recovery.
+Only admitted files contribute chunks, definitions and
+relationship/contract origins to that catalog. Blob-level language hints cannot replace
+the pinned file occurrence's language. Tenant predicates, generation validity and
+bytewise exclusive path cursors remain unchanged.
+
+Partial catalogs are cached separately by generation pin and normalized prefix/language
+scope; an unrestricted metadata catalog and a full graph snapshot cannot be replaced
+by a partial one. Equivalent scope ordering and duplicates share a cell. All cells
+share the configured count-bounded LRU capacity, and retirement removes older cells
+for the view. Immutable language counts are prepared once rather than walking every
+file on a warm query.
+
+Source is hydrated only for admitted pinned paths, with a 1000-path and 64 MiB
+distinct-body bound per project hydration, and cached text is reused within the existing
+byte-bounded text cache. Locator search never performs that selected hydration. Legacy
 metadata may have an unknown line count; selected source resolves it instead of inferring
 file length from chunk coverage. Ordinary source fetches also use metadata and actual
 selected text. Full graph and inspection tools retain their explicit full snapshot path.
-Metadata snapshots still retain a generation-wide metadata/relationship catalog: paging
-limits database transfer batches, not total catalog memory. This is not a distributed
-storage or billion-line scale guarantee. Measure cold preparation, selected body reads,
-parse products, CPU and memory before making performance claims. Debug counters contain
-no source text or secret values.
+
+Unrestricted catalogs still grow with the pinned generation; restricted catalogs grow
+with the admitted scope. Hydration currently clones and rebuilds the admitted catalog
+to attach selected parser products. Metadata cache capacity bounds the number of cells,
+not aggregate heap bytes. SQL scope filtering reduces unrelated row transfer; it does
+not guarantee scope-independent database execution cost. This is not distributed
+storage or a billion-line scale guarantee. Measure cold preparation, selected body
+reads, parse products, CPU and memory before making performance claims. Debug counters
+contain no source text or secret values.

@@ -10,10 +10,11 @@
 //! miss a new target. T1 therefore also re-analyses (from stored text) the
 //! unchanged files that
 //!
-//! - import a path this build removed (deleted, or renamed away),
+//! - import a path this build removed (all languages), or a changed Rust file
+//!   whose scoped import bindings must be checked against its declarations,
 //! - have an unresolved import whose specifier now resolves to a path this
 //!   build added,
-//! - reference a symbol whose definition this build removed,
+//! - reference or call a symbol whose definition this build removed,
 //!
 //! at most [`MAX_DEPENDENTS`] of them per build (sorted by path; the rest
 //! keep their edges until they change themselves, and the cut is logged and
@@ -21,6 +22,10 @@
 //! re-embedded. An unchanged file whose identifiers could now match a *new*
 //! definition is only re-resolved through one of the rules above (for
 //! example its import of the new file), not by a project-wide name search.
+//!
+//! A stale manifest syntax policy instead refreshes every retained file from
+//! stored text. This one-time evidence upgrade writes no unchanged chunk or
+//! prepared-input rows; chunk and embedding format versions stay independent.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -28,6 +33,7 @@ use std::sync::Arc;
 use knowell_core::{ContentHash, RepoPath};
 use knowell_embed::Embedder;
 use knowell_graph::EdgeKind;
+use knowell_store::analysis;
 use knowell_store::content::{self, NewChunkInput};
 use knowell_store::graph::{self, NodeRef};
 use knowell_store::symbols::{self, NewOccurrence, NewSymbol};
@@ -42,6 +48,7 @@ use crate::context::ViewContext;
 use crate::error::IndexError;
 use crate::indexer::{Counters, Inner, JobRun};
 use crate::jobs::StagePayload;
+use crate::manifest;
 use crate::pipeline::{Delta, JobOutcome, Purpose, Upsert, derive_delta, files_map};
 use crate::references::{
     FileDefs, FileReferences, MAX_IMPORTED_FILES, MAX_SIBLING_FILES, family, file_references,
@@ -158,7 +165,22 @@ impl<E: Embedder + 'static> Inner<E> {
                 }
             }
         }
+        let syntax_refresh = active.is_some_and(|active| {
+            manifest::load(&self.config.data_dir, p.view, active)
+                .is_none_or(|recorded| recorded.needs_syntax_refresh())
+        });
         let dependents = match active {
+            // A policy upgrade is complete only after every retained path has
+            // current evidence, so it cannot use the ordinary dependents cap.
+            Some(_) if syntax_refresh => hashes
+                .iter()
+                .filter(|(path, _)| !analysed.contains_key(*path))
+                .map(|(path, hash)| Upsert {
+                    path: path.clone(),
+                    hash: *hash,
+                    renamed_from: None,
+                })
+                .collect(),
             Some(active) => {
                 self.dependents(&mut conn, &ctx, pin, active, &delta, &analysed, &hashes)
                     .await?
@@ -178,7 +200,9 @@ impl<E: Embedder + 'static> Inner<E> {
             )
             .await?
         };
-        Counters::add(&self.stats.dependents_reresolved, reanalysed.len() as u64);
+        if !syntax_refresh {
+            Counters::add(&self.stats.dependents_reresolved, reanalysed.len() as u64);
+        }
 
         // Content-level chunk rows: one set per content (ranges, kinds). The
         // first path in order writes them; the embedding input of every path
@@ -263,6 +287,19 @@ impl<E: Embedder + 'static> Inner<E> {
                 }
                 edges.extend(syntactic_edges(ctx.project, file, file_ids, &files));
                 if let Some(found) = references.remove(&file.path) {
+                    let details = serde_json::to_value(&found.coverage).map_err(|_| {
+                        IndexError::invalid("reference coverage", "cannot encode syntax coverage")
+                    })?;
+                    analysis::upsert_coverage(
+                        &mut conn,
+                        ctx.organization,
+                        pin,
+                        &file.path,
+                        &file.content_hash,
+                        "syntax",
+                        &details,
+                    )
+                    .await?;
                     occurrences.extend(found.occurrences);
                     edges.extend(found.edges);
                 }
@@ -280,6 +317,7 @@ impl<E: Embedder + 'static> Inner<E> {
                 .await?;
             graph::replace_edges(&mut conn, p.view, generation, &origins, &[]).await?;
         }
+        self.apply_staged_scip(&mut conn, &ctx, pin, &p).await?;
         self.cache().put_analysed(
             (p.view, generation),
             analysed.into_values().collect(),
@@ -348,6 +386,33 @@ impl<E: Embedder + 'static> Inner<E> {
                 found.extend(origin_path(&edge.edge.origin));
             }
         }
+        // Rust aliases name a particular declaration inside an imported file.
+        // Refresh those bindings when that file changes. Generic name-based
+        // importers do not acquire a new dependency merely because an unrelated
+        // declaration was appended: preserving that boundary keeps one-file
+        // edits and rewritten-history reuse incremental.
+        let changed_rust: Vec<NodeRef> = delta
+            .upserts
+            .iter()
+            .filter(|up| {
+                analysed
+                    .get(&up.path)
+                    .is_some_and(|file| file.parsed.language == knowell_parse::Language::Rust)
+            })
+            .map(|up| NodeRef::File {
+                project: ctx.project,
+                path: up.path.clone(),
+            })
+            .collect();
+        if !changed_rust.is_empty() {
+            for edge in graph::edges_into(conn, pin, imports, &changed_rust).await? {
+                if let Some(path) = origin_path(&edge.edge.origin)
+                    && path_family(&path) == Some("rust")
+                {
+                    found.insert(path);
+                }
+            }
+        }
         if !delta.added.is_empty() {
             let tails: Vec<String> = delta
                 .added
@@ -397,10 +462,10 @@ impl<E: Embedder + 'static> Inner<E> {
             }
             if !vanished.is_empty() {
                 let targets: Vec<NodeRef> = vanished.into_iter().map(NodeRef::Symbol).collect();
-                for edge in
-                    graph::edges_into(conn, pin, EdgeKind::References.as_str(), &targets).await?
-                {
-                    found.extend(origin_path(&edge.edge.origin));
+                for kind in [EdgeKind::References, EdgeKind::Calls] {
+                    for edge in graph::edges_into(conn, pin, kind.as_str(), &targets).await? {
+                        found.extend(origin_path(&edge.edge.origin));
+                    }
                 }
             }
         }
@@ -441,11 +506,7 @@ impl<E: Embedder + 'static> Inner<E> {
         ids: &BTreeMap<RepoPath, Vec<Option<SymbolId>>>,
         files: &BTreeSet<RepoPath>,
     ) -> Result<BTreeMap<RepoPath, FileReferences>, IndexError> {
-        let referencing: Vec<Arc<AnalysedFile>> = all
-            .values()
-            .filter(|f| !f.identifiers.is_empty())
-            .cloned()
-            .collect();
+        let referencing: Vec<Arc<AnalysedFile>> = all.values().cloned().collect();
         if referencing.is_empty() {
             return Ok(BTreeMap::new());
         }
@@ -458,10 +519,30 @@ impl<E: Embedder + 'static> Inner<E> {
                     .push(path.clone());
             }
         }
-        let mut plans: Vec<(Arc<AnalysedFile>, Vec<RepoPath>, Vec<RepoPath>)> = Vec::new();
+        let mut plans = Vec::new();
         let mut needed: BTreeSet<RepoPath> = BTreeSet::new();
         for file in referencing {
-            let mut imported = import_targets(&file, files);
+            let rust = (file.parsed.language == knowell_parse::Language::Rust).then(|| {
+                crate::rust_imports::resolve(&file.path, &file.text, files, &file.parse_limits)
+            });
+            let mut imported: Vec<RepoPath> = if let Some(imports) = &rust {
+                let mut paths = imports.target_paths();
+                for ident in &file.identifiers {
+                    if let Some(qualified) = &ident.qualified {
+                        let segments: Vec<String> =
+                            qualified.split('.').map(str::to_owned).collect();
+                        if let Some((path, _)) =
+                            imports.qualified_target(&file.path, files, &segments, ident.start_byte)
+                        {
+                            paths.insert(path);
+                        }
+                    }
+                }
+                paths.into_iter().filter(|p| p != &file.path).collect()
+            } else {
+                import_targets(&file, files)
+            };
+            let imports_cut = imported.len() > MAX_IMPORTED_FILES;
             imported.truncate(MAX_IMPORTED_FILES);
             let siblings: Vec<RepoPath> = family(file.parsed.language)
                 .and_then(|fam| by_dir.get(&(file.path.parent(), fam)))
@@ -475,7 +556,7 @@ impl<E: Embedder + 'static> Inner<E> {
                     .filter(|p| !all.contains_key(*p))
                     .cloned(),
             );
-            plans.push((file, imported, siblings));
+            plans.push((file, imported, siblings, rust, imports_cut));
         }
         let mut defs: BTreeMap<RepoPath, FileDefs> = BTreeMap::new();
         for (path, file) in all {
@@ -499,12 +580,13 @@ impl<E: Embedder + 'static> Inner<E> {
             }
         }
         let ids = ids.clone();
+        let files = files.clone();
         let project = ctx.project;
         let resolved = tokio::task::spawn_blocking(move || {
             let empty_defs = FileDefs::default();
             let empty_ids = Vec::new();
             let mut out = BTreeMap::new();
-            for (file, imported, siblings) in plans {
+            for (file, imported, siblings, rust, imports_cut) in plans {
                 let own = defs.get(&file.path).unwrap_or(&empty_defs);
                 let imported: Vec<&FileDefs> = imported
                     .iter()
@@ -517,7 +599,16 @@ impl<E: Embedder + 'static> Inner<E> {
                     .filter(|d| !d.is_empty())
                     .collect();
                 let file_ids = ids.get(&file.path).unwrap_or(&empty_ids);
-                let found = file_references(project, &file, file_ids, own, &imported, &siblings);
+                let mut found = file_references(
+                    project,
+                    &file,
+                    file_ids,
+                    own,
+                    &imported,
+                    &siblings,
+                    rust.as_ref().map(|r| (r, &files)),
+                );
+                found.coverage.truncated |= imports_cut;
                 out.insert(file.path.clone(), found);
             }
             out

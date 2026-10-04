@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use knowell_core::{LineRange, RepoPath};
 use knowell_embed::{AnyEmbedder, FakeEmbedder};
-use knowell_engine::{Engine, EngineSettings};
+use knowell_engine::{Engine, EngineSettings, ParseProductCacheSettings};
 use knowell_index::{Priority, SyncOutcome};
 use knowell_mcp::tools::{
     BuildContextInput, ContextSection, ContextSelectionStrategy, EntryKind, FetchInput,
@@ -345,6 +345,172 @@ async fn source_search_excerpt_has_an_exact_fetch_handle_and_optional_body() {
             .iter()
             .any(|other| other.id == hit.id && other.evidence == hit.evidence)
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn locator_search_skips_source_parsing_and_keeps_semantic_retrieval() {
+    if !git_available() {
+        return;
+    }
+    let db = require_db!();
+    let mut ws = fixture_workspace();
+    ws.resolved
+        .projects
+        .retain(|project| project.name.as_str() == "billing-api");
+    let path = "src/locator-probe.rs";
+    let original = long_guard();
+    std::fs::write(ws.project_dir("billing-api").join(path), &original).unwrap();
+    let commit = ws.commit_all("billing-api", "add synthetic locator source");
+    let data = tempfile::tempdir().unwrap();
+    let indexed = source_engine(&db, &ws, data.path(), 24).await;
+    drop(indexed);
+
+    // This independent observable detects accidental selected-body parsing,
+    // even if the resulting snippet is later removed from the response.
+    let products = data.path().join("locator-parse-products");
+    let embedder = Arc::new(AnyEmbedder::Fake(FakeEmbedder::new(DIMS).unwrap()));
+    let engine = Engine::builder(db.store.clone(), indexer_config(data.path()))
+        .engine_config(&engine_config())
+        .embedder(name("local"), Arc::clone(&embedder))
+        .embedder(name("cloud"), embedder)
+        .workspace(ws.resolved.clone())
+        .settings(EngineSettings {
+            max_fetch_lines: 24,
+            parse_product_cache: Some(ParseProductCacheSettings::new(&products)),
+            ..EngineSettings::default()
+        })
+        .access(Arc::new(access()))
+        .build()
+        .await
+        .unwrap();
+    let caller = alice_caller();
+    let opened = engine
+        .open_workspace(&caller, OpenWorkspaceInput::default())
+        .await
+        .unwrap();
+    assert!(!products.exists());
+    let mut input = SearchInput {
+        target: Target::context(opened.context_id),
+        query: "quotaRejected oversizeGuard".into(),
+        projects: vec![name("billing-api")],
+        path_prefixes: vec![path.into()],
+        languages: vec!["rust".into()],
+        kinds: vec![SearchKind::Code],
+        include_snippets: Some(false),
+        include_diagnostics: Some(true),
+        ..SearchInput::default()
+    };
+    for _ in 0..2 {
+        let locators = engine.search(&caller, input.clone()).await.unwrap();
+        assert!(!locators.hits.is_empty());
+        assert!(
+            locators
+                .hits
+                .iter()
+                .all(|hit| hit.evidence.path.as_str() == path
+                    && hit.evidence.commit.as_str() == commit
+                    && hit.snippet.is_none()
+                    && hit.snippet_lines.is_none()
+                    && hit.snippet_id.is_none()
+                    && hit.continuation_ids.is_empty())
+        );
+        let work = locators.diagnostics.unwrap();
+        assert!(work.locator_only);
+        assert_eq!(work.prepared_file_occurrences, 1);
+        assert_eq!(work.source_hydrated_paths, 0);
+        assert!(work.source_hydration_skipped_paths > 0);
+        assert_eq!(work.snippet_read_ms, 0);
+        assert!(work.embedding_calls > 0);
+        assert!(!work.exact_path_embedding_bypassed);
+        assert!(
+            !products.exists(),
+            "locator retrieval acquired and parsed display bodies"
+        );
+    }
+    input.include_snippets = Some(true);
+    let source = engine.search(&caller, input).await.unwrap();
+    assert!(source.hits.iter().any(|hit| hit.snippet.is_some()));
+    let work = source.diagnostics.unwrap();
+    assert!(!work.locator_only);
+    assert!(work.source_hydrated_paths > 0);
+    assert_eq!(work.source_hydration_skipped_paths, 0);
+    assert!(
+        products.exists(),
+        "source acquisition did not exercise the parse cache control"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn narrow_metadata_catalogs_do_not_replace_unrestricted_or_other_scope_catalogs() {
+    if !git_available() {
+        return;
+    }
+    let db = require_db!();
+    let mut ws = fixture_workspace();
+    ws.resolved
+        .projects
+        .retain(|project| project.name.as_str() == "billing-api");
+    for (path, body) in [
+        ("src/narrow-a.rs", "pub fn narrow_probe_a() {}\n"),
+        ("src/narrow-b.rs", "pub fn narrow_probe_b() {}\n"),
+    ] {
+        std::fs::write(ws.project_dir("billing-api").join(path), body).unwrap();
+    }
+    ws.commit_all("billing-api", "add synthetic isolated metadata scopes");
+    let data = tempfile::tempdir().unwrap();
+    let engine = source_engine(&db, &ws, data.path(), 24).await;
+    let caller = alice_caller();
+    let opened = engine
+        .open_workspace(&caller, OpenWorkspaceInput::default())
+        .await
+        .unwrap();
+    let mut input = SearchInput {
+        target: Target::context(opened.context_id),
+        query: "narrow_probe".into(),
+        projects: vec![name("billing-api")],
+        kinds: vec![SearchKind::Code],
+        include_snippets: Some(false),
+        include_diagnostics: Some(true),
+        ..SearchInput::default()
+    };
+    for path in ["src/narrow-a.rs", "src/narrow-b.rs", "src/narrow-a.rs"] {
+        input.path_prefixes = vec![format!(" {path} ")];
+        let scoped = engine.search(&caller, input.clone()).await.unwrap();
+        assert!(!scoped.hits.is_empty());
+        assert!(
+            scoped
+                .hits
+                .iter()
+                .all(|hit| hit.evidence.path.as_str() == path)
+        );
+        assert_eq!(scoped.diagnostics.unwrap().prepared_file_occurrences, 1);
+    }
+    input.path_prefixes.clear();
+    let broad = engine.search(&caller, input.clone()).await.unwrap();
+    assert!(broad.diagnostics.unwrap().prepared_file_occurrences > 2);
+    for path in ["src/narrow-a.rs", "src/narrow-b.rs"] {
+        assert!(
+            broad
+                .hits
+                .iter()
+                .any(|hit| hit.evidence.path.as_str() == path)
+        );
+    }
+    input.path_prefixes = vec!["src/narrow-a.rs".into()];
+    input.languages = vec!["typescript".into()];
+    let wrong_language = engine.search(&caller, input.clone()).await.unwrap();
+    assert!(wrong_language.hits.is_empty());
+    assert_eq!(
+        wrong_language
+            .diagnostics
+            .unwrap()
+            .prepared_file_occurrences,
+        0
+    );
+    input.languages = vec!["rust".into()];
+    let rust = engine.search(&caller, input).await.unwrap();
+    assert!(!rust.hits.is_empty());
+    assert_eq!(rust.diagnostics.unwrap().prepared_file_occurrences, 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

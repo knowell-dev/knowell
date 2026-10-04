@@ -228,6 +228,7 @@ mod tests {
             GapReason::NoMatches,
         ] {
             let output = SearchOutput {
+                include_handles: false,
                 query_class: QueryClass::ExactSymbol,
                 diagnostics: None,
                 budget: None,

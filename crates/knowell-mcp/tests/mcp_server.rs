@@ -15,7 +15,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use knowell_mcp::{
-    FILE_URI_TEMPLATE, FixtureTools, IMPACT_REVIEW, KnowellServer, ONBOARD, OutputMode, ToolName,
+    FILE_URI_TEMPLATE, FixtureTools, IMPACT_REVIEW, INSTRUCTIONS, KnowellServer, ONBOARD,
+    OutputMode, ToolName,
 };
 use rmcp::ServiceExt;
 use rmcp::model::{
@@ -93,12 +94,12 @@ async fn lists_fourteen_tools_with_valid_schemas_and_annotations() {
             }
         }
     }
-    assert!(
+    assert_eq!(
         tool_map(tools.clone())["open_workspace"]
             .description
             .as_deref()
-            .unwrap()
-            .starts_with("Call first")
+            .unwrap(),
+        ToolName::OpenWorkspace.description()
     );
 
     // Input schemas and descriptions are what clients put in the model's
@@ -132,7 +133,7 @@ async fn server_info_instructions_and_protocol() {
     );
     assert_eq!(info.protocol_version, ProtocolVersion::V_2025_11_25);
     let instructions = info.instructions.as_deref().unwrap();
-    assert!(instructions.contains("Call open_workspace first"));
+    assert_eq!(instructions, INSTRUCTIONS);
     assert!(instructions.contains("resume_task"));
     assert!(
         instructions.len() <= 1_500,
@@ -1216,7 +1217,12 @@ async fn source_read_tools_return_one_text_channel_without_a_structured_schema()
     assert_eq!(found.content.len(), 1);
     let shown = text(&found);
     assert!(shown.len() <= 4000);
-    assert!(shown.contains("Fetch id:"), "{shown}");
+    assert!(!shown.contains("Fetch id:"), "{shown}");
+    let with_handles = call(&client, "search", json!({"context_id": ctx, "query": "idempotency key retry", "kinds": ["docs"], "token_budget": 1000, "include_handles": true})).await;
+    assert!(with_handles.structured_content.is_none());
+    assert_eq!(with_handles.content.len(), 1);
+    assert!(text(&with_handles).len() <= 4000);
+    assert!(text(&with_handles).contains("Fetch id:"));
     assert!(shown.contains("```markdown"), "{shown}");
     assert!(!shown.contains("why:"));
     assert!(!shown.contains("Embedding profiles:"));

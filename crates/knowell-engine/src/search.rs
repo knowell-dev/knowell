@@ -126,11 +126,15 @@ pub(crate) struct Filters {
 pub(crate) struct RetrievalMetrics {
     pub(crate) preparation_ms: u64,
     pub(crate) source_hydration_ms: u64,
+    pub(crate) source_hydrated_paths: usize,
+    pub(crate) source_hydration_skipped_paths: usize,
+    pub(crate) locator_only: bool,
     pub(crate) exact_ms: u64,
     pub(crate) lexical_ms: u64,
     pub(crate) semantic_ms: u64,
     pub(crate) fusion_expansion_ms: u64,
     pub(crate) prepared_views: usize,
+    pub(crate) prepared_file_occurrences: usize,
     pub(crate) lexical_queries: usize,
     pub(crate) lexical_file_hits_examined: usize,
     pub(crate) lexical_candidates: usize,
@@ -1082,6 +1086,12 @@ fn graph_edge_kind(kind: &str, incoming: bool) -> Option<EdgeKind> {
     }
 }
 
+/// Compiler observations describe their whole base generation. A personal
+/// view has no matching compiler-input identity, even for unchanged files.
+fn graph_evidence_admitted(evidence: knowell_store::EvidenceType, personal_view: bool) -> bool {
+    !personal_view || evidence != knowell_store::EvidenceType::SemanticResolved
+}
+
 /// Graph neighbours with explicit stored call or test relationships. File
 /// imports remain structural metadata, not callers, callees or proof of tests.
 pub(crate) struct GraphAdapter<'a> {
@@ -1130,6 +1140,9 @@ impl GraphExpander for GraphAdapter<'_> {
                     .flatten()
                     .filter_map(|index| snapshot.other_edges.get(*index))
                 {
+                    if !graph_evidence_admitted(edge.evidence, view.pinned.overlay.is_some()) {
+                        continue;
+                    }
                     let Some(kind) = graph_edge_kind(&edge.kind, true) else {
                         continue;
                     };
@@ -1155,6 +1168,9 @@ impl GraphExpander for GraphAdapter<'_> {
                     .flatten()
                     .filter_map(|index| snapshot.other_edges.get(*index))
                 {
+                    if !graph_evidence_admitted(edge.evidence, view.pinned.overlay.is_some()) {
+                        continue;
+                    }
                     let Some(kind) = graph_edge_kind(&edge.kind, false) else {
                         continue;
                     };
@@ -1415,6 +1431,21 @@ pub(crate) struct SearchRun {
     pub(crate) retrieval: RetrievalMetrics,
 }
 
+/// Response acquisition is separate from candidate retrieval. Locators use
+/// the same pinned metadata and search sources without acquiring display bodies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetrievalPolicy {
+    Full,
+    Source,
+    Locator,
+}
+
+impl RetrievalPolicy {
+    fn metadata_only(self) -> bool {
+        self != Self::Full
+    }
+}
+
 /// Cheap acquisition cues, not a proof that a natural-language task has all
 /// its evidence. A larger fused pool reuses the same lexical/vector candidates.
 fn should_widen_source_pool(response: &SearchResponse, bound: usize) -> bool {
@@ -1456,6 +1487,33 @@ fn source_pool_needs_more(returned: usize, bound: usize, files: usize, missing_c
         && (returned < bound.min(32) || files.saturating_mul(2) < returned || missing_cues)
 }
 
+/// Counts only admitted base paths; overlays already carry their source and
+/// never trigger a stored-body acquisition. Hashes must match the pinned view.
+fn source_hydration_paths(
+    prepared: &Prepared,
+    response: &SearchResponse,
+) -> Result<BTreeMap<(Name, QViewId), BTreeSet<RepoPath>>, ToolError> {
+    let mut by_view: BTreeMap<(Name, QViewId), BTreeSet<RepoPath>> = BTreeMap::new();
+    let locations = knowell_query::task_source_locations(response, 64)
+        .map_err(|error| ToolError::internal(error.to_string()))?;
+    for location in locations {
+        if let Some((view, false)) = prepared.view_of(&location.project, &location.view)
+            && prepared.scope.paths.admits(&location.path)
+            && view
+                .snapshot
+                .file(&location.path)
+                .is_some_and(|file| file.content_hash == location.content_hash)
+            && !view.snapshot.source_ready.contains(&location.path)
+        {
+            by_view
+                .entry((location.project.clone(), location.view.clone()))
+                .or_default()
+                .insert(location.path.clone());
+        }
+    }
+    Ok(by_view)
+}
+
 impl Engine {
     /// Source-free metadata, cached separately from complete graph snapshots.
     pub(crate) async fn metadata_snapshot_of(
@@ -1473,6 +1531,37 @@ impl Engine {
                     project.entry.name.clone(),
                     project.entry.id,
                     pin,
+                )
+                .await
+                .map(Arc::new)
+            })
+            .await
+            .map_err(ToolError::from)?;
+        Ok(Arc::clone(snapshot))
+    }
+
+    /// Hard query filters constrain catalog acquisition as well as candidate
+    /// admission. A partial catalog never occupies the complete metadata cell.
+    async fn scoped_metadata_snapshot_of(
+        &self,
+        project: &PinnedProject,
+        scope: snapshot::MetadataScope,
+    ) -> Result<Arc<Snapshot>, ToolError> {
+        let pin = project.pin();
+        let cell = self
+            .inner
+            .snapshots
+            .metadata_scoped_cell(pin, scope.clone());
+        let inner = &self.inner;
+        let snapshot = cell
+            .get_or_try_init(|| async {
+                snapshot::build_metadata_scoped(
+                    &inner.store,
+                    inner.organization,
+                    project.entry.name.clone(),
+                    project.entry.id,
+                    pin,
+                    &scope,
                 )
                 .await
                 .map(Arc::new)
@@ -1560,6 +1649,15 @@ impl Engine {
         let mut manifest = ViewManifest::new(pinned.workspace.name.clone());
         manifest.not_indexed = pinned.not_indexed.clone();
         let chunk_options = self.inner.indexer.config().chunking;
+        let metadata_scope = snapshot::MetadataScope::new(
+            &filters.path_prefixes,
+            filters.languages.as_ref().map(|languages| {
+                languages
+                    .iter()
+                    .map(|language| language.as_str().to_owned())
+                    .collect()
+            }),
+        );
         for (name, project) in &pinned.projects {
             if filters
                 .projects
@@ -1569,7 +1667,8 @@ impl Engine {
                 continue;
             }
             let snapshot = if metadata_only {
-                self.metadata_snapshot_of(project).await?
+                self.scoped_metadata_snapshot_of(project, metadata_scope.clone())
+                    .await?
             } else {
                 self.snapshot_of(project).await?
             };
@@ -1588,6 +1687,21 @@ impl Engine {
                     let mut symbols = Vec::new();
                     let mut chunks = BTreeMap::new();
                     for file in o.overlay.files() {
+                        if !filters.path_prefixes.is_empty()
+                            && !filters
+                                .path_prefixes
+                                .iter()
+                                .any(|prefix| file.path.as_str().starts_with(prefix))
+                        {
+                            continue;
+                        }
+                        if filters.languages.as_ref().is_some_and(|languages| {
+                            Language::new(file.parsed.language.as_str())
+                                .ok()
+                                .is_none_or(|language| !languages.contains(&language))
+                        }) {
+                            continue;
+                        }
                         // Only prepared, admitted files add capabilities; a new code
                         // language still lacks call/test analysis in the personal layer.
                         if let Ok(language) = Language::new(file.parsed.language.as_str()) {
@@ -2047,8 +2161,16 @@ impl Engine {
         expand: bool,
         rerank: bool,
     ) -> Result<SearchRun, ToolError> {
-        self.run_search_policy(pinned, filters, query, limit, expand, rerank, false)
-            .await
+        self.run_search_policy(
+            pinned,
+            filters,
+            query,
+            limit,
+            expand,
+            rerank,
+            RetrievalPolicy::Full,
+        )
+        .await
     }
 
     /// Retrieval for source responses. Candidate admission is widened inside
@@ -2060,8 +2182,37 @@ impl Engine {
         query: &str,
         limit: usize,
     ) -> Result<SearchRun, ToolError> {
-        self.run_search_policy(pinned, filters, query, limit, true, false, true)
-            .await
+        self.run_search_policy(
+            pinned,
+            filters,
+            query,
+            limit,
+            true,
+            false,
+            RetrievalPolicy::Source,
+        )
+        .await
+    }
+
+    /// Retrieves pinned source coordinates without display-body hydration.
+    /// Query embeddings and indexed lexical work retain their normal policy.
+    pub(crate) async fn run_locator_search(
+        &self,
+        pinned: &Pinned,
+        filters: &Filters,
+        query: &str,
+        limit: usize,
+    ) -> Result<SearchRun, ToolError> {
+        self.run_search_policy(
+            pinned,
+            filters,
+            query,
+            limit,
+            false,
+            false,
+            RetrievalPolicy::Locator,
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2073,26 +2224,38 @@ impl Engine {
         limit: usize,
         expand: bool,
         rerank: bool,
-        source_policy: bool,
+        policy: RetrievalPolicy,
     ) -> Result<SearchRun, ToolError> {
         let preparation_started = Instant::now();
         let mut filters = filters.clone();
         filters.path_prefixes = normalize_prefixes(&filters.path_prefixes)?;
-        let mut prepared = self.prepare(pinned, &filters, source_policy).await?;
+        let mut prepared = self
+            .prepare(pinned, &filters, policy.metadata_only())
+            .await?;
         let mut retrieval = RetrievalMetrics {
             preparation_ms: u64::try_from(preparation_started.elapsed().as_millis())
                 .unwrap_or(u64::MAX),
             prepared_views: prepared.views.len(),
+            prepared_file_occurrences: prepared.views.iter().fold(0usize, |count, view| {
+                count
+                    .saturating_add(view.snapshot.files.len())
+                    .saturating_add(
+                        view.overlay
+                            .as_ref()
+                            .map_or(0, |overlay| overlay.overlay.files().count()),
+                    )
+            }),
+            locator_only: policy == RetrievalPolicy::Locator,
             ..Default::default()
         };
         let mut config: SearchConfig = self.inner.settings.search.clone();
-        let result_limit = limit.clamp(1, if source_policy { 64 } else { 1000 });
-        config.fusion.result_limit = if source_policy {
+        let result_limit = limit.clamp(1, if policy.metadata_only() { 64 } else { 1000 });
+        config.fusion.result_limit = if policy == RetrievalPolicy::Source {
             result_limit.min(16)
         } else {
             result_limit
         };
-        if source_policy {
+        if policy == RetrievalPolicy::Source {
             config.fusion.candidate_limit = config
                 .fusion
                 .candidate_limit
@@ -2103,7 +2266,15 @@ impl Engine {
         config.rerank.enabled = rerank;
         let plan =
             knowell_query::plan_with(query, &self.inner.glossary, &PlanOptions::default(), None);
-        let searched = !plan.is_empty() && prepared.scope.searched_projects().next().is_some();
+        let searched = !plan.is_empty()
+            && prepared.scope.searched_projects().next().is_some()
+            && prepared.views.iter().any(|view| {
+                !view.snapshot.files.is_empty()
+                    || view
+                        .overlay
+                        .as_ref()
+                        .is_some_and(|overlay| !overlay.chunks.is_empty())
+            });
         let weights = config.fusion.weights.for_intent(plan.intent);
         let request = SourceRequest {
             plan: &plan,
@@ -2198,7 +2369,8 @@ impl Engine {
             &config,
         )
         .map_err(|e| ToolError::invalid_input(e.to_string()))?;
-        while source_policy && should_widen_source_pool(&response, result_limit) {
+        while policy == RetrievalPolicy::Source && should_widen_source_pool(&response, result_limit)
+        {
             config.fusion.result_limit = config
                 .fusion
                 .result_limit
@@ -2221,12 +2393,19 @@ impl Engine {
                 response.degraded.push(degradation);
             }
         }
-        if source_policy {
+        if policy == RetrievalPolicy::Source {
             let hydration_started = Instant::now();
-            self.hydrate_source_results(&mut prepared, &response)
+            retrieval.source_hydrated_paths = self
+                .hydrate_source_results(&mut prepared, &response)
                 .await?;
             retrieval.source_hydration_ms =
                 u64::try_from(hydration_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        } else if policy == RetrievalPolicy::Locator {
+            retrieval.source_hydration_skipped_paths =
+                source_hydration_paths(&prepared, &response)?
+                    .values()
+                    .map(BTreeSet::len)
+                    .sum();
         }
         tracing::debug!(metrics = ?retrieval, "search retrieval work");
         Ok(SearchRun {
@@ -2242,30 +2421,16 @@ impl Engine {
         &self,
         prepared: &mut Prepared,
         response: &SearchResponse,
-    ) -> Result<(), ToolError> {
-        let mut by_view: BTreeMap<(Name, QViewId), BTreeSet<RepoPath>> = BTreeMap::new();
-        let locations = knowell_query::task_source_locations(response, 64)
-            .map_err(|error| ToolError::internal(error.to_string()))?;
-        for location in locations {
-            if let Some((view, false)) = prepared.view_of(&location.project, &location.view)
-                && prepared.scope.paths.admits(&location.path)
-                && view
-                    .snapshot
-                    .file(&location.path)
-                    .is_some_and(|file| file.content_hash == location.content_hash)
-            {
-                by_view
-                    .entry((location.project.clone(), location.view.clone()))
-                    .or_default()
-                    .insert(location.path.clone());
-            }
-        }
+    ) -> Result<usize, ToolError> {
+        let mut by_view = source_hydration_paths(prepared, response)?;
+        let mut hydrated = 0usize;
         for view in &mut prepared.views {
             let Some(paths) = by_view.remove(&(view.project().clone(), view.base_view.clone()))
             else {
                 continue;
             };
             let paths: Vec<_> = paths.into_iter().collect();
+            hydrated = hydrated.saturating_add(paths.len());
             view.snapshot = Arc::new(
                 snapshot::hydrate_paths(
                     &self.inner.store,
@@ -2282,7 +2447,7 @@ impl Engine {
                 .map_err(ToolError::from)?,
             );
         }
-        Ok(())
+        Ok(hydrated)
     }
 
     /// Texts of every result and expanded item, for snippets and packing.
@@ -2318,7 +2483,13 @@ impl Engine {
     ) -> Result<BTreeMap<ContentHash, Arc<str>>, ToolError> {
         let mut hashes = BTreeSet::new();
         for location in locations {
-            if let Some((_, false)) = prepared.view_of(&location.project, &location.view) {
+            if let Some((view, false)) = prepared.view_of(&location.project, &location.view)
+                && prepared.scope.paths.admits(&location.path)
+                && view
+                    .snapshot
+                    .file(&location.path)
+                    .is_some_and(|file| file.content_hash == location.content_hash)
+            {
                 hashes.insert(location.content_hash);
             }
         }
@@ -2409,6 +2580,22 @@ mod tests {
             Some(5)
         );
         assert_eq!(short_of("A::b"), "b");
+    }
+
+    #[test]
+    fn personal_view_cannot_reuse_base_compiler_graph_evidence() {
+        use knowell_store::EvidenceType;
+        assert!(graph_evidence_admitted(
+            EvidenceType::SemanticResolved,
+            false
+        ));
+        assert!(!graph_evidence_admitted(
+            EvidenceType::SemanticResolved,
+            true
+        ));
+        assert!(graph_evidence_admitted(EvidenceType::Syntactic, true));
+        assert!(graph_evidence_admitted(EvidenceType::Heuristic, true));
+        assert!(graph_evidence_admitted(EvidenceType::ContractDerived, true));
     }
 
     #[test]

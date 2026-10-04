@@ -425,6 +425,181 @@ async fn metadata_pages_keep_source_counts_versions_and_tenant_boundaries() {
 }
 
 #[tokio::test]
+async fn metadata_scope_is_literal_occurrence_bound_and_applied_before_page_limit() {
+    let db = require_db!();
+    let mut conn = db.conn().await;
+    let fx = fixture(&mut conn, "scoped-metadata-pages").await;
+    let foreign = fixture(&mut conn, "foreign-scoped-metadata-pages").await;
+    let input = blob("synthetic shared text\n");
+    content::upsert_contents(&mut conn, fx.org.id, std::slice::from_ref(&input))
+        .await
+        .unwrap();
+    let generation = views::begin_generation(&mut conn, fx.view.id, None)
+        .await
+        .unwrap();
+    let pin = GenerationPin {
+        view: fx.view.id,
+        generation,
+    };
+    let changes: Vec<_> = [
+        "aaa/outside.rs",
+        "SRC/upper.rs",
+        "src/decoder.rs",
+        "src/decoder.ts",
+        "src/nested/read.rs",
+        "src/raw%_/one.rs",
+        "src/rawXX/one.rs",
+        "srcé/utf.rs",
+        "unknown.bin",
+    ]
+    .into_iter()
+    .map(|name| content::FileChange::Upsert {
+        path: path(name),
+        content_hash: input.hash,
+        renamed_from: None,
+    })
+    .collect();
+    content::apply_file_changes(&mut conn, fx.view.id, generation, &changes)
+        .await
+        .unwrap();
+    let prefixes = vec!["src/".to_owned()];
+    let languages = vec!["rust".to_owned()];
+    let scope = content::FileMetadataScope {
+        path_prefixes: &prefixes,
+        languages: Some(&languages),
+    };
+    let first = content::files_metadata_at_scope_page(&mut conn, fx.org.id, pin, None, 1, scope)
+        .await
+        .unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].version.path.as_str(), "src/decoder.rs");
+    let next = content::files_metadata_at_scope_page(
+        &mut conn,
+        fx.org.id,
+        pin,
+        Some(&first[0].version.path),
+        1,
+        scope,
+    )
+    .await
+    .unwrap();
+    assert_eq!(next.len(), 1);
+    assert_eq!(next[0].version.path.as_str(), "src/nested/read.rs");
+    assert!(
+        content::files_metadata_at_scope_page(&mut conn, foreign.org.id, pin, None, 2, scope)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let literals = vec!["src/raw%_/".to_owned()];
+    let literal_scope = content::FileMetadataScope {
+        path_prefixes: &literals,
+        languages: None,
+    };
+    let literal =
+        content::files_metadata_at_scope_page(&mut conn, fx.org.id, pin, None, 10, literal_scope)
+            .await
+            .unwrap();
+    assert_eq!(literal.len(), 1);
+    assert_eq!(literal[0].version.path.as_str(), "src/raw%_/one.rs");
+    let unicode = vec!["srcé/".to_owned()];
+    let unicode_scope = content::FileMetadataScope {
+        path_prefixes: &unicode,
+        languages: None,
+    };
+    assert_eq!(
+        content::files_metadata_at_scope_page(&mut conn, fx.org.id, pin, None, 10, unicode_scope)
+            .await
+            .unwrap()[0]
+            .version
+            .path
+            .as_str(),
+        "srcé/utf.rs"
+    );
+    let no_languages = content::FileMetadataScope {
+        path_prefixes: &[],
+        languages: Some(&[]),
+    };
+    assert!(
+        content::files_metadata_at_scope_page(&mut conn, fx.org.id, pin, None, 10, no_languages)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let all = content::files_metadata_at_scope_page(
+        &mut conn,
+        fx.org.id,
+        pin,
+        None,
+        20,
+        content::FileMetadataScope::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(all.len(), changes.len());
+    assert!(matches!(
+        content::files_metadata_at_scope_page(&mut conn, fx.org.id, pin, None, 0, scope).await,
+        Err(StoreError::InvalidInput(_))
+    ));
+    for malformed in [
+        "",
+        "../outside",
+        "/root",
+        "src//",
+        "src/./",
+        "src\\file",
+        "src/\n",
+    ] {
+        let invalid_prefix = vec![malformed.to_owned()];
+        let invalid_scope = content::FileMetadataScope {
+            path_prefixes: &invalid_prefix,
+            languages: None,
+        };
+        assert!(matches!(
+            content::files_metadata_at_scope_page(
+                &mut conn,
+                fx.org.id,
+                pin,
+                None,
+                1,
+                invalid_scope
+            )
+            .await,
+            Err(StoreError::InvalidInput(_))
+        ));
+    }
+    views::activate_generation(&mut conn, fx.view.id, generation)
+        .await
+        .unwrap();
+    let next_generation = views::begin_generation(&mut conn, fx.view.id, None)
+        .await
+        .unwrap();
+    content::apply_file_changes(
+        &mut conn,
+        fx.view.id,
+        next_generation,
+        &[content::FileChange::Delete {
+            path: path("src/decoder.rs"),
+        }],
+    )
+    .await
+    .unwrap();
+    let new_pin = GenerationPin {
+        generation: next_generation,
+        ..pin
+    };
+    let current =
+        content::files_metadata_at_scope_page(&mut conn, fx.org.id, new_pin, None, 1, scope)
+            .await
+            .unwrap();
+    assert_eq!(current[0].version.path.as_str(), "src/nested/read.rs");
+    let historic = content::files_metadata_at_scope_page(&mut conn, fx.org.id, pin, None, 1, scope)
+        .await
+        .unwrap();
+    assert_eq!(historic[0].version.path.as_str(), "src/decoder.rs");
+}
+
+#[tokio::test]
 async fn bounded_content_read_counts_utf8_bytes_and_distinguishes_missing() {
     let db = require_db!();
     let mut conn = db.conn().await;

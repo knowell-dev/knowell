@@ -269,6 +269,51 @@ impl CodeGraph {
         Ok(all)
     }
 
+    /// Streams matching adjacencies without allocating or sorting the whole
+    /// fanout. Callers selecting a bounded result must supply deterministic
+    /// ranking; petgraph's insertion order is not a result ordering.
+    pub(crate) fn visit_neighbors<'a>(
+        &'a self,
+        id: &NodeId,
+        direction: Direction,
+        filter: &EdgeFilter,
+        mut visit: impl FnMut(Neighbor<'a>),
+    ) -> Result<(), GraphError> {
+        let index = self.index_of(id)?;
+        let want_out = matches!(direction, Direction::Outgoing | Direction::Both);
+        let want_in = matches!(direction, Direction::Incoming | Direction::Both);
+        for (enabled, direction, forward) in [
+            (want_out, petgraph::Direction::Outgoing, true),
+            (want_in, petgraph::Direction::Incoming, false),
+        ] {
+            if !enabled {
+                continue;
+            }
+            for edge in self.graph.edges_directed(index, direction) {
+                if !forward && want_out && edge.source() == edge.target() {
+                    continue;
+                }
+                if !filter.matches(edge.weight()) {
+                    continue;
+                }
+                let (Some(source), Some(target)) = (
+                    self.graph.node_weight(edge.source()),
+                    self.graph.node_weight(edge.target()),
+                ) else {
+                    continue;
+                };
+                visit(Neighbor {
+                    node: if forward { target } else { source },
+                    edge: edge.weight(),
+                    from: &source.id,
+                    to: &target.id,
+                    forward,
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn edge_key_of(&self, idx: EdgeIndex) -> Option<EdgeKey> {
         let (s, t) = self.graph.edge_endpoints(idx)?;
         let kind = self.graph.edge_weight(idx)?.kind;

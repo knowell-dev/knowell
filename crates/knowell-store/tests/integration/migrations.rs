@@ -85,8 +85,11 @@ async fn source_structure_upgrade_preserves_chunks_vectors_and_unknown_legacy_co
     migrate(&db.store).await.unwrap();
     let upgraded = history(&mut conn).await;
     assert_eq!(&upgraded[..before.len()], before.as_slice());
-    assert_eq!(upgraded.len(), before.len() + 1);
-    assert_eq!(upgraded.last().unwrap().0, 15);
+    assert_eq!(upgraded.len(), before.len() + 2);
+    assert_eq!(
+        upgraded.last().unwrap().0,
+        knowell_store::LATEST_SCHEMA_VERSION
+    );
     let stored = content::chunks_of(&mut conn, fx.org.id, &hash, &chunk.parser_version)
         .await
         .unwrap();
@@ -391,9 +394,12 @@ async fn occurrence_language_upgrade_backfills_history_and_never_rewrites_classi
     migrate(&db.store).await.unwrap();
     let upgraded = history(&mut conn).await;
     assert_eq!(&upgraded[..before.len()], before.as_slice());
-    assert_eq!(upgraded.len(), before.len() + 2);
+    assert_eq!(upgraded.len(), before.len() + 3);
     assert_eq!(upgraded.get(before.len()).unwrap().0, 14);
-    assert_eq!(upgraded.last().unwrap().0, 15);
+    assert_eq!(
+        upgraded.last().unwrap().0,
+        knowell_store::LATEST_SCHEMA_VERSION
+    );
     let legacy_count: Option<i64> = sqlx::query_scalar(
         "SELECT redacted_line_count FROM content WHERE organization_id = $1 AND hash = $2",
     )

@@ -27,7 +27,7 @@ use knowell_store::symbols::NewSymbol;
 use knowell_store::{EvidenceType, ProjectId, Resolution, SymbolId};
 
 use crate::config::GeneratedPolicy;
-use crate::references::{Identifier, identifiers};
+use crate::references::{Identifier, ReferenceCoverage, identifier_scan};
 
 /// Separator between the file path and the in-file qualified name.
 pub const SYMBOL_PATH_SEPARATOR: char = '#';
@@ -51,6 +51,13 @@ pub fn split_symbol_key(key: &str) -> Option<(RepoPath, &str)> {
 pub fn parser_version_tag() -> String {
     format!("p{}", knowell_parse::PARSER_VERSION)
 }
+
+/// T1 evidence policy recorded per generation, independently of chunk and
+/// embedding formats. Increment when unchanged files need new syntax evidence.
+pub(crate) const SYNTAX_POLICY_VERSION: u32 = 1;
+
+/// Version of the immutable parsed label on a generation-scoped defines edge.
+pub(crate) const SOURCE_LABEL_VERSION: u32 = 1;
 
 /// Settings of one analysis.
 #[derive(Debug, Clone, Copy)]
@@ -87,6 +94,8 @@ pub(crate) struct AnalysedFile {
     /// Identifier uses (exact-tier languages only), for reference
     /// resolution (see [`crate::references`]).
     pub(crate) identifiers: Vec<Identifier>,
+    pub(crate) reference_coverage: ReferenceCoverage,
+    pub(crate) parse_limits: ParseLimits,
 }
 
 impl AnalysedFile {
@@ -101,7 +110,11 @@ impl AnalysedFile {
             + self
                 .identifiers
                 .iter()
-                .map(|i| i.name.len() + 8)
+                .map(|i| {
+                    i.name.len()
+                        + i.qualified.as_ref().map_or(0, String::len)
+                        + std::mem::size_of::<Identifier>()
+                })
                 .sum::<usize>()
     }
 }
@@ -181,10 +194,17 @@ pub(crate) fn analyse(
     }
     // A second, bounded parse lists identifier uses; knowell-parse reports
     // declarations and imports only.
-    let identifiers = if options.identifiers && structured && parsed.degraded.is_none() {
-        identifiers(parsed.language, &text, &options.limits)
+    let scan = if options.identifiers && structured && parsed.degraded.is_none() {
+        identifier_scan(parsed.language, &text, &options.limits)
     } else {
-        Vec::new()
+        crate::references::IdentifierScan {
+            coverage: ReferenceCoverage {
+                parse_unavailable: options.identifiers
+                    && (parsed.degraded.is_some() || !structured),
+                ..ReferenceCoverage::default()
+            },
+            ..crate::references::IdentifierScan::default()
+        }
     };
     AnalysedFile {
         path: path.clone(),
@@ -194,7 +214,9 @@ pub(crate) fn analyse(
         chunks: out_chunks,
         embed,
         structured,
-        identifiers,
+        identifiers: scan.identifiers,
+        reference_coverage: scan.coverage,
+        parse_limits: options.limits,
     }
 }
 
@@ -252,13 +274,31 @@ pub(crate) fn syntactic_edges(
     for (i, symbol) in file.parsed.symbols.iter().enumerate() {
         let Some(Some(id)) = ids.get(i) else { continue };
         let ev = evidence(&file.path, Some(symbol.range), &file.content_hash);
+        let mut definition_ev = ev.clone();
+        if let Some(map) = definition_ev.as_object_mut() {
+            // Logical symbol names can change when another view moves a file.
+            // A pinned definition must retain the name parsed from its own
+            // source, including when no chunk carries a symbol_path.
+            map.insert(
+                "source_label".to_owned(),
+                serde_json::json!({
+                    "version": SOURCE_LABEL_VERSION,
+                    "symbol_id": id.to_string(),
+                    "name": symbol.name,
+                    "qualified_name": symbol.qualified_name,
+                    "kind": symbol.kind.as_str(),
+                    "name_line": symbol.name_line,
+                    "bytes": [symbol.byte_range.start, symbol.byte_range.end],
+                }),
+            );
+        }
         edges.push(NewEdge {
             from: file_node.clone(),
             to: NodeRef::Symbol(*id),
             kind: EdgeKind::Defines.as_str().to_owned(),
             evidence_type: EvidenceType::Syntactic,
             resolution: Resolution::Resolved,
-            evidence: ev.clone(),
+            evidence: definition_ev,
             origin: origin.clone(),
         });
         if let Some(Some(parent)) = symbol.parent.and_then(|p| ids.get(p)) {
@@ -272,6 +312,77 @@ pub(crate) fn syntactic_edges(
                 origin: origin.clone(),
             });
         }
+    }
+    if file.parsed.language == knowell_parse::Language::Rust {
+        let imports =
+            crate::rust_imports::resolve(&file.path, &file.text, files, &file.parse_limits);
+        for binding in &imports.bindings {
+            let mut ev = evidence(
+                &file.path,
+                LineRange::new(binding.line, binding.line).ok(),
+                &file.content_hash,
+            );
+            if let Some(map) = ev.as_object_mut() {
+                map.insert("alias".to_owned(), serde_json::json!(binding.local_name));
+                map.insert(
+                    "target_name".to_owned(),
+                    serde_json::json!(binding.target_name),
+                );
+            }
+            edges.push(NewEdge {
+                from: file_node.clone(),
+                to: NodeRef::File {
+                    project,
+                    path: binding.target_path.clone(),
+                },
+                kind: EdgeKind::Imports.as_str().to_owned(),
+                evidence_type: EvidenceType::Syntactic,
+                resolution: Resolution::Resolved,
+                evidence: ev,
+                origin: origin.clone(),
+            });
+        }
+        for module in &imports.modules {
+            edges.push(NewEdge {
+                from: file_node.clone(),
+                to: NodeRef::File {
+                    project,
+                    path: module.target_path.clone(),
+                },
+                kind: EdgeKind::Imports.as_str().to_owned(),
+                evidence_type: EvidenceType::Syntactic,
+                resolution: Resolution::Resolved,
+                evidence: evidence(
+                    &file.path,
+                    LineRange::new(module.line, module.line).ok(),
+                    &file.content_hash,
+                ),
+                origin: origin.clone(),
+            });
+        }
+        for gap in &imports.gaps {
+            let name = file
+                .parsed
+                .imports
+                .iter()
+                .find(|i| i.range.start() == gap.line)
+                .map(|i| i.specifier.clone())
+                .unwrap_or_else(|| format!("rust-import@{}", gap.line));
+            edges.push(NewEdge {
+                from: file_node.clone(),
+                to: NodeRef::Name { project, name },
+                kind: EdgeKind::Imports.as_str().to_owned(),
+                evidence_type: EvidenceType::Syntactic,
+                resolution: Resolution::Unresolved,
+                evidence: evidence(
+                    &file.path,
+                    LineRange::new(gap.line, gap.line).ok(),
+                    &file.content_hash,
+                ),
+                origin: origin.clone(),
+            });
+        }
+        return edges;
     }
     let mut seen = BTreeSet::new();
     for import in &file.parsed.imports {
@@ -315,6 +426,13 @@ pub(crate) fn syntactic_edges(
 /// The files of the view that `file`'s imports resolve to, in import order,
 /// without duplicates.
 pub(crate) fn import_targets(file: &AnalysedFile, files: &BTreeSet<RepoPath>) -> Vec<RepoPath> {
+    if file.parsed.language == knowell_parse::Language::Rust {
+        return crate::rust_imports::resolve(&file.path, &file.text, files, &file.parse_limits)
+            .target_paths()
+            .into_iter()
+            .filter(|path| path != &file.path)
+            .collect();
+    }
     let mut seen = BTreeSet::new();
     file.parsed
         .imports
@@ -598,6 +716,75 @@ mod tests {
                 path: p("src/util.ts")
             }
         );
+    }
+
+    #[test]
+    fn defines_labels_cover_whole_file_and_grouped_chunks() {
+        for (text, wanted_kind) in [
+            (
+                "export function tiny() { return 1; }\nexport function other() { return 2; }\n"
+                    .to_owned(),
+                "file",
+            ),
+            (
+                (0..16)
+                    .map(|i| format!("export function probe{i}() {{ return {i}; }}\n"))
+                    .collect::<String>(),
+                "group",
+            ),
+        ] {
+            let text: Arc<str> = Arc::from(text);
+            let path = p("src/probes.ts");
+            let hash = ContentHash::of(text.as_bytes());
+            let file = analyse(
+                "synthetic",
+                &path,
+                hash,
+                text,
+                &AnalyseOptions {
+                    chunking: ChunkOptions::default(),
+                    limits: ParseLimits::default(),
+                    generated: GeneratedPolicy::Full,
+                    identifiers: false,
+                },
+                &AtomicBool::new(false),
+            );
+            assert!(
+                file.chunks.iter().any(|chunk| {
+                    chunk.row.kind == wanted_kind && chunk.row.symbol_path.is_none()
+                })
+            );
+            assert!(!file.parsed.symbols.is_empty());
+            let ids: Vec<_> = file
+                .parsed
+                .symbols
+                .iter()
+                .enumerate()
+                .map(|(i, _)| Some(SymbolId(uuid::Uuid::from_u128(i as u128 + 1))))
+                .collect();
+            let edges = syntactic_edges(ProjectId(uuid::Uuid::nil()), &file, &ids, &files(&[]));
+            let defines: Vec<_> = edges.iter().filter(|edge| edge.kind == "defines").collect();
+            assert_eq!(defines.len(), file.parsed.symbols.len());
+            for ((edge, symbol), id) in defines.iter().zip(&file.parsed.symbols).zip(&ids) {
+                let label = &edge.evidence["source_label"];
+                assert_eq!(label["version"], SOURCE_LABEL_VERSION);
+                assert_eq!(label["symbol_id"], id.unwrap().to_string());
+                assert_eq!(label["name"], symbol.name);
+                assert_eq!(label["qualified_name"], symbol.qualified_name);
+                assert_eq!(label["kind"], symbol.kind.as_str());
+                assert_eq!(label["name_line"], symbol.name_line);
+                assert_eq!(
+                    label["bytes"],
+                    serde_json::json!([symbol.byte_range.start, symbol.byte_range.end])
+                );
+                assert_eq!(edge.evidence["path"], path.as_str());
+                assert_eq!(edge.evidence["content_hash"], hash.to_string());
+                assert_eq!(
+                    edge.evidence["lines"],
+                    serde_json::json!([symbol.range.start(), symbol.range.end()])
+                );
+            }
+        }
     }
 
     #[test]

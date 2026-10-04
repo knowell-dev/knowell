@@ -60,6 +60,11 @@ pub struct SearchInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(description = "default true")]
     pub include_snippets: Option<bool>,
+    /// Show exact source handles in Source output (default false). Continuation
+    /// handles remain visible when a displayed excerpt needs another read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "default false")]
+    pub include_handles: Option<bool>,
     /// Include measured retrieval counters and embedding usage (default false).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(description = "default false")]
@@ -122,6 +127,10 @@ pub enum SearchKind {
 /// Output of `search`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SearchOutput {
+    /// Source presentation preference; exact identities remain in typed hits.
+    /// This is not part of the diagnostic or compatibility wire payload.
+    #[serde(skip)]
+    pub include_handles: bool,
     /// How the query was interpreted.
     pub query_class: QueryClass,
     /// Source hits, best first.
@@ -164,6 +173,18 @@ pub struct SearchDiagnostics {
     pub fusion_expansion_ms: u64,
     /// Text acquisition for shown snippets in whole milliseconds.
     pub snippet_read_ms: u64,
+    /// Selected base paths submitted for source-body hydration.
+    #[serde(default)]
+    pub source_hydrated_paths: u64,
+    /// Selected base paths whose hydration was skipped for locator output.
+    #[serde(default)]
+    pub source_hydration_skipped_paths: u64,
+    /// Whether this search requested metadata locators without source bodies.
+    #[serde(default)]
+    pub locator_only: bool,
+    /// File occurrences represented in prepared metadata, including cache hits.
+    #[serde(default)]
+    pub prepared_file_occurrences: u64,
     /// Lexical index probes, including bounded refill attempts.
     pub lexical_queries: u64,
     /// File hits examined across lexical probes, including repeated hits.

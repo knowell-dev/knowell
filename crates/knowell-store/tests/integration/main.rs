@@ -12,6 +12,7 @@
 
 mod common;
 
+mod analysis;
 mod audit;
 mod connect;
 mod content;

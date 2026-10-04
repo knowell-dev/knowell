@@ -81,6 +81,43 @@ pub struct FileMetadata {
     pub has_text: bool,
 }
 
+/// Hard restrictions applied before a metadata page's limit. Prefixes are
+/// case-sensitive literal UTF-8 path prefixes, never glob or SQL patterns.
+/// `languages: None` admits any stored occurrence language; `Some(&[])`
+/// admits no files. Blob-level language hints are not consulted.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FileMetadataScope<'a> {
+    /// Relative '/'-separated prefixes; a trailing slash is significant.
+    pub path_prefixes: &'a [String],
+    /// Exact file-occurrence language names.
+    pub languages: Option<&'a [String]>,
+}
+
+impl FileMetadataScope<'_> {
+    fn validate(self) -> Result<(), StoreError> {
+        for prefix in self.path_prefixes {
+            if prefix.is_empty()
+                || prefix.chars().any(char::is_control)
+                || RepoPath::new(prefix.strip_suffix('/').unwrap_or(prefix)).is_err()
+            {
+                return Err(StoreError::invalid(
+                    "metadata path prefixes must be nonempty relative literal paths",
+                ));
+            }
+        }
+        if let Some(languages) = self.languages {
+            for language in languages {
+                if knowell_core::Name::new(language).is_err() {
+                    return Err(StoreError::invalid(
+                        "metadata languages must be valid names",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(sqlx::FromRow)]
 struct MetadataRow {
     path: String,
@@ -160,6 +197,56 @@ pub async fn files_metadata_at_page(
     .bind(pin.generation)
     .bind(after.map(RepoPath::as_str))
     .bind(to_i64(limit as u64, "file metadata page limit")?)
+    .fetch_all(conn)
+    .await?;
+    rows.into_iter().map(|row| row.into_metadata(pin)).collect()
+}
+
+/// Reads a hard-scoped metadata-only page at an exact tenant generation pin.
+/// `after` is exclusive and order is bytewise; `limit` is 1..=[`BATCH_ROWS`].
+/// Restrictions apply before the page limit, avoiding transfer and analysis of
+/// unrelated files. Empty restrictions use [`files_metadata_at_page`]. This
+/// bounds returned rows, not PostgreSQL's execution cost for a large scope.
+pub async fn files_metadata_at_scope_page(
+    conn: &mut PgConnection,
+    organization: OrganizationId,
+    pin: GenerationPin,
+    after: Option<&RepoPath>,
+    limit: usize,
+    scope: FileMetadataScope<'_>,
+) -> Result<Vec<FileMetadata>, StoreError> {
+    scope.validate()?;
+    if scope.path_prefixes.is_empty() && scope.languages.is_none() {
+        return files_metadata_at_page(conn, organization, pin, after, limit).await;
+    }
+    if !(1..=BATCH_ROWS).contains(&limit) {
+        return Err(StoreError::invalid(
+            "file metadata page limit must be between 1 and 5000",
+        ));
+    }
+    let rows = sqlx::query_as::<_, MetadataRow>(
+        "SELECT f.path, f.valid_from, f.valid_to, f.content_hash, f.language, f.renamed_from,
+                c.size_bytes, c.redacted_line_count, (c.redacted_text IS NOT NULL) AS has_text
+         FROM file_version f
+         JOIN view v ON v.id = f.view_id
+         JOIN project p ON p.id = v.project_id AND p.organization_id = $1
+         LEFT JOIN content c ON c.organization_id = $1 AND c.hash = f.content_hash
+         WHERE f.view_id = $2 AND f.valid_from <= $3
+           AND (f.valid_to IS NULL OR f.valid_to > $3)
+           AND ($4::text IS NULL OR f.path COLLATE \"C\" > $4 COLLATE \"C\")
+           AND (cardinality($6::text[]) = 0 OR EXISTS (
+               SELECT 1 FROM unnest($6::text[]) AS prefix(value)
+               WHERE starts_with(f.path, prefix.value)))
+           AND ($7::text[] IS NULL OR f.language = ANY($7::text[]))
+         ORDER BY f.path COLLATE \"C\" LIMIT $5",
+    )
+    .bind(organization)
+    .bind(pin.view)
+    .bind(pin.generation)
+    .bind(after.map(RepoPath::as_str))
+    .bind(to_i64(limit as u64, "file metadata page limit")?)
+    .bind(scope.path_prefixes)
+    .bind(scope.languages)
     .fetch_all(conn)
     .await?;
     rows.into_iter().map(|row| row.into_metadata(pin)).collect()

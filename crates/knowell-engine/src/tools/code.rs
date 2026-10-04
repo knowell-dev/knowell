@@ -1,6 +1,6 @@
 //! `search`, `fetch` and `inspect_symbol`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -11,13 +11,13 @@ use knowell_mcp::tools::{
     SymbolFacet, SymbolInfo, SymbolKind, SymbolLink, VersionStatus,
 };
 use knowell_mcp::{
-    EvidenceType, FileLocator, FreshnessTier, Gap, GapReason, MatchReason, RelationKind,
-    Resolution, ResultId, ToolError, UntrustedText,
+    AnalysisLevel, EvidenceType, FileLocator, FreshnessTier, Gap, GapReason, MatchReason,
+    RelationKind, Resolution, ResultId, ToolError, UntrustedText,
 };
 use knowell_parse::SymbolKind as ParseKind;
 use knowell_query::{Language, Origin, PackItem, Snippet};
 use knowell_secrets::ExclusionPolicy;
-use knowell_store::{GenerationState, content, views};
+use knowell_store::{GenerationState, OccurrenceRole, content, symbols as stored_symbols, views};
 
 use super::workspace::analysis_level;
 use crate::access::Access;
@@ -31,6 +31,191 @@ use crate::ids::{SourceRef, parse_source_id, source_id};
 use crate::scope::{Pinned, PinnedProject};
 use crate::search::{Filters, is_test_path, source_snippets, symbol_strength};
 use crate::snapshot::{Snapshot, SymbolEntry, line_count, whole_file};
+
+/// Internal acquisition bounds, independent of each facet's presentation limit.
+const INSPECT_OCCURRENCE_LIMIT: usize = 2048;
+const INSPECT_EDGE_LIMIT: usize = 4096;
+const INSPECT_PAGE_ROWS: u32 = 256;
+
+struct InspectLinks {
+    references: Vec<SymbolLink>,
+    implementations: Vec<SymbolLink>,
+    tests: Vec<SymbolLink>,
+    compiler_available: bool,
+}
+
+fn inspect_evidence(evidence: knowell_store::EvidenceType) -> EvidenceType {
+    match evidence {
+        knowell_store::EvidenceType::SemanticResolved => EvidenceType::SemanticallyResolved,
+        knowell_store::EvidenceType::ContractDerived => EvidenceType::ContractDerived,
+        knowell_store::EvidenceType::Syntactic => EvidenceType::SyntacticObservation,
+        knowell_store::EvidenceType::Heuristic => EvidenceType::HeuristicMatch,
+        knowell_store::EvidenceType::ModelSuggestion => EvidenceType::ModelSuggestion,
+        knowell_store::EvidenceType::RuntimeObserved => EvidenceType::RuntimeObservation,
+    }
+}
+
+fn inspect_resolution(resolution: knowell_store::Resolution) -> Resolution {
+    match resolution {
+        knowell_store::Resolution::Resolved => Resolution::Resolved,
+        knowell_store::Resolution::Ambiguous => Resolution::Ambiguous,
+        knowell_store::Resolution::Unresolved => Resolution::Unresolved,
+    }
+}
+
+fn inspect_relation(kind: &str) -> Option<RelationKind> {
+    match kind {
+        "references" => Some(RelationKind::References),
+        "calls" => Some(RelationKind::Calls),
+        "implements" => Some(RelationKind::Implements),
+        "tests" => Some(RelationKind::Tests),
+        _ => None,
+    }
+}
+
+fn inspect_link(
+    project: &PinnedProject,
+    snapshot: &Snapshot,
+    path: &RepoPath,
+    lines: LineRange,
+    relation: RelationKind,
+    evidence_type: EvidenceType,
+    resolution: Resolution,
+) -> Result<Option<SymbolLink>, ToolError> {
+    if project.overlay.as_ref().is_some_and(|overlay| {
+        overlay.overlay.file(path).is_some() || overlay.overlay.deleted().contains(path)
+    }) {
+        return Ok(None);
+    }
+    let Some(file) = snapshot.file(path) else {
+        return Ok(None);
+    };
+    if lines.end() > file.line_count {
+        return Ok(None);
+    }
+    let Some(commit) = project.commit_id() else {
+        return Ok(None);
+    };
+    Ok(Some(SymbolLink {
+        id: source_id(
+            &project.entry.name,
+            Some(commit.as_str()),
+            &file.content_hash,
+            path,
+            lines,
+        )?,
+        relation,
+        evidence_type,
+        resolution,
+        evidence: knowell_mcp::Evidence {
+            project: project.entry.name.clone(),
+            view: project.target.clone(),
+            layer: knowell_mcp::ViewLayer::Shared,
+            commit,
+            path: path.clone(),
+            lines,
+            content_hash: file.content_hash,
+            symbol: snapshot
+                .enclosing_symbol(path, lines)
+                .map(|symbol| symbol.local.clone()),
+            why: Vec::new(),
+            freshness: if evidence_type == EvidenceType::SemanticallyResolved {
+                FreshnessTier::T3Relations
+            } else {
+                FreshnessTier::T1Symbols
+            },
+            index_state: project.index_state(),
+        },
+    }))
+}
+
+fn inspect_link_order(link: &SymbolLink) -> (u8, u8, u8) {
+    let evidence = match link.evidence_type {
+        EvidenceType::SemanticallyResolved => 0,
+        EvidenceType::RuntimeObservation => 1,
+        EvidenceType::ContractDerived => 2,
+        EvidenceType::SyntacticObservation => 3,
+        EvidenceType::HeuristicMatch => 4,
+        EvidenceType::ModelSuggestion => 5,
+    };
+    let resolution = match link.resolution {
+        Resolution::Resolved => 0,
+        Resolution::Ambiguous => 1,
+        Resolution::Unresolved => 2,
+    };
+    let relation = match link.relation {
+        RelationKind::Calls => 0,
+        RelationKind::References => 1,
+        RelationKind::Imports => 3,
+        _ => 2,
+    };
+    (evidence, resolution, relation)
+}
+
+/// An import declaration can carry a symbol reference at the same line anchor,
+/// but does not prove that a test exercises the imported symbol. Calls retain
+/// their explicit observed relation even when they share an import's line.
+fn inspect_test_association(
+    import_ranges: &BTreeMap<RepoPath, Vec<LineRange>>,
+    path: &RepoPath,
+    lines: LineRange,
+    relation: RelationKind,
+) -> bool {
+    is_test_path(path)
+        && (relation == RelationKind::Calls
+            || !import_ranges.get(path).is_some_and(|ranges| {
+                ranges
+                    .iter()
+                    .any(|range| range.start() <= lines.start() && range.end() >= lines.end())
+            }))
+}
+
+/// A compiler call also carries a reference at the same span. Keep its strongest
+/// observation before charging the facet limit. Module-import navigation remains
+/// distinct even when a symbol reference shares its line anchor.
+fn finish_inspect_links(
+    links: &mut Vec<SymbolLink>,
+    limit: usize,
+    facet: &str,
+    project: &Name,
+    gaps: &mut Vec<Gap>,
+) {
+    links.sort_by(|left, right| {
+        left.evidence
+            .path
+            .cmp(&right.evidence.path)
+            .then_with(|| left.evidence.lines.cmp(&right.evidence.lines))
+            .then_with(|| {
+                (left.relation == RelationKind::Imports)
+                    .cmp(&(right.relation == RelationKind::Imports))
+            })
+            .then_with(|| inspect_link_order(left).cmp(&inspect_link_order(right)))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    links.dedup_by(|left, right| {
+        left.evidence.path == right.evidence.path
+            && left.evidence.lines == right.evidence.lines
+            && (left.relation == RelationKind::Imports) == (right.relation == RelationKind::Imports)
+    });
+    links.sort_by(|left, right| {
+        inspect_link_order(left)
+            .cmp(&inspect_link_order(right))
+            .then_with(|| left.evidence.path.cmp(&right.evidence.path))
+            .then_with(|| left.evidence.lines.cmp(&right.evidence.lines))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    if links.len() > limit {
+        gaps.push(Gap::for_project(
+            GapReason::LimitReached,
+            project.clone(),
+            format!(
+                "{} {facet} links omitted by the per-facet limit; increase limit",
+                links.len().saturating_sub(limit)
+            ),
+        ));
+        links.truncate(limit);
+    }
+}
 
 fn symbol_kind(kind: ParseKind) -> SymbolKind {
     match kind {
@@ -170,18 +355,18 @@ impl Engine {
         let mut query_class_out =
             query_class(knowell_query::plan(&input.query, &self.inner.glossary).intent);
         if wants(SearchKind::Code) || wants(SearchKind::Docs) || wants(SearchKind::Contracts) {
-            let run = self
-                .run_source_search(
+            let run = if include_snippets {
+                self.run_source_search(
                     &pinned,
                     &filters,
                     &input.query,
-                    if include_snippets {
-                        limit.saturating_mul(4).clamp(16, 64)
-                    } else {
-                        limit
-                    },
+                    limit.saturating_mul(4).clamp(16, 64),
                 )
-                .await?;
+                .await?
+            } else {
+                self.run_locator_search(&pinned, &filters, &input.query, limit)
+                    .await?
+            };
             query_class_out = query_class(run.response.plan.intent);
             if input.include_diagnostics.unwrap_or(false) {
                 let work = &run.retrieval;
@@ -191,11 +376,15 @@ impl Engine {
                     elapsed_ms: 0,
                     preparation_ms: work.preparation_ms,
                     prepared_views: count(work.prepared_views),
+                    prepared_file_occurrences: count(work.prepared_file_occurrences),
                     exact_ms: work.exact_ms,
                     lexical_ms: work.lexical_ms,
                     semantic_ms: work.semantic_ms,
                     fusion_expansion_ms: work.fusion_expansion_ms,
                     snippet_read_ms: 0,
+                    source_hydrated_paths: count(work.source_hydrated_paths),
+                    source_hydration_skipped_paths: count(work.source_hydration_skipped_paths),
+                    locator_only: work.locator_only,
                     lexical_queries: count(work.lexical_queries),
                     lexical_file_hits: count(work.lexical_file_hits_examined),
                     lexical_spans: count(work.lexical_candidates),
@@ -287,7 +476,9 @@ impl Engine {
                     .map(SearchEmission::Ranked)
                     .collect(),
             };
-            if let Some(work) = &mut diagnostics {
+            if let Some(work) = &mut diagnostics
+                && include_snippets
+            {
                 work.snippet_read_ms = run.retrieval.source_hydration_ms.saturating_add(
                     u64::try_from(snippet_started.elapsed().as_millis()).unwrap_or(u64::MAX),
                 );
@@ -460,6 +651,7 @@ impl Engine {
             work.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         }
         Ok(SearchOutput {
+            include_handles: input.include_handles.unwrap_or(false),
             query_class: query_class_out,
             hits,
             memory_hits,
@@ -474,7 +666,7 @@ impl Engine {
     }
 
     /// The text of a file version of a pinned project, by full hash.
-    async fn text_of(
+    pub(crate) async fn text_of(
         &self,
         hash: &knowell_core::ContentHash,
     ) -> Result<Option<Arc<str>>, ToolError> {
@@ -905,6 +1097,47 @@ impl Engine {
         )
     }
 
+    /// A result id selects only its exact pinned source version. File-based
+    /// graph starts must use the same guard as symbol-based starts.
+    pub(crate) async fn source_path_in_snapshot(
+        &self,
+        project: &PinnedProject,
+        snapshot: &Snapshot,
+        source: &SourceRef,
+    ) -> Result<Option<RepoPath>, ToolError> {
+        if source.project != project.entry.name || !source.names_commit(project.commit.as_deref()) {
+            return Ok(None);
+        }
+        let mut matching = snapshot
+            .files
+            .keys()
+            .filter(|path| source.path.matches(path));
+        let Some(path) = matching.next() else {
+            return Ok(None);
+        };
+        if matching.next().is_some()
+            || project.overlay.as_ref().is_some_and(|overlay| {
+                overlay.overlay.file(path).is_some() || overlay.overlay.deleted().contains(path)
+            })
+        {
+            return Ok(None);
+        }
+        let Some(file) = snapshot.file(path) else {
+            return Ok(None);
+        };
+        if !source.names_version(&file.content_hash) || source.lines.end() > file.line_count {
+            return Ok(None);
+        }
+        if let Some(commit) = project.commit.as_deref()
+            && self
+                .retained_commit_collision(project, source, path, commit)
+                .await?
+        {
+            return Ok(None);
+        }
+        Ok(Some(path.clone()))
+    }
+
     /// Symbols matching a name across the pinned projects (strongest
     /// first), or the symbol a result id points at.
     pub(crate) async fn find_symbols(
@@ -922,22 +1155,48 @@ impl Engine {
             let Some(pinned_project) = pinned.projects.get(&source.project) else {
                 return Ok(found);
             };
+            if project.is_some_and(|name| name != &source.project) {
+                return Ok(found);
+            }
             let snapshot = self.snapshot_of(pinned_project).await?;
-            let Some(path) = snapshot
-                .files
-                .keys()
-                .find(|p| source.path.matches(p))
-                .cloned()
+            let Some(path) = self
+                .source_path_in_snapshot(pinned_project, &snapshot, &source)
+                .await?
             else {
                 return Ok(found);
             };
-            let exact = snapshot
+            let mut candidates = snapshot
                 .symbols_in(&path)
-                .find(|s| s.lines == source.lines)
-                .or_else(|| snapshot.enclosing_symbol(&path, source.lines))
-                .cloned();
-            if let Some(symbol) = exact {
-                found.push((pinned_project.clone(), snapshot, symbol, 6));
+                .filter(|symbol| symbol.lines == source.lines)
+                .cloned()
+                .collect::<Vec<_>>();
+            if candidates.is_empty() {
+                candidates = snapshot
+                    .symbols_in(&path)
+                    .filter(|symbol| {
+                        symbol.lines.start() <= source.lines.start()
+                            && symbol.lines.end() >= source.lines.end()
+                    })
+                    .cloned()
+                    .collect();
+                if let Some(innermost) = candidates
+                    .iter()
+                    .map(|symbol| symbol.lines.line_count())
+                    .min()
+                {
+                    candidates.retain(|symbol| symbol.lines.line_count() == innermost);
+                }
+            }
+            // Source ids identify line ranges rather than logical symbols or
+            // byte positions. Same-line declarations must remain equally valid.
+            candidates.sort_by(|left, right| {
+                left.lines
+                    .cmp(&right.lines)
+                    .then_with(|| left.local.cmp(&right.local))
+                    .then_with(|| left.key.cmp(&right.key))
+            });
+            for symbol in candidates {
+                found.push((pinned_project.clone(), Arc::clone(&snapshot), symbol, 6));
             }
             return Ok(found);
         }
@@ -984,6 +1243,315 @@ impl Engine {
         Ok(found)
     }
 
+    async fn inspect_compiler_available(
+        &self,
+        project: &PinnedProject,
+        snapshot: &Snapshot,
+        path: &RepoPath,
+        cache: &mut BTreeMap<RepoPath, bool>,
+    ) -> Result<bool, ToolError> {
+        if project.overlay.is_some() {
+            return Ok(false);
+        }
+        if let Some(available) = cache.get(path) {
+            return Ok(*available);
+        }
+        let Some(file) = snapshot.file(path) else {
+            return Ok(false);
+        };
+        let Some(commit) = project.commit.as_deref() else {
+            return Ok(false);
+        };
+        let mut conn = self.inner.store.acquire().await.map_err(store_tool)?;
+        let coverage = knowell_store::analysis::coverage_at(
+            &mut conn,
+            self.inner.organization,
+            project.pin(),
+            path,
+            &file.content_hash,
+        )
+        .await
+        .map_err(store_tool)?;
+        let available = coverage.iter().any(|record| {
+            crate::precise::admits_scip_coverage(record, project.pin(), commit, file.content_hash)
+        });
+        cache.insert(path.clone(), available);
+        Ok(available)
+    }
+
+    async fn inspect_symbol_links(
+        &self,
+        project: &PinnedProject,
+        snapshot: &Snapshot,
+        symbol: &SymbolEntry,
+        input: &InspectSymbolInput,
+        gaps: &mut Vec<Gap>,
+    ) -> Result<InspectLinks, ToolError> {
+        let wants = |facet: SymbolFacet| input.include.is_empty() || input.include.contains(&facet);
+        let mut cache = BTreeMap::new();
+        let compiler_available = self
+            .inspect_compiler_available(project, snapshot, &symbol.path, &mut cache)
+            .await?;
+        let mut output = InspectLinks {
+            references: Vec::new(),
+            implementations: Vec::new(),
+            tests: Vec::new(),
+            compiler_available,
+        };
+        if !wants(SymbolFacet::References)
+            && !wants(SymbolFacet::Implementations)
+            && !wants(SymbolFacet::Tests)
+        {
+            return Ok(output);
+        }
+        // Index import spans once; checking each occurrence against the entire
+        // project's import list would make test association work quadratic.
+        let mut test_import_ranges: BTreeMap<RepoPath, Vec<LineRange>> = BTreeMap::new();
+        if wants(SymbolFacet::Tests) {
+            for import in &snapshot.imports {
+                if is_test_path(&import.from)
+                    && let Some(lines) = import.lines
+                {
+                    test_import_ranges
+                        .entry(import.from.clone())
+                        .or_default()
+                        .push(lines);
+                }
+            }
+        }
+        let mut acquisition_truncated = false;
+        if let Some(id) = symbol.store_id {
+            let edges = snapshot
+                .edges_into
+                .get(&id)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            acquisition_truncated |= edges.len() > INSPECT_EDGE_LIMIT;
+            for edge in edges
+                .iter()
+                .take(INSPECT_EDGE_LIMIT)
+                .filter_map(|index| snapshot.other_edges.get(*index))
+            {
+                let Some(relation) = inspect_relation(&edge.kind) else {
+                    continue;
+                };
+                if relation == RelationKind::Implements && !wants(SymbolFacet::Implementations) {
+                    continue;
+                }
+                if edge.evidence == knowell_store::EvidenceType::SemanticResolved
+                    && !self
+                        .inspect_compiler_available(project, snapshot, &edge.origin, &mut cache)
+                        .await?
+                {
+                    continue;
+                }
+                let Some(file) = snapshot.file(&edge.origin) else {
+                    continue;
+                };
+                let Some(lines) = edge.lines.or_else(|| whole_file(file.line_count)) else {
+                    continue;
+                };
+                let Some(link) = inspect_link(
+                    project,
+                    snapshot,
+                    &edge.origin,
+                    lines,
+                    relation,
+                    inspect_evidence(edge.evidence),
+                    inspect_resolution(edge.resolution),
+                )?
+                else {
+                    continue;
+                };
+                match relation {
+                    RelationKind::Implements => output.implementations.push(link),
+                    RelationKind::Tests => {
+                        if wants(SymbolFacet::Tests) {
+                            output.tests.push(link);
+                        }
+                    }
+                    _ => {
+                        if wants(SymbolFacet::Tests)
+                            && inspect_test_association(
+                                &test_import_ranges,
+                                &edge.origin,
+                                lines,
+                                relation,
+                            )
+                        {
+                            output.tests.push(link.clone());
+                        }
+                        if wants(SymbolFacet::References) {
+                            output.references.push(link);
+                        }
+                    }
+                }
+            }
+
+            let mut after = None;
+            let mut scanned = 0usize;
+            loop {
+                let remaining = INSPECT_OCCURRENCE_LIMIT
+                    .saturating_sub(scanned)
+                    .saturating_add(1);
+                let page_rows =
+                    INSPECT_PAGE_ROWS.min(u32::try_from(remaining).unwrap_or(INSPECT_PAGE_ROWS));
+                let mut conn = self.inner.store.acquire().await.map_err(store_tool)?;
+                let page = stored_symbols::occurrences_of_page(
+                    &mut conn,
+                    self.inner.organization,
+                    id,
+                    &[project.pin()],
+                    after,
+                    page_rows,
+                )
+                .await
+                .map_err(store_tool)?;
+                drop(conn);
+                if page.is_empty() {
+                    break;
+                }
+                after = page.last().map(|row| row.id);
+                let exhausted = page.len() < usize::try_from(page_rows).unwrap_or(usize::MAX);
+                for row in page {
+                    scanned = scanned.saturating_add(1);
+                    if scanned > INSPECT_OCCURRENCE_LIMIT {
+                        acquisition_truncated = true;
+                        break;
+                    }
+                    if row.occurrence.role != OccurrenceRole::Reference {
+                        continue;
+                    }
+                    let occurrence = &row.occurrence;
+                    let Some(file) = snapshot.file(&occurrence.path) else {
+                        continue;
+                    };
+                    if file.content_hash != occurrence.content_hash {
+                        continue;
+                    }
+                    let (evidence, resolution) = if row.origin == "syntax" {
+                        // Stored syntax occurrences do not carry a compiler binding proof.
+                        (EvidenceType::SyntacticObservation, Resolution::Unresolved)
+                    } else if row.origin == format!("scip:{}", occurrence.path)
+                        && row.valid_from == project.generation
+                        && self
+                            .inspect_compiler_available(
+                                project,
+                                snapshot,
+                                &occurrence.path,
+                                &mut cache,
+                            )
+                            .await?
+                    {
+                        (EvidenceType::SemanticallyResolved, Resolution::Resolved)
+                    } else {
+                        continue;
+                    };
+                    let Some(link) = inspect_link(
+                        project,
+                        snapshot,
+                        &occurrence.path,
+                        occurrence.lines,
+                        RelationKind::References,
+                        evidence,
+                        resolution,
+                    )?
+                    else {
+                        continue;
+                    };
+                    if wants(SymbolFacet::Tests)
+                        && inspect_test_association(
+                            &test_import_ranges,
+                            &occurrence.path,
+                            occurrence.lines,
+                            RelationKind::References,
+                        )
+                    {
+                        output.tests.push(link.clone());
+                    }
+                    if wants(SymbolFacet::References) {
+                        output.references.push(link);
+                    }
+                }
+                if exhausted || scanned > INSPECT_OCCURRENCE_LIMIT {
+                    break;
+                }
+            }
+        }
+        if wants(SymbolFacet::References) {
+            let mut import_count = 0usize;
+            for edge in snapshot.imports_of(&symbol.path) {
+                import_count = import_count.saturating_add(1);
+                if import_count > INSPECT_EDGE_LIMIT {
+                    acquisition_truncated = true;
+                    break;
+                }
+                if edge.evidence == knowell_store::EvidenceType::SemanticResolved
+                    && !self
+                        .inspect_compiler_available(project, snapshot, &edge.from, &mut cache)
+                        .await?
+                {
+                    continue;
+                }
+                let Some(file) = snapshot.file(&edge.from) else {
+                    continue;
+                };
+                let Some(lines) = edge.lines.or_else(|| whole_file(file.line_count)) else {
+                    continue;
+                };
+                if let Some(link) = inspect_link(
+                    project,
+                    snapshot,
+                    &edge.from,
+                    lines,
+                    RelationKind::Imports,
+                    inspect_evidence(edge.evidence),
+                    inspect_resolution(edge.resolution),
+                )? {
+                    // A test importing the module is not proof it exercises this symbol.
+                    output.references.push(link);
+                }
+            }
+        }
+        if acquisition_truncated {
+            gaps.push(Gap::for_project(GapReason::LimitReached, project.entry.name.clone(),
+                "symbol link acquisition reached its bounded occurrence or edge limit; the returned lists are partial"));
+        }
+        let limit = usize::try_from(input.limit.unwrap_or(20)).unwrap_or(20);
+        finish_inspect_links(
+            &mut output.references,
+            limit,
+            "reference",
+            &project.entry.name,
+            gaps,
+        );
+        finish_inspect_links(
+            &mut output.implementations,
+            limit,
+            "implementation",
+            &project.entry.name,
+            gaps,
+        );
+        finish_inspect_links(
+            &mut output.tests,
+            limit,
+            "test association",
+            &project.entry.name,
+            gaps,
+        );
+        let precise_files = cache.values().filter(|available| **available).count();
+        gaps.push(Gap::for_project(
+            if precise_files > 0 { GapReason::RelationsNotReady } else { GapReason::NoReferenceResolutionForLanguage },
+            project.entry.name.clone(),
+            if project.overlay.is_some() {
+                "compiler links were excluded because this personal context has no matching compiler-input analysis; unchanged file text does not validate changed dependency inputs".to_owned()
+            } else {
+                format!("reference, call and implementation inventory is partial: {precise_files} inspected files have exact compiler coverage; source observations and file-import navigation do not establish an exhaustive inventory")
+            },
+        ));
+        Ok(output)
+    }
+
     pub(crate) async fn tool_inspect_symbol(
         &self,
         access: Access,
@@ -998,7 +1566,6 @@ impl Engine {
                 "project {project} does not exist"
             )));
         }
-        let limit = usize::try_from(input.limit.unwrap_or(20)).unwrap_or(20);
         let wants = |facet: SymbolFacet| input.include.is_empty() || input.include.contains(&facet);
         let found = self
             .find_symbols(
@@ -1010,7 +1577,14 @@ impl Engine {
             .await?;
         let mut gaps = pinned.gaps.clone();
         let mut symbols = Vec::new();
-        let mut languages_without_refs = BTreeSet::new();
+        if input.symbol.id.is_some() && found.len() > 1 {
+            gaps.push(Gap::new(GapReason::LimitReached,
+                format!("{} definitions share this source anchor; a source id identifies lines, not a unique symbol; choose a qualified symbol and project", found.len())));
+        }
+        if found.len() > 10 {
+            gaps.push(Gap::new(GapReason::LimitReached,
+                format!("{} matching symbols were omitted by the symbol acquisition limit; use a project or qualified symbol", found.len().saturating_sub(10))));
+        }
         for (project, snapshot, symbol, _) in found.into_iter().take(10) {
             let Some(file) = snapshot.file(&symbol.path) else {
                 continue;
@@ -1020,6 +1594,25 @@ impl Engine {
                 gaps.push(no_commit_gap(&project.entry.name));
                 continue;
             };
+            if project.overlay.as_ref().is_some_and(|overlay| {
+                overlay.overlay.file(&symbol.path).is_some()
+                    || overlay.overlay.deleted().contains(&symbol.path)
+            }) {
+                gaps.push(Gap::for_project(GapReason::NotFound, project.entry.name.clone(),
+                    "the indexed definition is shadowed by personal source changes; search and read the personal definition before inspecting shared symbol links"));
+                continue;
+            }
+            if let Some(source) = input.symbol.id.as_ref().and_then(parse_source_id)
+                && (!source.names_commit(Some(commit.as_str()))
+                    || !source.names_version(&file.content_hash)
+                    || self
+                        .retained_commit_collision(&project, &source, &symbol.path, commit.as_str())
+                        .await?)
+            {
+                gaps.push(Gap::for_project(GapReason::NotFound, project.entry.name.clone(),
+                    "the symbol id does not identify an unambiguous source version in this pinned context; fetch the retained source or inspect an explicit pinned symbol"));
+                continue;
+            }
             let id = source_id(
                 &project.entry.name,
                 Some(commit.as_str()),
@@ -1042,146 +1635,19 @@ impl Engine {
                 freshness: FreshnessTier::T1Symbols,
                 index_state: project.index_state(),
             };
-            let mut references = Vec::new();
-            let mut tests = Vec::new();
-            if let Some(id) = symbol.store_id {
-                for edge in snapshot.uses_of(id) {
-                    let Some(file) = snapshot.file(&edge.origin) else {
-                        continue;
-                    };
-                    let Some(lines) = edge.lines.or_else(|| whole_file(file.line_count)) else {
-                        continue;
-                    };
-                    let Some(commit) = project.commit_id() else {
-                        continue;
-                    };
-                    let test = is_test_path(&edge.origin);
-                    let link = SymbolLink {
-                        id: source_id(
-                            &project.entry.name,
-                            Some(commit.as_str()),
-                            &file.content_hash,
-                            &edge.origin,
-                            lines,
-                        )?,
-                        relation: if test {
-                            RelationKind::Tests
-                        } else if edge.kind == "calls" {
-                            RelationKind::Calls
-                        } else {
-                            RelationKind::References
-                        },
-                        evidence_type: match edge.evidence {
-                            knowell_store::EvidenceType::SemanticResolved => {
-                                EvidenceType::SemanticallyResolved
-                            }
-                            knowell_store::EvidenceType::ContractDerived => {
-                                EvidenceType::ContractDerived
-                            }
-                            knowell_store::EvidenceType::Syntactic => {
-                                EvidenceType::SyntacticObservation
-                            }
-                            knowell_store::EvidenceType::Heuristic => EvidenceType::HeuristicMatch,
-                            knowell_store::EvidenceType::ModelSuggestion => {
-                                EvidenceType::ModelSuggestion
-                            }
-                            knowell_store::EvidenceType::RuntimeObserved => {
-                                EvidenceType::RuntimeObservation
-                            }
-                        },
-                        resolution: match edge.resolution {
-                            knowell_store::Resolution::Resolved => Resolution::Resolved,
-                            knowell_store::Resolution::Ambiguous => Resolution::Ambiguous,
-                            knowell_store::Resolution::Unresolved => Resolution::Unresolved,
-                        },
-                        evidence: knowell_mcp::Evidence {
-                            project: project.entry.name.clone(),
-                            view: project.target.clone(),
-                            layer: knowell_mcp::ViewLayer::Shared,
-                            commit,
-                            path: edge.origin.clone(),
-                            lines,
-                            content_hash: file.content_hash,
-                            symbol: snapshot
-                                .enclosing_symbol(&edge.origin, lines)
-                                .map(|s| s.local.clone()),
-                            why: Vec::new(),
-                            freshness: FreshnessTier::T1Symbols,
-                            index_state: project.index_state(),
-                        },
-                    };
-                    if test {
-                        tests.push(link);
-                    } else {
-                        references.push(link);
-                    }
-                }
-            }
-            for edge in snapshot.imports_of(&symbol.path) {
-                let Some(importer) = snapshot.file(&edge.from) else {
-                    continue;
-                };
-                let lines = edge
-                    .lines
-                    .or_else(|| whole_file(importer.line_count))
-                    .ok_or_else(|| ToolError::internal("empty range"))?;
-                let Some(commit) = project.commit_id() else {
-                    continue;
-                };
-                let link_id = source_id(
-                    &project.entry.name,
-                    Some(commit.as_str()),
-                    &importer.content_hash,
-                    &edge.from,
-                    lines,
-                )?;
-                let test = is_test_path(&edge.from);
-                let link = SymbolLink {
-                    id: link_id,
-                    relation: if test {
-                        RelationKind::Tests
-                    } else {
-                        RelationKind::Imports
-                    },
-                    evidence_type: EvidenceType::SyntacticObservation,
-                    resolution: match edge.resolution {
-                        knowell_store::Resolution::Resolved => Resolution::Resolved,
-                        knowell_store::Resolution::Ambiguous => Resolution::Ambiguous,
-                        knowell_store::Resolution::Unresolved => Resolution::Unresolved,
-                    },
-                    evidence: knowell_mcp::Evidence {
-                        project: project.entry.name.clone(),
-                        view: project.target.clone(),
-                        layer: knowell_mcp::ViewLayer::Shared,
-                        commit,
-                        path: edge.from.clone(),
-                        lines,
-                        content_hash: importer.content_hash,
-                        symbol: snapshot
-                            .enclosing_symbol(&edge.from, lines)
-                            .map(|s| s.local.clone()),
-                        why: Vec::new(),
-                        freshness: FreshnessTier::T1Symbols,
-                        index_state: project.index_state(),
-                    },
-                };
-                if test {
-                    tests.push(link);
-                } else {
-                    references.push(link);
-                }
-            }
-            references.sort_by(|a, b| a.evidence.path.cmp(&b.evidence.path));
-            tests.sort_by(|a, b| a.evidence.path.cmp(&b.evidence.path));
-            references.truncate(limit);
-            tests.truncate(limit);
-            languages_without_refs.insert((project.entry.name.clone(), language.clone()));
+            let links = self
+                .inspect_symbol_links(&project, &snapshot, &symbol, &input, &mut gaps)
+                .await?;
             symbols.push(SymbolInfo {
                 id,
                 name: symbol.name.clone(),
                 qualified_name: symbol.local.clone(),
                 kind: symbol_kind(symbol.kind),
-                analysis: analysis_level(&language),
+                analysis: if links.compiler_available {
+                    AnalysisLevel::Semantic
+                } else {
+                    analysis_level(&language)
+                },
                 language,
                 definition,
                 signature: wants(SymbolFacet::Signature)
@@ -1192,28 +1658,20 @@ impl Engine {
                     None
                 },
                 references: if wants(SymbolFacet::References) {
-                    references
+                    links.references
                 } else {
                     Vec::new()
                 },
-                implementations: Vec::new(),
+                implementations: links.implementations,
                 tests: if wants(SymbolFacet::Tests) {
-                    tests
+                    links.tests
                 } else {
                     Vec::new()
                 },
-                // Only file imports are known; call sites are not resolved.
+                // Current syntax and precise providers report partial inventories.
+                // A bounded or facet-filtered result never proves complete references.
                 references_complete: false,
             });
-        }
-        for (project, language) in languages_without_refs {
-            gaps.push(Gap::for_project(
-                GapReason::NoReferenceResolutionForLanguage,
-                project,
-                format!(
-                    "{language}: references are the files that import the definition's file (syntactic); call sites and implementations are not resolved yet"
-                ),
-            ));
         }
         if symbols.is_empty() {
             gaps.extend(pinned.not_indexed_gaps(&[]));

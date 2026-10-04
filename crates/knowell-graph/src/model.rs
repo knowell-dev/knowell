@@ -569,6 +569,9 @@ pub struct EdgeFilter {
     pub kinds: BTreeSet<EdgeKind>,
     /// Weakest accepted evidence; `None` accepts any.
     pub min_evidence: Option<EvidenceType>,
+    /// Evidence providers unavailable in this source context. Exclusions apply
+    /// independently of evidence strength and resolution.
+    pub excluded_evidence: BTreeSet<EvidenceType>,
     /// Whether [`Resolution::Ambiguous`] edges may be used.
     pub allow_ambiguous: bool,
     /// Whether [`Resolution::Unresolved`] edges may be used.
@@ -587,6 +590,7 @@ impl EdgeFilter {
         Self {
             kinds: BTreeSet::new(),
             min_evidence: None,
+            excluded_evidence: BTreeSet::new(),
             allow_ambiguous: true,
             allow_unresolved: true,
         }
@@ -606,6 +610,14 @@ impl EdgeFilter {
         self
     }
 
+    /// Excludes one evidence type without widening any existing restriction.
+    /// Useful when compiler observations belong to a different build context.
+    #[must_use]
+    pub fn without_evidence(mut self, evidence: EvidenceType) -> Self {
+        self.excluded_evidence.insert(evidence);
+        self
+    }
+
     /// Rejects ambiguous and unresolved edges.
     #[must_use]
     pub fn resolved_only(mut self) -> Self {
@@ -617,6 +629,9 @@ impl EdgeFilter {
     /// Whether `edge` passes the filter.
     pub fn matches(&self, edge: &Edge) -> bool {
         if !self.kinds.is_empty() && !self.kinds.contains(&edge.kind) {
+            return false;
+        }
+        if self.excluded_evidence.contains(&edge.evidence) {
             return false;
         }
         if let Some(min) = self.min_evidence

@@ -35,6 +35,7 @@ use knowell_store::views::GenerationPin;
 use super::code::dedupe;
 use crate::access::Access;
 use crate::engine::Engine;
+use crate::error::store_tool;
 use crate::graph::{self, file_node, symbol_node};
 use crate::ids::{contract_id, source_id};
 use crate::patch;
@@ -49,6 +50,26 @@ pub(crate) struct GraphCtx {
 }
 
 impl GraphCtx {
+    fn flow_node(&self, id: &NodeId, local: String) -> Option<FlowNode> {
+        let node = self.graph.node(id)?;
+        let placed = self.evidence(node, Vec::new());
+        let label = match node.kind {
+            GNodeKind::File => node
+                .source
+                .as_ref()
+                .map_or_else(|| node.name.clone(), |source| source.path.to_string()),
+            _ => node.name.clone(),
+        };
+        Some(FlowNode {
+            node: local,
+            kind: node_kind(node),
+            label,
+            project: node.project.clone(),
+            id: placed.as_ref().map(|(id, _)| id.clone()),
+            evidence: placed.map(|(_, evidence)| evidence),
+        })
+    }
+
     /// Evidence of a graph node (its source reference) at the pinned view.
     fn evidence(
         &self,
@@ -253,9 +274,241 @@ fn relations_gap(engine: &Engine) -> Option<Gap> {
     engine.inner.settings.relation_stage.is_none().then(|| {
         Gap::new(
             GapReason::RelationsNotReady,
-            "no call, HTTP, event, RPC or table relations are extracted yet (no contract rule packs ran); only file imports and symbol containment are known",
+            "no contract relation stage ran; HTTP, event, RPC and table relations may be missing even when source imports, references or calls are indexed",
         )
     })
+}
+
+fn graph_overlay_gaps(pinned: &Pinned) -> Vec<Gap> {
+    pinned
+        .projects
+        .iter()
+        .filter(|(_, project)| {
+            project.overlay.as_ref().is_some_and(|overlay| !overlay.overlay.is_empty())
+        })
+        .map(|(name, _)| {
+            Gap::for_project(
+                GapReason::RelationsNotReady,
+                name.clone(),
+                "graph relations describe the shared indexed generation; changed or deleted working-tree overlay sources are not included in this graph",
+            )
+        })
+        .collect()
+}
+
+fn graph_context_filter(pinned: &Pinned, filter: EdgeFilter, gaps: &mut Vec<Gap>) -> EdgeFilter {
+    if pinned
+        .projects
+        .values()
+        .any(|project| project.overlay.is_some())
+    {
+        gaps.push(Gap::new(
+            GapReason::NoReferenceResolutionForLanguage,
+            "compiler-resolved graph edges were excluded because this personal context has no matching compiler-input analysis; source and dependency inputs may differ from the shared index",
+        ));
+        filter.without_evidence(knowell_graph::EvidenceType::SemanticResolved)
+    } else {
+        filter
+    }
+}
+
+fn call_coverage_message(coverage: &[knowell_store::analysis::AnalysisCoverage]) -> Option<String> {
+    let mut summaries = Vec::new();
+    let mut partial = false;
+    for provider in ["syntax", "scip"] {
+        for record in coverage.iter().filter(|record| record.provider == provider) {
+            let details = &record.details;
+            partial |= details
+                .get("calls_complete")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true);
+            let mut facts = Vec::new();
+            for (key, label) in [
+                ("call_sites", "callee spans observed"),
+                ("calls_written", "call observations written"),
+                ("calls_ambiguous", "ambiguous call targets"),
+                ("calls_unresolved", "unresolved call targets"),
+            ] {
+                if let Some(count) = details.get(key).and_then(serde_json::Value::as_u64) {
+                    facts.push(format!("{count} {label}"));
+                }
+            }
+            for (key, label) in [
+                ("parse_unavailable", "parser unavailable"),
+                ("source_unavailable", "source unavailable"),
+                ("encoding_unknown", "position encoding unknown"),
+                ("truncated", "analysis truncated"),
+                ("candidate_overflow", "candidate budget reached"),
+            ] {
+                let present = details.get(key).is_some_and(|value| {
+                    value.as_bool() == Some(true) || value.as_u64().is_some_and(|count| count > 0)
+                });
+                if present {
+                    partial = true;
+                    facts.push(label.to_owned());
+                }
+            }
+            if facts.is_empty() {
+                partial = true;
+                facts.push("call-site counters unavailable".to_owned());
+            }
+            summaries.push(format!("{provider}: {}", facts.join(", ")));
+        }
+    }
+    if summaries.is_empty() {
+        Some("call-site analysis coverage was not recorded for this exact pinned file version; reindex to record coverage, and verify callers or callees in source".to_owned())
+    } else if partial {
+        Some(format!(
+            "source-level call coverage is partial ({}); these are whole-file observations, not a complete caller/callee or runtime-dispatch inventory",
+            summaries.join("; ")
+        ))
+    } else {
+        None
+    }
+}
+
+struct TraceAssembly {
+    nodes: Vec<FlowNode>,
+    edges: Vec<FlowEdge>,
+    truncated: bool,
+    candidates_returned: usize,
+    candidates_omitted: usize,
+}
+
+fn trace_paths(
+    walks: &[knowell_graph::WalkResult],
+    navigation: bool,
+) -> Vec<(bool, &[knowell_graph::Hop])> {
+    let mut paths = Vec::new();
+    if navigation {
+        // Interleave starts so a broad import file cannot fill the result
+        // before the symbol's own neighborhood gets a slot.
+        let mut positions = vec![0usize; walks.len()];
+        loop {
+            let mut advanced = false;
+            for (walk, position) in walks.iter().zip(&mut positions) {
+                if let Some(visit) = walk.visits.get(*position) {
+                    paths.push((false, visit.path.as_slice()));
+                    *position = position.saturating_add(1);
+                    advanced = true;
+                }
+            }
+            if !advanced {
+                break;
+            }
+        }
+        for walk in walks {
+            for visit in &walk.candidate_visits {
+                paths.push((true, visit.path.as_slice()));
+            }
+        }
+    } else {
+        for walk in walks {
+            for visit in &walk.visits {
+                paths.push((false, visit.path.as_slice()));
+            }
+        }
+    }
+    paths
+}
+
+fn assemble_trace(
+    ctx: &GraphCtx,
+    starts: &[NodeId],
+    walks: &[knowell_graph::WalkResult],
+    navigation: bool,
+    limit: usize,
+    candidate_limit: usize,
+) -> TraceAssembly {
+    let mut output = TraceAssembly {
+        nodes: Vec::new(),
+        edges: Vec::new(),
+        truncated: false,
+        candidates_returned: 0,
+        candidates_omitted: 0,
+    };
+    let mut local = BTreeMap::new();
+    let add_node =
+        |id: &NodeId, local: &mut BTreeMap<NodeId, String>, output: &mut TraceAssembly| {
+            if let Some(existing) = local.get(id) {
+                return Some(existing.clone());
+            }
+            if local.len() >= limit {
+                output.truncated = true;
+                return None;
+            }
+            let name = format!("n{}", local.len());
+            let node = ctx.flow_node(id, name.clone())?;
+            local.insert(id.clone(), name.clone());
+            output.nodes.push(node);
+            Some(name)
+        };
+    for start in starts {
+        add_node(start, &mut local, &mut output);
+    }
+    let mut seen_edges = BTreeSet::new();
+    for (candidate_path, path) in trace_paths(walks, navigation) {
+        for hop in path {
+            if !seen_edges.insert(hop.edge.clone()) {
+                continue;
+            }
+            let Some(edge) = ctx.graph.edge(&hop.edge) else {
+                continue;
+            };
+            let target_kind = ctx
+                .graph
+                .node(&hop.edge.to)
+                .and_then(knowell_graph::Node::contract_kind);
+            let Some(relation) = relation_of(edge.kind, target_kind) else {
+                continue;
+            };
+            let candidate = candidate_path
+                && (edge.resolution != knowell_graph::Resolution::Resolved
+                    || !edge
+                        .evidence
+                        .at_least(knowell_graph::EvidenceType::Syntactic));
+            if candidate && output.candidates_returned >= candidate_limit {
+                output.candidates_omitted = output.candidates_omitted.saturating_add(1);
+                output.truncated = true;
+                continue;
+            }
+            // Reserve both endpoints together so a clipped edge cannot
+            // consume a slot with an orphaned endpoint.
+            let additional = BTreeSet::from([&hop.edge.from, &hop.edge.to])
+                .into_iter()
+                .filter(|id| !local.contains_key(*id))
+                .count();
+            if local
+                .len()
+                .checked_add(additional)
+                .is_none_or(|total| total > limit)
+            {
+                output.truncated = true;
+                if candidate {
+                    output.candidates_omitted = output.candidates_omitted.saturating_add(1);
+                }
+                continue;
+            }
+            let (Some(from), Some(to)) = (
+                add_node(&hop.edge.from, &mut local, &mut output),
+                add_node(&hop.edge.to, &mut local, &mut output),
+            ) else {
+                continue;
+            };
+            output.edges.push(FlowEdge {
+                from,
+                to,
+                relation,
+                evidence_type: mcp_evidence(edge.evidence),
+                resolution: mcp_resolution(edge.resolution),
+                evidence: ctx.edge_evidence(edge),
+            });
+            if candidate {
+                output.candidates_returned = output.candidates_returned.saturating_add(1);
+            }
+        }
+    }
+    output
 }
 
 /// The `contracts_not_extracted` gap (no relation stage installed).
@@ -346,6 +599,51 @@ fn project_relative(path: &RepoPath, root: Option<&RepoPath>) -> Option<RepoPath
 }
 
 impl Engine {
+    async fn trace_call_coverage_gaps(
+        &self,
+        ctx: &GraphCtx,
+        starts: &[NodeId],
+    ) -> Result<Vec<Gap>, ToolError> {
+        let mut checked = BTreeSet::new();
+        let mut gaps = Vec::new();
+        let mut connection = self.inner.store.acquire().await.map_err(store_tool)?;
+        for start in starts {
+            let Some(source) = ctx.graph.node(start).and_then(|node| node.source.as_ref()) else {
+                continue;
+            };
+            if !checked.insert((
+                source.project.clone(),
+                source.path.clone(),
+                source.content_hash,
+            )) {
+                continue;
+            }
+            let Some((project, snapshot)) = ctx.views.get(&source.project) else {
+                continue;
+            };
+            let Some(file) = snapshot.file(&source.path) else {
+                continue;
+            };
+            let coverage = knowell_store::analysis::coverage_at(
+                &mut connection,
+                self.inner.organization,
+                project.pin(),
+                &source.path,
+                &file.content_hash,
+            )
+            .await
+            .map_err(store_tool)?;
+            if let Some(message) = call_coverage_message(&coverage) {
+                gaps.push(Gap::for_project(
+                    GapReason::NoReferenceResolutionForLanguage,
+                    source.project.clone(),
+                    format!("{}: {message}", source.path),
+                ));
+            }
+        }
+        Ok(gaps)
+    }
+
     /// The configured path policy, checked on project-relative paths before reads.
     pub(crate) fn project_exclusion_policy(
         &self,
@@ -427,6 +725,7 @@ impl Engine {
             }
         }
         let ctx = self.code_graph(&pinned).await?;
+        gaps.extend(graph_overlay_gaps(&pinned));
         // The start: a symbol (and the file that carries its imports), a
         // file, or a contract.
         let mut starts: Vec<NodeId> = Vec::new();
@@ -442,6 +741,32 @@ impl Engine {
             let best = found.first().map(|f| f.3);
             let top: Vec<_> = found.iter().filter(|f| Some(f.3) == best).collect();
             if top.len() > 1 {
+                if input.navigation.unwrap_or(false) {
+                    let limit = usize::try_from(input.limit.unwrap_or(50)).unwrap_or(50);
+                    let nodes = top
+                        .iter()
+                        .take(limit)
+                        .enumerate()
+                        .filter_map(|(position, (project, _, symbol, _))| {
+                            let id = symbol_node(&project.entry.name, &symbol.key);
+                            ctx.flow_node(&id, format!("n{position}"))
+                        })
+                        .collect();
+                    gaps.push(Gap::new(
+                        GapReason::LimitReached,
+                        format!(
+                            "{} equally ranked start definitions match; navigation did not choose one or expand their relations; choose a qualified symbol and project; a shared source id cannot distinguish same-line definitions",
+                            top.len()
+                        ),
+                    ));
+                    dedupe(&mut gaps);
+                    return Ok(TraceFlowOutput {
+                        nodes,
+                        truncated: top.len() > limit,
+                        gaps,
+                        ..TraceFlowOutput::default()
+                    });
+                }
                 gaps.push(Gap::new(
                     GapReason::LimitReached,
                     format!(
@@ -457,10 +782,12 @@ impl Engine {
                 starts.push(file_node(&project.entry.name, &symbol.path));
             } else if let Some(id) = &input.id
                 && let Some(source) = crate::ids::parse_source_id(id)
-                && let Some((_, snapshot)) = ctx.views.get(&source.project)
-                && let Some(path) = snapshot.files.keys().find(|p| source.path.matches(p))
+                && let Some((project, snapshot)) = ctx.views.get(&source.project)
+                && let Some(path) = self
+                    .source_path_in_snapshot(project, snapshot, &source)
+                    .await?
             {
-                starts.push(file_node(&source.project, path));
+                starts.push(file_node(&source.project, &path));
             }
         } else if let Some(contract) = &input.contract {
             let (kind_text, key) = match contract.split_once(':') {
@@ -504,7 +831,7 @@ impl Engine {
         if let Some(gap) = relations_gap(self) {
             gaps.push(gap);
         }
-        let Some(first) = starts.first().cloned() else {
+        let Some(_) = starts.first() else {
             gaps.push(Gap::new(
                 GapReason::NotFound,
                 "the start symbol, id or contract does not exist in the pinned views",
@@ -544,113 +871,61 @@ impl Engine {
             }
         }
         let limit = usize::try_from(input.limit.unwrap_or(50)).unwrap_or(50);
+        let filter = graph_context_filter(&pinned, EdgeFilter::any().with_kinds(kinds), &mut gaps);
         let spec = WalkSpec::new(input.max_depth.unwrap_or(3), direction)
-            .with_filter(EdgeFilter::any().with_kinds(kinds))
+            .with_filter(filter)
             .with_node_budget(limit.max(1));
-        let mut local: BTreeMap<NodeId, String> = BTreeMap::new();
-        let mut nodes = Vec::new();
-        let mut edges = Vec::new();
         let mut truncated = false;
-        let add_node = |id: &NodeId,
-                        local: &mut BTreeMap<NodeId, String>,
-                        nodes: &mut Vec<FlowNode>,
-                        truncated: &mut bool|
-         -> Option<String> {
-            if let Some(existing) = local.get(id) {
-                return Some(existing.clone());
-            }
-            let node = ctx.graph.node(id)?;
-            if local.len() >= limit {
-                *truncated = true;
-                return None;
-            }
-            let name = format!("n{}", local.len());
-            local.insert(id.clone(), name.clone());
-            let placed = ctx.evidence(node, Vec::new());
-            let label = match node.kind {
-                GNodeKind::File => node
-                    .source
-                    .as_ref()
-                    .map_or_else(|| node.name.clone(), |s| s.path.to_string()),
-                _ => node.name.clone(),
-            };
-            nodes.push(FlowNode {
-                node: name.clone(),
-                kind: node_kind(node),
-                label,
-                project: node.project.clone(),
-                id: placed.as_ref().map(|(id, _)| id.clone()),
-                evidence: placed.map(|(_, e)| e),
-            });
-            Some(name)
-        };
-        for start in &starts {
-            add_node(start, &mut local, &mut nodes, &mut truncated);
+        let navigation = input.navigation.unwrap_or(false);
+        if navigation || input.relations.contains(&RelationKind::Calls) {
+            gaps.extend(self.trace_call_coverage_gaps(&ctx, &starts).await?);
         }
-        let mut seen_edges = BTreeSet::new();
+        let neighbor_limit = usize::try_from(input.neighbor_limit.unwrap_or(12)).unwrap_or(12);
+        let candidate_limit = usize::try_from(input.candidate_limit.unwrap_or(8)).unwrap_or(8);
+        let mut walks = Vec::new();
+        let mut fanout_omitted = 0usize;
+        let mut candidate_omitted = 0usize;
+        let mut depth_omitted = 0usize;
         for start in &starts {
-            let walk = ctx
-                .graph
-                .walk(start, &spec)
-                .map_err(|e| ToolError::internal(format!("walking the graph: {e}")))?;
+            let walk = if navigation {
+                ctx.graph
+                    .walk_navigation(start, &spec, neighbor_limit, candidate_limit)
+            } else {
+                ctx.graph.walk(start, &spec)
+            }
+            .map_err(|e| ToolError::internal(format!("walking the graph: {e}")))?;
             truncated |= walk.truncated;
-            for visit in &walk.visits {
-                for hop in &visit.path {
-                    if !seen_edges.insert(hop.edge.clone()) {
-                        continue;
-                    }
-                    let Some(edge) = ctx.graph.edge(&hop.edge) else {
-                        continue;
-                    };
-                    let target_kind = ctx
-                        .graph
-                        .node(&hop.edge.to)
-                        .and_then(knowell_graph::Node::contract_kind);
-                    let Some(relation) = relation_of(edge.kind, target_kind) else {
-                        continue;
-                    };
-                    // Reserve both endpoints together so a clipped edge cannot
-                    // consume a slot with an orphaned endpoint.
-                    let additional = BTreeSet::from([&hop.edge.from, &hop.edge.to])
-                        .into_iter()
-                        .filter(|id| !local.contains_key(*id))
-                        .count();
-                    if local
-                        .len()
-                        .checked_add(additional)
-                        .is_none_or(|total| total > limit)
-                    {
-                        truncated = true;
-                        continue;
-                    }
-                    let (Some(from), Some(to)) = (
-                        add_node(&hop.edge.from, &mut local, &mut nodes, &mut truncated),
-                        add_node(&hop.edge.to, &mut local, &mut nodes, &mut truncated),
-                    ) else {
-                        continue;
-                    };
-                    edges.push(FlowEdge {
-                        from,
-                        to,
-                        relation,
-                        evidence_type: mcp_evidence(edge.evidence),
-                        resolution: mcp_resolution(edge.resolution),
-                        evidence: ctx.edge_evidence(edge),
-                    });
-                }
-            }
+            fanout_omitted = fanout_omitted.saturating_add(walk.fanout_omitted);
+            candidate_omitted = candidate_omitted.saturating_add(walk.candidate_omitted);
+            depth_omitted = depth_omitted.saturating_add(walk.depth_omitted);
+            walks.push(walk);
         }
-        // The start comes first.
-        if let Some(first_local) = local.get(&first).cloned()
-            && let Some(position) = nodes.iter().position(|n| n.node == first_local)
-        {
-            let start = nodes.remove(position);
-            nodes.insert(0, start);
-        }
+        let assembly = assemble_trace(&ctx, &starts, &walks, navigation, limit, candidate_limit);
+        truncated |= assembly.truncated;
+        candidate_omitted = candidate_omitted.saturating_add(assembly.candidates_omitted);
+        let nodes = assembly.nodes;
+        let edges = assembly.edges;
+        let candidates_returned = assembly.candidates_returned;
         if edges.is_empty() && !truncated {
             gaps.push(Gap::new(
                 GapReason::NoCandidatesInSelectedRef,
-                "no evidenced relation leaves the start in the chosen direction",
+                "no indexed relation matched the selected kinds and direction at this source pin; this does not establish that calls or dependencies are absent",
+            ));
+        }
+        if navigation && candidates_returned > 0 {
+            gaps.push(Gap::new(
+                GapReason::RelationsNotReady,
+                format!(
+                    "{candidates_returned} weak, ambiguous or unresolved candidate edges are shown for inspection only; these edges were not used to carry trace expansion"
+                ),
+            ));
+        }
+        if navigation && (fanout_omitted > 0 || candidate_omitted > 0 || depth_omitted > 0) {
+            gaps.push(Gap::new(
+                GapReason::LimitReached,
+                format!(
+                    "navigation omitted inspected adjacencies: {fanout_omitted} by per-node fanout, {candidate_omitted} by candidate or node budget, {depth_omitted} beyond depth; these counts do not enumerate the unseen neighborhood"
+                ),
             ));
         }
         if truncated {
@@ -733,6 +1008,7 @@ impl Engine {
             });
         }
         let ctx = self.code_graph(&pinned).await?;
+        gaps.extend(graph_overlay_gaps(&pinned));
         let (subject, changed) = match change {
             ChangeSubject::Symbol { symbol } => {
                 let found = self
@@ -851,7 +1127,9 @@ impl Engine {
         let mut truncated = false;
         let mut unresolved = false;
         if !targets.is_empty() {
+            let filter = graph_context_filter(&pinned, EdgeFilter::any(), &mut gaps);
             let spec = ImpactSpec::new(targets.clone())
+                .with_filter(filter)
                 .with_max_depth(input.max_depth.unwrap_or(3))
                 .with_node_budget(limit.saturating_mul(4).max(1));
             let report = ctx
@@ -1394,6 +1672,7 @@ impl Engine {
     ) -> Result<ContractsOutput, ToolError> {
         let pinned = self.resolve_target(&access, &input.target).await?;
         let mut gaps = pinned.gaps.clone();
+        gaps.extend(graph_overlay_gaps(&pinned));
         if let Some(project) = &input.project
             && !pinned.projects.contains_key(project)
             && !pinned.not_indexed.contains(project)
@@ -1720,6 +1999,164 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn missing_call_coverage_is_not_an_absence_claim() {
+        let message = call_coverage_message(&[]).unwrap();
+        assert!(message.contains("not recorded"));
+        assert!(!message.contains("no calls"));
+    }
+
+    #[test]
+    fn call_coverage_uses_call_counters_and_keeps_static_analysis_partial() {
+        let record = knowell_store::analysis::AnalysisCoverage {
+            provider: "syntax".to_owned(),
+            details: serde_json::json!({
+                "call_sites": 2,
+                "calls_written": 1,
+                "calls_ambiguous": 0,
+                "calls_unresolved": 1,
+                "resolved": 100_000,
+                "unresolved": 200_000,
+                "calls_complete": false,
+            }),
+        };
+        let message = call_coverage_message(&[record]).unwrap();
+        assert!(message.contains("2 callee spans observed"));
+        assert!(message.contains("1 unresolved call targets"));
+        assert!(message.contains("whole-file observations"));
+        assert!(!message.contains("100000") && !message.contains("200000"));
+        assert!(message.contains("not a complete caller/callee"));
+    }
+
+    #[test]
+    fn unavailable_or_missing_call_counters_cannot_report_complete_analysis() {
+        for details in [
+            serde_json::json!({"calls_complete": true, "source_unavailable": true, "calls_written": 0}),
+            serde_json::json!({"calls_complete": true, "parse_unavailable": true, "call_sites": 0}),
+            serde_json::json!({"calls_complete": true}),
+            serde_json::json!({"calls_complete": true, "candidate_overflow": 1, "call_sites": 1}),
+        ] {
+            let record = knowell_store::analysis::AnalysisCoverage {
+                provider: "scip".to_owned(),
+                details,
+            };
+            let message = call_coverage_message(&[record]).unwrap();
+            assert!(message.contains("coverage is partial"));
+            assert!(!message.contains("no calls"));
+        }
+    }
+
+    fn trace_fixture(candidate_edges: bool) -> (GraphCtx, Vec<NodeId>) {
+        let project = Name::new("synthetic").unwrap();
+        let symbol = |key: &str| NodeId::symbol(&project, key);
+        let file = NodeId::file(&project, &RepoPath::new("root.rs").unwrap());
+        let mut delta = knowell_graph::GraphDelta::new(project.clone(), 1).add_node(
+            knowell_graph::Node::file(&project, &RepoPath::new("root.rs").unwrap()),
+        );
+        for key in ["start", "a", "aa", "b", "bb"] {
+            delta = delta.add_node(knowell_graph::Node::symbol(&project, key, key));
+        }
+        let evidence = if candidate_edges {
+            knowell_graph::EvidenceType::Heuristic
+        } else {
+            knowell_graph::EvidenceType::Syntactic
+        };
+        for (from, to, kind) in [
+            (symbol("start"), symbol("a"), EdgeKind::Calls),
+            (symbol("start"), symbol("aa"), EdgeKind::Calls),
+            (file.clone(), symbol("b"), EdgeKind::Imports),
+            (file.clone(), symbol("bb"), EdgeKind::Imports),
+        ] {
+            delta = delta.add_edge(
+                &from,
+                &to,
+                knowell_graph::Edge::new(kind, evidence, knowell_graph::Resolution::Resolved),
+            );
+        }
+        let mut graph = CodeGraph::new();
+        graph.apply(delta).unwrap();
+        (
+            GraphCtx {
+                graph: Arc::new(graph),
+                views: BTreeMap::new(),
+            },
+            vec![symbol("start"), file],
+        )
+    }
+
+    #[test]
+    fn navigation_interleaves_starts_before_a_tight_global_node_cap() {
+        let (ctx, starts) = trace_fixture(false);
+        let spec = WalkSpec::new(2, Direction::Outgoing);
+        let walks: Vec<_> = starts
+            .iter()
+            .map(|start| ctx.graph.walk_navigation(start, &spec, 12, 0).unwrap())
+            .collect();
+        let navigation = assemble_trace(&ctx, &starts, &walks, true, 4, 0);
+        assert_eq!(
+            navigation
+                .nodes
+                .iter()
+                .map(|node| node.label.as_str())
+                .collect::<Vec<_>>(),
+            ["start", "root.rs", "a", "b"]
+        );
+        assert_eq!(navigation.edges.len(), 2);
+        assert!(navigation.truncated);
+        let legacy = assemble_trace(&ctx, &starts, &walks, false, 4, 0);
+        assert_eq!(
+            legacy
+                .nodes
+                .iter()
+                .map(|node| node.label.as_str())
+                .collect::<Vec<_>>(),
+            ["start", "root.rs", "a", "aa"]
+        );
+    }
+
+    #[test]
+    fn trace_candidate_cap_is_global_across_starts_and_preserves_endpoints() {
+        let (ctx, starts) = trace_fixture(true);
+        let spec = WalkSpec::new(2, Direction::Outgoing);
+        let walks: Vec<_> = starts
+            .iter()
+            .map(|start| ctx.graph.walk_navigation(start, &spec, 12, 8).unwrap())
+            .collect();
+        let output = assemble_trace(&ctx, &starts, &walks, true, 20, 1);
+        assert_eq!(output.candidates_returned, 1);
+        assert_eq!(output.candidates_omitted, 3);
+        assert!(output.truncated);
+        let nodes: BTreeSet<_> = output.nodes.iter().map(|node| node.node.as_str()).collect();
+        assert!(
+            output
+                .edges
+                .iter()
+                .all(|edge| nodes.contains(edge.from.as_str()) && nodes.contains(edge.to.as_str()))
+        );
+    }
+
+    #[test]
+    fn candidates_clipped_by_final_trace_node_cap_are_counted() {
+        let (ctx, starts) = trace_fixture(true);
+        let spec = WalkSpec::new(2, Direction::Outgoing).with_node_budget(3);
+        let walks: Vec<_> = starts
+            .iter()
+            .map(|start| ctx.graph.walk_navigation(start, &spec, 12, 8).unwrap())
+            .collect();
+        let output = assemble_trace(&ctx, &starts, &walks, true, 3, 8);
+        assert_eq!(output.nodes.len(), 3);
+        assert_eq!(output.candidates_returned, 1);
+        assert_eq!(output.candidates_omitted, 3);
+        assert!(output.truncated);
+        let nodes: BTreeSet<_> = output.nodes.iter().map(|node| node.node.as_str()).collect();
+        assert!(
+            output
+                .edges
+                .iter()
+                .all(|edge| nodes.contains(edge.from.as_str()) && nodes.contains(edge.to.as_str()))
+        );
+    }
 
     #[test]
     fn project_paths_require_a_component_boundary() {

@@ -12,8 +12,10 @@ use time::OffsetDateTime;
 use crate::content::{BATCH_ROWS, split_pins};
 use crate::error::{StoreError, map_write};
 use crate::hierarchy::stored_path;
-use crate::ids::{OccurrenceId, ProjectId, SymbolId, ViewId};
-use crate::types::{OccurrenceRole, from_i32, hash_bytes, hash_from_bytes, to_i32};
+use crate::ids::{OccurrenceId, OrganizationId, ProjectId, SymbolId, ViewId};
+use crate::types::{
+    OccurrenceRole, from_i32, hash_bytes, hash_from_bytes, to_i32, validate_generation,
+};
 use crate::views::{GenerationPin, lock_building};
 
 /// A symbol to register.
@@ -66,6 +68,8 @@ pub struct Occurrence {
     pub view: ViewId,
     /// The occurrence's fields.
     pub occurrence: NewOccurrence,
+    /// Analysis origin: `syntax`, or an explicitly imported `scip:` origin.
+    pub origin: String,
     /// First generation that has it.
     pub valid_from: i64,
     /// First generation that no longer has it (`None` = current).
@@ -281,6 +285,7 @@ struct OccurrenceRow {
     start_line: i32,
     end_line: i32,
     role: OccurrenceRole,
+    origin: String,
     valid_from: i64,
     valid_to: Option<i64>,
 }
@@ -304,6 +309,7 @@ impl TryFrom<OccurrenceRow> for Occurrence {
                 lines,
                 role: row.role,
             },
+            origin: row.origin,
             valid_from: row.valid_from,
             valid_to: row.valid_to,
         })
@@ -320,7 +326,7 @@ pub async fn occurrences_of(
     let (views, generations) = split_pins(pins);
     sqlx::query_as::<_, OccurrenceRow>(
         "SELECT o.id, o.symbol_id, o.view_id, o.path, o.content_hash, o.start_line, o.end_line,
-                o.role, o.valid_from, o.valid_to
+                o.role, o.origin, o.valid_from, o.valid_to
          FROM occurrence o
          JOIN unnest($2::uuid[], $3::bigint[]) AS p(view_id, generation)
            ON p.view_id = o.view_id AND o.valid_from <= p.generation
@@ -338,6 +344,109 @@ pub async fn occurrences_of(
     .collect()
 }
 
+/// Most occurrence rows returned by one [`occurrences_of_page`] call.
+pub const MAX_OCCURRENCES_PAGE_ROWS: u32 = 1000;
+
+#[derive(sqlx::FromRow)]
+struct OccurrenceCursor {
+    view_id: ViewId,
+    path: String,
+    start_line: i32,
+    end_line: i32,
+    role: OccurrenceRole,
+    id: OccurrenceId,
+}
+
+/// Reads at most `limit` occurrences (1–1000) of a tenant-owned symbol in the
+/// selected tenant-owned generations. Order is view, path with PostgreSQL `C`
+/// collation, start line, end line, role and occurrence id. Lines are one-based
+/// and inclusive. Pass the last returned id as `after` with the same scope.
+///
+/// Identical pins are deduplicated; selecting multiple generations of one view
+/// is rejected. A missing, foreign or out-of-scope cursor fails instead of
+/// restarting pagination. Failed generations never supply occurrence rows.
+pub async fn occurrences_of_page(
+    conn: &mut PgConnection,
+    organization: OrganizationId,
+    symbol: SymbolId,
+    pins: &[GenerationPin],
+    after: Option<OccurrenceId>,
+    limit: u32,
+) -> Result<Vec<Occurrence>, StoreError> {
+    if !(1..=MAX_OCCURRENCES_PAGE_ROWS).contains(&limit) {
+        return Err(StoreError::invalid(
+            "occurrence page limit must be 1 to 1000",
+        ));
+    }
+    let pins: Vec<_> = pins
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    for pin in &pins {
+        validate_generation(pin.generation)?;
+    }
+    if pins
+        .iter()
+        .map(|pin| pin.view)
+        .collect::<BTreeSet<_>>()
+        .len()
+        != pins.len()
+    {
+        return Err(StoreError::invalid(
+            "occurrence pagination requires one generation per view",
+        ));
+    }
+    let (views, generations) = split_pins(&pins);
+    let cursor = if let Some(after) = after {
+        Some(sqlx::query_as::<_, OccurrenceCursor>(
+            "SELECT o.view_id, o.path, o.start_line, o.end_line, o.role, o.id
+             FROM occurrence o JOIN symbol s ON s.id = o.symbol_id
+             JOIN project owner ON owner.id = s.project_id
+             JOIN view v ON v.id = o.view_id JOIN project location ON location.id = v.project_id
+             JOIN unnest($4::uuid[], $5::bigint[]) AS p(view_id, generation)
+               ON p.view_id = o.view_id AND o.valid_from <= p.generation
+              AND (o.valid_to IS NULL OR o.valid_to > p.generation)
+             JOIN view_generation g ON g.view_id = p.view_id AND g.generation = p.generation
+             WHERE o.id = $1 AND o.symbol_id = $2 AND owner.organization_id = $3
+               AND location.organization_id = $3 AND g.state <> 'failed'",
+        )
+        .bind(after).bind(symbol).bind(organization).bind(&views).bind(&generations)
+        .fetch_optional(&mut *conn).await?
+        .ok_or_else(|| StoreError::invalid("occurrence cursor is outside the requested symbol and pinned generations; start a new pagination session"))?)
+    } else {
+        None
+    };
+    sqlx::query_as::<_, OccurrenceRow>(
+        "SELECT o.id, o.symbol_id, o.view_id, o.path, o.content_hash, o.start_line, o.end_line,
+                o.role, o.origin, o.valid_from, o.valid_to
+         FROM occurrence o JOIN symbol s ON s.id = o.symbol_id
+         JOIN project owner ON owner.id = s.project_id
+         JOIN view v ON v.id = o.view_id JOIN project location ON location.id = v.project_id
+         JOIN unnest($3::uuid[], $4::bigint[]) AS p(view_id, generation)
+           ON p.view_id = o.view_id AND o.valid_from <= p.generation
+          AND (o.valid_to IS NULL OR o.valid_to > p.generation)
+         JOIN view_generation g ON g.view_id = p.view_id AND g.generation = p.generation
+         WHERE o.symbol_id = $1 AND owner.organization_id = $2 AND location.organization_id = $2
+           AND g.state <> 'failed'
+           AND ($5::uuid IS NULL OR (o.view_id, o.path COLLATE \"C\", o.start_line, o.end_line, o.role, o.id)
+             > ($5::uuid, $6::text COLLATE \"C\", $7::integer, $8::integer, $9::occurrence_role, $10::uuid))
+         ORDER BY o.view_id, o.path COLLATE \"C\", o.start_line, o.end_line, o.role, o.id
+         LIMIT $11",
+    )
+    .bind(symbol).bind(organization).bind(&views).bind(&generations)
+    .bind(cursor.as_ref().map(|cursor| cursor.view_id))
+    .bind(cursor.as_ref().map(|cursor| cursor.path.as_str()))
+    .bind(cursor.as_ref().map(|cursor| cursor.start_line))
+    .bind(cursor.as_ref().map(|cursor| cursor.end_line))
+    .bind(cursor.as_ref().map(|cursor| cursor.role))
+    .bind(cursor.as_ref().map(|cursor| cursor.id))
+    .bind(i64::from(limit))
+    .fetch_all(conn).await?
+    .into_iter().map(TryInto::try_into).collect()
+}
+
 /// Occurrences in one file of a view at a generation, by line.
 pub async fn occurrences_in_file(
     conn: &mut PgConnection,
@@ -345,7 +454,7 @@ pub async fn occurrences_in_file(
     path: &RepoPath,
 ) -> Result<Vec<Occurrence>, StoreError> {
     sqlx::query_as::<_, OccurrenceRow>(
-        "SELECT id, symbol_id, view_id, path, content_hash, start_line, end_line, role,
+        "SELECT id, symbol_id, view_id, path, content_hash, start_line, end_line, role, origin,
                 valid_from, valid_to
          FROM occurrence
          WHERE view_id = $1 AND path = $3
@@ -435,6 +544,7 @@ pub async fn definitions_in_paths(
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Scoped {
     Occurrence,
+    ScipOccurrence,
     Edge,
     Contract,
 }
@@ -450,9 +560,14 @@ pub(crate) async fn replace_scope(
 ) -> Result<(), StoreError> {
     let statements: [&'static str; 3] = match table {
         Scoped::Occurrence => [
-            "DELETE FROM occurrence WHERE view_id = $1 AND valid_from = $2 AND path = ANY($3)",
-            "UPDATE occurrence SET valid_to = NULL WHERE view_id = $1 AND valid_to = $2 AND path = ANY($3)",
-            "UPDATE occurrence SET valid_to = $2 WHERE view_id = $1 AND valid_to IS NULL AND path = ANY($3)",
+            "DELETE FROM occurrence WHERE view_id = $1 AND valid_from = $2 AND path = ANY($3) AND origin = 'syntax'",
+            "UPDATE occurrence SET valid_to = NULL WHERE view_id = $1 AND valid_to = $2 AND path = ANY($3) AND origin = 'syntax'",
+            "UPDATE occurrence SET valid_to = $2 WHERE view_id = $1 AND valid_to IS NULL AND path = ANY($3) AND origin = 'syntax'",
+        ],
+        Scoped::ScipOccurrence => [
+            "DELETE FROM occurrence WHERE view_id = $1 AND valid_from = $2 AND origin = ANY($3)",
+            "UPDATE occurrence SET valid_to = NULL WHERE view_id = $1 AND valid_to = $2 AND origin = ANY($3)",
+            "UPDATE occurrence SET valid_to = $2 WHERE view_id = $1 AND valid_to IS NULL AND origin = ANY($3)",
         ],
         Scoped::Edge => [
             "DELETE FROM edge WHERE view_id = $1 AND valid_from = $2 AND origin = ANY($3)",

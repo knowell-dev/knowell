@@ -58,6 +58,20 @@ pub struct TraceFlowInput {
     #[schemars(range(min = 1, max = 200))]
     #[schemars(description = "default 50")]
     pub limit: Option<u32>,
+    /// Use precision-gated, bounded navigation rather than a generic graph walk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "default false; precise routes and candidate leaves")]
+    pub navigation: Option<bool>,
+    /// Maximum strong neighbors expanded per node in navigation (default 12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 200))]
+    #[schemars(description = "default 12; navigation only")]
+    pub neighbor_limit: Option<u32>,
+    /// Maximum uncertain candidate edges returned per trace (default 8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0, max = 200))]
+    #[schemars(description = "default 8; navigation only")]
+    pub candidate_limit: Option<u32>,
     /// Pending trace to collect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(description = "Collect a pending trace")]
@@ -97,6 +111,18 @@ impl Validate for TraceFlowInput {
         }
         check_range("max_depth", self.max_depth, 1, limits::MAX_DEPTH)?;
         check_len("relations", self.relations.len(), limits::MAX_LIST_ITEMS)?;
+        check_range("neighbor_limit", self.neighbor_limit, 1, limits::MAX_LIMIT)?;
+        check_range(
+            "candidate_limit",
+            self.candidate_limit,
+            0,
+            limits::MAX_LIMIT,
+        )?;
+        if (self.neighbor_limit.is_some() || self.candidate_limit.is_some())
+            && self.navigation != Some(true)
+        {
+            return Err(invalid("navigation budgets require `navigation: true`"));
+        }
         check_limit(self.limit, limits::MAX_LIMIT)
     }
 }
@@ -122,7 +148,8 @@ pub struct TraceFlowOutput {
     /// Edges between nodes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edges: Vec<FlowEdge>,
-    /// The trace was cut by `max_depth` or `limit`.
+    /// The trace was clipped by a node or walk budget. Navigation additionally
+    /// reports omissions at depth, per-node fanout or candidate limits.
     #[serde(default)]
     pub truncated: bool,
     /// Present while the trace is still being computed.

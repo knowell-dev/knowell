@@ -242,7 +242,7 @@ pub fn reasons(why: &[MatchReason]) -> String {
 }
 
 /// Wire name of a unit-variant enum (its serde string), or `?`.
-fn enum_str<T: serde::Serialize>(value: &T) -> String {
+pub(crate) fn enum_str<T: serde::Serialize>(value: &T) -> String {
     match serde_json::to_value(value) {
         Ok(serde_json::Value::String(s)) => s,
         _ => "?".to_owned(),
@@ -619,6 +619,10 @@ impl ToolOutput for FetchOutput {
 }
 
 impl ToolOutput for InspectSymbolOutput {
+    fn render_source(&self) -> String {
+        crate::source_render::inspect_symbol(self)
+    }
+
     fn render(&self) -> String {
         let mut out = String::new();
         outln!(out, "inspect_symbol: {} symbols", self.symbols.len());
@@ -672,6 +676,10 @@ impl ToolOutput for InspectSymbolOutput {
 }
 
 impl ToolOutput for TraceFlowOutput {
+    fn render_source(&self) -> String {
+        crate::source_render::trace_flow(self)
+    }
+
     fn render(&self) -> String {
         let mut out = String::new();
         outln!(
@@ -727,6 +735,10 @@ impl ToolOutput for TraceFlowOutput {
 }
 
 impl ToolOutput for AnalyzeImpactOutput {
+    fn render_source(&self) -> String {
+        crate::source_render::impact(self)
+    }
+
     fn render(&self) -> String {
         let mut out = String::new();
         outln!(out, "analyze_impact: {}", self.subject);
@@ -1253,6 +1265,7 @@ mod tests {
             })
             .collect();
         SearchOutput {
+            include_handles: false,
             query_class: QueryClass::Behavior,
             hits,
             memory_hits: vec![],
@@ -1429,6 +1442,7 @@ mod tests {
     #[test]
     fn empty_results_get_a_reason() {
         let mut output = SearchOutput {
+            include_handles: false,
             diagnostics: None,
             budget: None,
             query_class: QueryClass::Behavior,

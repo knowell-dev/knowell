@@ -32,7 +32,7 @@ let watch = indexer.watch(shutdown.clone())?;
     ▼
  sync ── resolve target (git refs, exact name only; directory → tree hash)
     │      missing ref → view failed with the reason, nothing else indexed
-    │      same as active + matching content-policy manifest → up to date
+    │      same as active + matching content and syntax policies → up to date
     ▼
  index.text (T0) ── begin (or resume) generation g
     │   plan: initial | incremental (git diff) | rewrite (full re-walk) | rebuild | directory
@@ -126,6 +126,13 @@ complete". Run alone; under parallel test load the numbers roughly double. Stage
 | forced (`rebuild_view`, reconciliation) or content policy changed | **rebuild**: full re-walk ignoring the blob cache |
 | plain directory (`track = "worktree"`, no `.git`) | **directory**: walk the directory |
 
+A generation manifest also records the T1 syntax evidence policy. Older manifests
+lack that field and require one refresh of unchanged stored text for definitions,
+source labels, references and coverage. This refresh does not force content reads or
+rewrite unchanged chunks, embedding inputs or vectors. Completed directory builds
+resume only when both the saved manifest and stored file tree match the requested
+tree and content policy; changed trees still supersede older builds.
+
 Remote-branch, tag and commit views are read from git objects; the user's checkout, index
 and branch are never touched. Single files (overlays, re-reads of directory sources) are
 read with `knowell_source::read_file`, the same pipeline as the walkers.
@@ -176,11 +183,89 @@ directory and language family. Targets are functions, methods, types, constants 
 | more than 4 candidates, or no match | — | — | nothing |
 
 Edges start at the innermost enclosing symbol (or the file) and carry the name, scope,
-first line and use count as evidence. An occurrence with role `reference` therefore never
-presents a guess. Bounds per file: 20 000 distinct identifier uses, 2 000 000 syntax nodes,
-1 000 reference edges, 2 000 reference occurrences, 64 imported files, directories of at
-most 256 same-family files; what is cut is logged. No semantic resolution (shadowing,
-overloads across files, re-exports, dynamic dispatch) happens here.
+source byte span, line and use count as evidence. Identifier roles distinguish declarations,
+types, qualifiers, values and actual callees. Rust local bindings and parameters suppress
+unrelated global-name guesses; initializer calls and same-line recursive calls remain
+observable. Conventional `mod`, `crate`, `self`, `super`, grouped aliases and qualified
+static paths use bounded project-file resolution. Missing, guarded, external or wildcard
+imports stop an unrelated directory-name fallback. Unknown receivers, macros, re-exports,
+custom Cargo roots and feature selection remain unresolved.
+
+Syntactic `calls` are restricted to callee syntax with a supported unique callable
+declaration. They retain `syntactic` evidence and never establish runtime dispatch or
+compiler completeness. T1 persists exact-generation coverage even when it emits no edges.
+Bounds per file: 20 000 identifier uses, 2 000 000 syntax nodes, 1 000 reference edges,
+2 000 reference occurrences, 64 imported files, directories of at most 256 same-family
+files. Cuts and unsupported analysis are recorded; an empty graph does not prove no calls.
+
+### Explicit SCIP imports
+
+An existing external SCIP artifact can enrich a new generation with compiler-resolved
+references and implementation relationships. Knowell does not launch a compiler or
+indexer implicitly. The caller must capture its build manifest **when the external index
+is produced**, rather than attaching today's file hashes to an older artifact.
+
+```sh
+know index --project engine --scip-index artifacts/index.scip --scip-manifest artifacts/index.inputs.json
+```
+
+Both flags and one explicit project are required. The manifest is strict JSON:
+
+```json
+{
+  "source_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "artifact_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "tool_name": "rust-analyzer",
+  "tool_version": "1.0",
+  "compiler_identity": "1111111111111111111111111111111111111111111111111111111111111111",
+  "build_inputs": {
+    "src/lib.rs": "2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "documents": {
+    "src/lib.rs": "2222222222222222222222222222222222222222222222222222222222222222"
+  }
+}
+```
+
+All revisions and digests above are placeholders. Digests use BLAKE3 over the encoded
+artifact or original file bytes. Paths are relative to the selected project root.
+`build_inputs` contains every document and the source, manifests and lockfiles represented
+by that project; each must be admitted by policy and match the pinned generation.
+`compiler_identity` is a digest of the compiler, options and other dependency inputs,
+including inputs outside that file set. Raw arguments, environment values and secrets
+must not be put in the manifest. The tool name/version must match SCIP metadata.
+
+The import flow stages sanitized data durably, queues a forced analysis generation,
+applies the attached artifact after T1 definitions, and activates through the ordinary
+fence. `Indexer::rebuild_view_with_scip` exposes the same staged API. A mismatched revision,
+artifact, tool identity or source/build-input hash is an error; an existing good generation
+keeps serving. Restarted workers resume the stored import without reopening the original
+artifact. Ordinary later generations clear its `scip:` edges and occurrences, even when a
+particular file is unchanged. Historical generation pins retain their original evidence.
+
+Prepared staging drops SCIP text, documentation, project-root URIs and raw monikers. It
+keeps bounded positions, document hashes, indexer identity and relationship indexes.
+Compiler references are stored separately from syntactic occurrences. Edges carry exact
+view/generation, source revision/hash, artifact and compiler-input identity. Coverage is
+also exact-generation and reports unknown encodings, unavailable source and syntax cuts.
+
+UTF-8, UTF-16 and UTF-32 coordinates are converted without splitting characters. Unknown
+position encoding and a redacted body that differs from original bytes cannot validate
+compiler positions; those observations remain unavailable. A reference becomes a precise
+`calls` edge only when the exact span is an AST callee and the compiler target is a mapped
+function, method or constructor. A variable or function-pointer binding is a reference,
+not proof of the invoked function body. Method evidence names the static symbol at the
+call site and does not establish dynamic runtime dispatch.
+
+Compiler monikers that collapse onto an ambiguous syntactic identity (such as multiple
+trait methods sharing the same parser key) are not promoted to precise local symbols.
+External targets without a unique indexed local definition are omitted and counted.
+Neither imported references nor implementation relationships claim exhaustive coverage.
+
+Default import limits are 64 MiB for encoded or prepared data, 100 000 documents/build
+inputs, 2 000 000 occurrences, 500 000 symbols, 256 relationships per symbol, 128 MiB of
+aggregate verified source, and 1 000 000 precise edges. Exceeding a bound is an explicit
+failure. Source parsing additionally obeys the ordinary per-file and parser limits.
 
 ### Dependents: import and reference re-resolution
 
@@ -355,10 +440,13 @@ them costs a full read of the next build.
 ## Known limitations
 
 - A renamed file is embedded again (its prepared input contains the path).
-- References are name-based within a file, its imports and its directory; there is no
-  semantic resolution. An unchanged file whose identifiers could match a *new* definition
-  elsewhere is only re-resolved through an import of the new file, not by a project-wide
-  search. More than 500 dependents in one build: the rest keep their edges until they change.
+- Ordinary references are conservative source analysis, not compiler resolution. Rust
+  module/import and local-scope handling cover supported forms; macros, custom roots,
+  feature selection and dynamic dispatch still need additional evidence. SCIP is explicit,
+  source-bound and incomplete; it is not automatically regenerated after a source change.
+  An unchanged file whose identifiers could match a new definition elsewhere is only
+  re-resolved through supported dependent/import rules, not a project-wide semantic scan.
+  More than 500 dependents in one build: remaining files require later reanalysis.
 - Each exact-tier file is parsed twice in T1 (definitions, then identifiers) and once more
   by the link packs in T3.
 - Link rows of other projects are refreshed only when those projects are rebuilt; a cold

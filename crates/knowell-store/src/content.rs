@@ -21,8 +21,8 @@ use crate::views::{GenerationPin, lock_building};
 mod metadata;
 mod structure;
 pub use metadata::{
-    FileMetadata, files_metadata_at_page, files_metadata_in_paths, get_content_bounded,
-    retained_source_commit_collision,
+    FileMetadata, FileMetadataScope, files_metadata_at_page, files_metadata_at_scope_page,
+    files_metadata_in_paths, get_content_bounded, retained_source_commit_collision,
 };
 pub use structure::{
     ChunkKey, ChunkStructure, SourceRange, chunk_structures, chunk_structures_of,

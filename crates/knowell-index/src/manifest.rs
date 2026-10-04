@@ -69,6 +69,10 @@ pub(crate) struct Manifest {
     /// Hash of the content policy the generation was built with (excludes,
     /// size limit, project root); a different policy invalidates the cache.
     pub(crate) policy: ContentHash,
+    /// T1 syntax evidence policy. Missing in older manifests means the
+    /// generation needs syntax-only refresh, without changing content inputs.
+    #[serde(default)]
+    pub(crate) syntax_policy: u32,
     /// Tree hash of the indexed files (see [`crate::merkle`]).
     pub(crate) tree_hash: ContentHash,
     /// Entries sorted by path.
@@ -95,6 +99,7 @@ impl Manifest {
             generation,
             commit,
             policy,
+            syntax_policy: crate::analyze::SYNTAX_POLICY_VERSION,
             tree_hash,
             entries,
         }
@@ -106,6 +111,11 @@ impl Manifest {
             .iter()
             .filter_map(|e| e.blob.as_deref().map(|b| (b, &e.state)))
             .collect()
+    }
+
+    /// Whether unchanged files need current generation-scoped syntax evidence.
+    pub(crate) fn needs_syntax_refresh(&self) -> bool {
+        self.syntax_policy != crate::analyze::SYNTAX_POLICY_VERSION
     }
 }
 
@@ -219,6 +229,38 @@ mod tests {
         assert!(load(dir.path(), view, 1).is_none());
         std::fs::write(vdir.join("manifest-2.json"), b"").unwrap();
         assert!(load(dir.path(), view, 2).is_none());
+    }
+
+    #[test]
+    fn legacy_manifest_requires_syntax_refresh_without_losing_blob_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let view = ViewId(uuid::Uuid::nil());
+        let current = Manifest::new(
+            view,
+            1,
+            Some("ab".repeat(20)),
+            ContentHash::of(b"policy"),
+            vec![Entry {
+                path: p("src/tiny.rs"),
+                blob: Some("cd".repeat(20)),
+                state: EntryState::Indexed {
+                    hash: ContentHash::of(b"fn tiny() {}"),
+                },
+            }],
+        );
+        assert!(!current.needs_syntax_refresh());
+        save(dir.path(), &current).unwrap();
+        let manifest_path = view_dir(dir.path(), view).join(file_name(1));
+        let mut legacy = serde_json::to_value(&current).unwrap();
+        legacy.as_object_mut().unwrap().remove("syntax_policy");
+        std::fs::write(&manifest_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let restored = load(dir.path(), view, 1).unwrap();
+        assert_eq!(restored.syntax_policy, 0);
+        assert!(restored.needs_syntax_refresh());
+        assert_eq!(restored.policy, current.policy);
+        assert_eq!(restored.tree_hash, current.tree_hash);
+        assert_eq!(restored.entries, current.entries);
+        assert_eq!(restored.blob_cache(), current.blob_cache());
     }
 
     #[test]

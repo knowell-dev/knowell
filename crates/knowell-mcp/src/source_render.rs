@@ -7,11 +7,12 @@ use std::fmt::Write as _;
 use knowell_core::LineRange;
 
 use crate::ids::ResultId;
-use crate::model::{Evidence, Gap, GapReason, IndexState, ViewLayer};
+use crate::model::{Evidence, Gap, GapReason, IndexState, JobRef, MatchReason, ViewLayer};
 use crate::text::UntrustedText;
 use crate::tools::{
-    BuildContextOutput, ContextEntry, EntryKind, FetchOutput, MemoryRecord, OpenWorkspaceOutput,
-    SearchHit, SearchOutput, VersionStatus,
+    AnalyzeImpactOutput, BuildContextOutput, ContextEntry, EntryKind, FetchOutput, ImpactItem,
+    InspectSymbolOutput, MemoryRecord, OpenWorkspaceOutput, SearchHit, SearchOutput,
+    TraceFlowOutput, VersionStatus,
 };
 
 /// Whole agent-facing text cap, in UTF-8 bytes. The estimated-token cap is
@@ -84,7 +85,7 @@ fn scope(evidence: &Evidence, number: usize, pins: &[&Evidence]) -> String {
         }
     );
     if evidence.layer == ViewLayer::Personal {
-        text.push_str(" · personal source version pinned by fetch id");
+        text.push_str(" · personal source");
     }
     if evidence.index_state != IndexState::Current {
         let _ = write!(text, " · index {}", evidence.index_state.as_str());
@@ -113,6 +114,14 @@ fn location(out: &mut String, evidence: &Evidence, lines: Option<LineRange>, pin
     let _ = write!(out, "{}", label(&evidence.path));
     if let Some(lines) = lines {
         let _ = write!(out, ":{}–{}", lines.start(), lines.end());
+    }
+    if let Some(symbol) = &evidence.symbol {
+        let _ = write!(out, " · {}", label(symbol));
+    }
+    if evidence.layer == ViewLayer::Personal {
+        // HEAD alone does not identify saved changes. This compact display
+        // prefix supplements the pin; exact replay still needs a fetch ID.
+        let _ = write!(out, " · content {}", evidence.content_hash.short());
     }
     if pins.len() > 1
         && let Some(index) = pins.iter().position(|pin| same_pin(pin, evidence))
@@ -226,7 +235,7 @@ fn limitations(gaps: &[Gap], retrieval_only: bool) -> Vec<String> {
             GapReason::NoReferenceResolutionForLanguage => {
                 "Call/reference links are structural; compiler resolution is unavailable.".into()
             }
-            GapReason::LimitReached => {
+            GapReason::LimitReached if retrieval_only => {
                 "More matches exist; raise limit or narrow the query.".into()
             }
             _ => match &gap.project {
@@ -245,6 +254,53 @@ fn notes(out: &mut String, messages: &[String]) {
     for message in messages {
         let _ = writeln!(out, "Note: {message}");
     }
+}
+
+/// Retrieval signals describe acquisition, never code behavior or dependencies.
+/// The enclosing symbol is already in the location; do not repeat it here.
+fn match_signals(why: &[MatchReason]) -> String {
+    let mut signals = Vec::new();
+    for reason in why {
+        let signal = match reason {
+            MatchReason::ExactSymbol { .. } => "exact symbol".into(),
+            MatchReason::ExactPath => "exact path".into(),
+            MatchReason::Lexical { terms, .. } => {
+                if terms.is_empty() {
+                    "lexical".into()
+                } else {
+                    format!(
+                        "lexical({})",
+                        terms.iter().map(label).collect::<Vec<_>>().join(", ")
+                    )
+                }
+            }
+            MatchReason::Semantic { .. } => "vector".into(),
+            MatchReason::GraphPath { hops } => {
+                if hops.is_empty() {
+                    continue;
+                }
+                hops.iter()
+                    .map(|hop| {
+                        format!(
+                            "{} -{}-> {} [{}, {}]",
+                            label(&hop.from),
+                            crate::render::enum_str(&hop.relation),
+                            label(&hop.to),
+                            crate::render::enum_str(&hop.evidence_type),
+                            crate::render::enum_str(&hop.resolution)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            }
+            MatchReason::TestReference { test } => format!("test reference({})", label(test)),
+            MatchReason::Contract { contract } => format!("contract({})", label(contract)),
+        };
+        if !signals.contains(&signal) {
+            signals.push(signal);
+        }
+    }
+    signals.join("; ")
 }
 
 fn memory(out: &mut String, record: &MemoryRecord) {
@@ -324,19 +380,33 @@ pub(crate) fn workspace(output: &OpenWorkspaceOutput) -> String {
     out
 }
 
-fn search_hit(hit: &SearchHit, pins: &[&Evidence]) -> String {
+fn search_hit(hit: &SearchHit, pins: &[&Evidence], include_handles: bool) -> String {
     let mut out = String::new();
-    let shown = hit.snippet_lines.or_else(|| {
-        hit.snippet
-            .as_ref()
-            .and_then(|snippet| represented_lines(snippet.text(), &hit.evidence))
-    });
+    let shown = if hit.snippet.is_none() {
+        // A locator names the original acquisition anchor. It does not claim
+        // that any body was read or that the whole declaration is included.
+        Some(hit.evidence.lines)
+    } else {
+        hit.snippet_lines.or_else(|| {
+            hit.snippet
+                .as_ref()
+                .and_then(|snippet| represented_lines(snippet.text(), &hit.evidence))
+        })
+    };
     location(&mut out, &hit.evidence, shown, pins);
-    let _ = writeln!(
-        out,
-        "Fetch id: {}",
-        handle(hit.snippet_id.as_ref().unwrap_or(&hit.id))
-    );
+    if hit.snippet.is_none() {
+        let signals = match_signals(&hit.evidence.why);
+        if !signals.is_empty() {
+            let _ = writeln!(out, "Match: {signals}");
+        }
+    }
+    if include_handles {
+        let _ = writeln!(
+            out,
+            "Fetch id: {}",
+            handle(hit.snippet_id.as_ref().unwrap_or(&hit.id))
+        );
+    }
     if let Some(snippet) = &hit.snippet {
         if hit.snippet_id.is_none()
             && let Some(lines) = shown
@@ -345,7 +415,7 @@ fn search_hit(hit: &SearchHit, pins: &[&Evidence]) -> String {
         {
             let _ = writeln!(
                 out,
-                "Shown context extends beyond the fetch id's anchor range {}–{}.",
+                "Shown context extends beyond the matched anchor range {}–{}.",
                 hit.evidence.lines.start(),
                 hit.evidence.lines.end()
             );
@@ -355,12 +425,12 @@ fn search_hit(hit: &SearchHit, pins: &[&Evidence]) -> String {
                 out.push_str("No continuation handle supplied; context_lines can request surrounding source.\n");
             }
         } else if shown != Some(hit.evidence.lines) && hit.snippet_id.is_none() {
-            out.push_str("Excerpt; fetch id reads the pinned source range.\n");
+            out.push_str("Excerpt of the matched source range.\n");
         }
         body(&mut out, snippet, language(hit.evidence.path.as_str()));
         continuations(&mut out, &hit.continuation_ids);
     } else {
-        out.push_str("Source body not included; fetch this id to read it.\n\n");
+        out.push('\n');
     }
     out
 }
@@ -370,6 +440,17 @@ pub(crate) fn search(output: &SearchOutput) -> String {
     let all_pins = pins(output.hits.iter().map(|hit| &hit.evidence));
     let cap = response_cap(requested);
     let mut messages = limitations(&output.gaps, true);
+    if output.hits.iter().any(|hit| hit.snippet.is_none()) {
+        messages.insert(
+            0,
+            if output.include_handles {
+                "Locator entries show matched anchor ranges without source bodies; pass their fetch IDs to read the pinned source."
+            } else {
+                "Locator entries show matched anchor ranges without source bodies; include_handles=true returns exact pinned fetch IDs."
+            }
+            .into(),
+        );
+    }
     if output.hits.is_empty() && output.memory_hits.is_empty() && messages.is_empty() {
         messages.insert(
             0,
@@ -385,8 +466,14 @@ pub(crate) fn search(output: &SearchOutput) -> String {
         messages.push("More matches exist; raise limit or narrow the query.".into());
     }
     if let Some(diagnostics) = &output.diagnostics {
-        messages.push(format!("Search timing (ms): total {}; preparation {}; exact {}; lexical {}; semantic {}; fusion/expansion {}; source read {}.", diagnostics.elapsed_ms, diagnostics.preparation_ms, diagnostics.exact_ms, diagnostics.lexical_ms, diagnostics.semantic_ms, diagnostics.fusion_expansion_ms, diagnostics.snippet_read_ms));
-        messages.push(format!("Search work: {} views; lexical {} probes, {} file hits, {} spans; ANN {} probes, {} neighbors; embedding {} calls, {} failed; exact-path embedding bypass {}.", diagnostics.prepared_views, diagnostics.lexical_queries, diagnostics.lexical_file_hits, diagnostics.lexical_spans, diagnostics.semantic_queries, diagnostics.semantic_neighbors, diagnostics.embedding_calls, diagnostics.embedding_failures, diagnostics.exact_path_embedding_bypassed));
+        messages.push(format!("Search timing (ms): total {}; preparation {}; exact {}; lexical {}; semantic {}; fusion/expansion {}; source acquisition/packing {}.", diagnostics.elapsed_ms, diagnostics.preparation_ms, diagnostics.exact_ms, diagnostics.lexical_ms, diagnostics.semantic_ms, diagnostics.fusion_expansion_ms, diagnostics.snippet_read_ms));
+        messages.push(format!("Search work: {} views, {} file occurrences; lexical {} probes, {} file hits, {} spans; ANN {} probes, {} neighbors; embedding {} calls, {} failed; exact-path embedding bypass {}.", diagnostics.prepared_views, diagnostics.prepared_file_occurrences, diagnostics.lexical_queries, diagnostics.lexical_file_hits, diagnostics.lexical_spans, diagnostics.semantic_queries, diagnostics.semantic_neighbors, diagnostics.embedding_calls, diagnostics.embedding_failures, diagnostics.exact_path_embedding_bypassed));
+        messages.push(format!(
+            "Source acquisition: locator {}; {} hydrated paths, {} hydration skipped paths.",
+            diagnostics.locator_only,
+            diagnostics.source_hydrated_paths,
+            diagnostics.source_hydration_skipped_paths
+        ));
         if let Some(usage) = &diagnostics.embedding {
             messages.push(format!(
                 "Query embedding usage: {} {} input tokens; {} requests, {} retries, {} ms.",
@@ -400,7 +487,7 @@ pub(crate) fn search(output: &SearchOutput) -> String {
                 usage.retries,
                 usage.operation_ms
             ));
-        } else {
+        } else if diagnostics.embedding_calls > 0 {
             messages.push("Query embedding usage was not supplied.".into());
         }
     }
@@ -420,7 +507,7 @@ pub(crate) fn search(output: &SearchOutput) -> String {
         {
             None
         } else {
-            Some(search_hit(hit, &all_pins))
+            Some(search_hit(hit, &all_pins, output.include_handles))
         },
     });
     let memories = output.memory_hits.iter().map(|hit| SourceBlock {
@@ -474,6 +561,223 @@ pub(crate) fn fetch(output: &FetchOutput) -> String {
         body(&mut out, &item.content, item.language.as_deref());
         continuations(&mut out, &item.continuation_ids);
     }
+    notes(&mut out, &limitations(&output.gaps, false));
+    out
+}
+
+fn job_note(out: &mut String, job: Option<&JobRef>) {
+    if let Some(job) = job {
+        let _ = writeln!(
+            out,
+            "Note: Job {} is {}; poll with job_id after {} ms.",
+            label(&job.job_id),
+            job.state.as_str(),
+            job.poll_after_ms
+        );
+    }
+}
+
+pub(crate) fn inspect_symbol(output: &InspectSymbolOutput) -> String {
+    let all_pins = pins(output.symbols.iter().flat_map(|symbol| {
+        std::iter::once(&symbol.definition).chain(
+            symbol
+                .references
+                .iter()
+                .chain(&symbol.implementations)
+                .chain(&symbol.tests)
+                .map(|link| &link.evidence),
+        )
+    }));
+    let mut out = format!("inspect_symbol: {} symbols\n\n", output.symbols.len());
+    headers(&mut out, &all_pins);
+    for symbol in &output.symbols {
+        let _ = writeln!(
+            out,
+            "{} {} · {} · {} analysis",
+            crate::render::enum_str(&symbol.kind),
+            label(&symbol.qualified_name),
+            label(&symbol.language),
+            crate::render::enum_str(&symbol.analysis)
+        );
+        location(
+            &mut out,
+            &symbol.definition,
+            Some(symbol.definition.lines),
+            &all_pins,
+        );
+        let _ = writeln!(out, "Fetch id: {}\n", handle(&symbol.id));
+        for (heading, extracted) in [
+            ("Extracted signature", symbol.signature.as_ref()),
+            ("Documentation", symbol.doc.as_ref()),
+        ] {
+            if let Some(extracted) = extracted {
+                let _ = writeln!(out, "{heading}:");
+                body(&mut out, extracted, Some(&symbol.language));
+            }
+        }
+        for (heading, links) in [
+            ("References", &symbol.references),
+            ("Implementations", &symbol.implementations),
+            ("Tests", &symbol.tests),
+        ] {
+            if links.is_empty() {
+                continue;
+            }
+            let _ = writeln!(out, "{heading}:");
+            for link in links {
+                let _ = writeln!(
+                    out,
+                    "{} [{}, {}]",
+                    crate::render::enum_str(&link.relation),
+                    crate::render::enum_str(&link.evidence_type),
+                    crate::render::enum_str(&link.resolution)
+                );
+                location(
+                    &mut out,
+                    &link.evidence,
+                    Some(link.evidence.lines),
+                    &all_pins,
+                );
+                let _ = writeln!(out, "Fetch id: {}", handle(&link.id));
+            }
+            out.push('\n');
+        }
+    }
+    if output
+        .symbols
+        .iter()
+        .any(|symbol| !symbol.references_complete)
+    {
+        out.push_str("Note: References may be incomplete.\n");
+    }
+    notes(&mut out, &limitations(&output.gaps, false));
+    out
+}
+
+pub(crate) fn trace_flow(output: &TraceFlowOutput) -> String {
+    let all_pins = pins(
+        output
+            .nodes
+            .iter()
+            .filter_map(|node| node.evidence.as_ref())
+            .chain(output.edges.iter().flat_map(|edge| &edge.evidence)),
+    );
+    let mut out = format!(
+        "trace_flow: {} nodes, {} edges\n\n",
+        output.nodes.len(),
+        output.edges.len()
+    );
+    headers(&mut out, &all_pins);
+    for node in &output.nodes {
+        let _ = writeln!(
+            out,
+            "{} · {} · {}",
+            label(&node.node),
+            crate::render::enum_str(&node.kind),
+            label(&node.label)
+        );
+        if let Some(evidence) = &node.evidence {
+            location(&mut out, evidence, Some(evidence.lines), &all_pins);
+        } else if let Some(project) = &node.project {
+            let _ = writeln!(out, "Project: {}", label(project));
+        }
+        if let Some(id) = &node.id {
+            let _ = writeln!(out, "Fetch id: {}", handle(id));
+        }
+        out.push('\n');
+    }
+    if !output.edges.is_empty() {
+        out.push_str("Relations (node labels above are local to this result):\n");
+    }
+    for edge in &output.edges {
+        let _ = writeln!(
+            out,
+            "{} -{}-> {} [{}, {}]",
+            label(&edge.from),
+            crate::render::enum_str(&edge.relation),
+            label(&edge.to),
+            crate::render::enum_str(&edge.evidence_type),
+            crate::render::enum_str(&edge.resolution)
+        );
+        for evidence in &edge.evidence {
+            out.push_str("  at ");
+            location(&mut out, evidence, Some(evidence.lines), &all_pins);
+        }
+        if edge.evidence.is_empty() {
+            out.push_str("  No source location supplied for this relation.\n");
+        }
+    }
+    if output.truncated {
+        out.push_str("Note: Trace was cut by max_depth or limit.\n");
+    }
+    job_note(&mut out, output.job.as_ref());
+    notes(&mut out, &limitations(&output.gaps, false));
+    out
+}
+
+fn impact_items(out: &mut String, heading: &str, items: &[ImpactItem], all_pins: &[&Evidence]) {
+    if items.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "{heading}:");
+    for item in items {
+        let _ = writeln!(
+            out,
+            "{} {} · {} hops",
+            crate::render::enum_str(&item.kind),
+            label(&item.name),
+            item.distance
+        );
+        location(out, &item.evidence, Some(item.evidence.lines), all_pins);
+        let _ = writeln!(out, "Fetch id: {}", handle(&item.id));
+        let signals = match_signals(&item.evidence.why);
+        if !signals.is_empty() {
+            let _ = writeln!(out, "Evidence: {signals}");
+        }
+        out.push('\n');
+    }
+}
+
+pub(crate) fn impact(output: &AnalyzeImpactOutput) -> String {
+    let all_pins = pins(
+        output
+            .changed
+            .iter()
+            .chain(&output.impacted)
+            .chain(&output.tests)
+            .map(|item| &item.evidence)
+            .chain(
+                output
+                    .risk
+                    .iter()
+                    .flat_map(|risk| &risk.factors)
+                    .flat_map(|factor| &factor.evidence),
+            ),
+    );
+    let mut out = format!("analyze_impact: {}\n\n", label(&output.subject));
+    headers(&mut out, &all_pins);
+    impact_items(&mut out, "Changed", &output.changed, &all_pins);
+    impact_items(&mut out, "Impacted", &output.impacted, &all_pins);
+    impact_items(&mut out, "Tests", &output.tests, &all_pins);
+    if let Some(risk) = &output.risk {
+        let _ = writeln!(out, "Risk: {}", crate::render::enum_str(&risk.level));
+        for factor in &risk.factors {
+            let _ = writeln!(
+                out,
+                "{}: {}",
+                crate::render::enum_str(&factor.code),
+                label(&factor.message)
+            );
+            for evidence in &factor.evidence {
+                out.push_str("  at ");
+                location(&mut out, evidence, Some(evidence.lines), &all_pins);
+            }
+        }
+    }
+    if output.truncated {
+        out.push_str("Note: Impact analysis was cut by max_depth or limit.\n");
+    }
+    job_note(&mut out, output.job.as_ref());
     notes(&mut out, &limitations(&output.gaps, false));
     out
 }
@@ -694,8 +998,14 @@ mod tests {
 
     use super::*;
     use crate::ids::CommitId;
-    use crate::model::FreshnessTier;
-    use crate::tools::{ContextSection, FetchedItem, HitKind, QueryClass, SearchHit, TokenBudget};
+    use crate::model::{
+        AnalysisLevel, EvidenceType, FreshnessTier, GraphHop, RelationKind, Resolution,
+    };
+    use crate::tools::{
+        ContextSection, FetchedItem, FlowEdge, FlowNode, HitKind, ImpactKind, NodeKind, QueryClass,
+        Risk, RiskCode, RiskFactor, RiskLevel, SearchHit, SymbolInfo, SymbolKind, SymbolLink,
+        TokenBudget,
+    };
 
     fn evidence(path: &str, start: u32, end: u32) -> Evidence {
         Evidence {
@@ -798,6 +1108,7 @@ mod tests {
             )],
             diagnostics: None,
             budget: None,
+            include_handles: true,
         };
         let rendered = search(&output);
         assert!(rendered.contains("src/reader.rs:11–13"));
@@ -830,11 +1141,266 @@ mod tests {
             gaps: vec![],
             diagnostics: None,
             budget: None,
+            include_handles: true,
         };
         let rendered = search(&output);
         assert!(rendered.contains("Fetch id: kn:shown#L11-L13"));
         assert!(!rendered.contains("Fetch id: kn:original#L12-L12"));
         assert!(!rendered.contains("anchor range"));
+    }
+
+    #[test]
+    fn locator_keeps_anchor_symbol_signals_and_one_shared_pin_without_repeated_handles() {
+        let mut first = evidence("src/reader.rs", 12, 16);
+        first.symbol = Some("Reader.read".into());
+        first.why = vec![
+            MatchReason::Lexical {
+                terms: vec!["read".into(), "limit".into()],
+                rank: 1,
+            },
+            MatchReason::Semantic {
+                profile: "synthetic-profile".into(),
+                rank: 2,
+            },
+        ];
+        let mut second = evidence("tests/reader.rs", 20, 28);
+        second.why = vec![MatchReason::ExactPath];
+        let hits = [first, second]
+            .into_iter()
+            .enumerate()
+            .map(|(index, source)| SearchHit {
+                id: ResultId::new(format!("kn:locator-{index}")).unwrap(),
+                kind: HitKind::Code,
+                title: "unverified title must not replace the symbol".into(),
+                evidence: source,
+                snippet: None,
+                snippet_lines: None,
+                snippet_id: None,
+                snippet_truncated: false,
+                continuation_ids: vec![],
+            })
+            .collect();
+        let mut output = SearchOutput {
+            query_class: QueryClass::Behavior,
+            hits,
+            memory_hits: vec![],
+            more_available: false,
+            gaps: vec![],
+            diagnostics: None,
+            budget: None,
+            include_handles: false,
+        };
+        let without_handles = search(&output);
+        assert!(without_handles.contains("src/reader.rs:12–16 · Reader.read"));
+        assert!(without_handles.contains("tests/reader.rs:20–28"));
+        assert!(without_handles.contains("Match: lexical(read, limit); vector"));
+        assert!(without_handles.contains("Match: exact path"));
+        assert_eq!(without_handles.matches("sample ·").count(), 1);
+        assert_eq!(without_handles.matches("without source bodies").count(), 1);
+        assert!(!without_handles.contains("unverified title"));
+        assert!(!without_handles.contains("kn:locator-"));
+        assert!(!without_handles.contains("```"));
+        assert!(!without_handles.contains("synthetic-profile"));
+
+        let compatibility_text = crate::render::ToolOutput::render(&output);
+        let compatibility_data = serde_json::to_value(&output).unwrap();
+        output.include_handles = true;
+        let with_handles = search(&output);
+        assert!(with_handles.contains("Fetch id: kn:locator-0"));
+        assert!(with_handles.contains("Fetch id: kn:locator-1"));
+        assert!(with_handles.contains("src/reader.rs:12–16 · Reader.read"));
+        assert!(
+            !serde_json::to_value(&output)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("include_handles")
+        );
+        assert_eq!(
+            crate::render::ToolOutput::render(&output),
+            compatibility_text
+        );
+        assert_eq!(serde_json::to_value(&output).unwrap(), compatibility_data);
+    }
+
+    #[test]
+    fn hidden_hit_handles_preserve_actual_body_range_and_exact_continuations() {
+        let mut source = evidence("src/reader.rs", 12, 12);
+        source.layer = ViewLayer::Personal;
+        let output = SearchOutput {
+            query_class: QueryClass::Behavior,
+            hits: vec![SearchHit {
+                id: ResultId::new("kn:anchor#L12-L12").unwrap(),
+                kind: HitKind::Code,
+                title: String::new(),
+                evidence: source,
+                snippet: Some(UntrustedText::repository("fn read() {\n    parse();\n")),
+                snippet_lines: Some(LineRange::new(11, 12).unwrap()),
+                snippet_id: Some(ResultId::new("kn:shown#L11-L12").unwrap()),
+                snippet_truncated: true,
+                continuation_ids: vec![ResultId::new("kn:remaining#L13-L20").unwrap()],
+            }],
+            memory_hits: vec![],
+            more_available: false,
+            gaps: vec![],
+            diagnostics: None,
+            budget: None,
+            include_handles: false,
+        };
+        let rendered = search(&output);
+        assert!(rendered.contains("src/reader.rs:11–12"));
+        assert!(rendered.contains("fn read() {\n    parse();\n"));
+        assert!(rendered.contains("More source: fetch kn:remaining#L13-L20"));
+        assert!(rendered.contains("personal source"));
+        assert!(rendered.contains(" · content "));
+        assert!(!rendered.contains("Fetch id:"));
+        assert!(!rendered.contains("pinned by fetch id"));
+        assert!(!rendered.contains("kn:anchor"));
+    }
+
+    #[test]
+    fn trace_shares_pins_and_preserves_ambiguous_relation_evidence_and_navigation() {
+        let from = evidence("src/reader.rs", 12, 20);
+        let mut to = evidence("src/parser.rs", 4, 12);
+        to.commit = CommitId::new("b".repeat(40)).unwrap();
+        let output = TraceFlowOutput {
+            nodes: vec![
+                FlowNode {
+                    node: "n1".into(),
+                    kind: NodeKind::Symbol,
+                    label: "read".into(),
+                    project: Some(from.project.clone()),
+                    id: Some(ResultId::new("kn:read").unwrap()),
+                    evidence: Some(from.clone()),
+                },
+                FlowNode {
+                    node: "n2".into(),
+                    kind: NodeKind::Symbol,
+                    label: "parse\nforged".into(),
+                    project: Some(to.project.clone()),
+                    id: Some(ResultId::new("kn:parse").unwrap()),
+                    evidence: Some(to.clone()),
+                },
+            ],
+            edges: vec![FlowEdge {
+                from: "n1".into(),
+                to: "n2".into(),
+                relation: RelationKind::Calls,
+                evidence_type: EvidenceType::SyntacticObservation,
+                resolution: Resolution::Ambiguous,
+                evidence: vec![from],
+            }],
+            truncated: true,
+            gaps: vec![Gap::new(
+                GapReason::RelationsNotReady,
+                "selected relation index is incomplete",
+            )],
+            job: None,
+        };
+        let rendered = trace_flow(&output);
+        assert!(rendered.contains("n1 -calls-> n2 [syntactic_observation, ambiguous]"));
+        assert!(rendered.contains("src/reader.rs:12–20 · s1"));
+        assert!(rendered.contains("src/parser.rs:4–12 · s2"));
+        assert!(rendered.contains("Fetch id: kn:read"));
+        assert!(rendered.contains("Fetch id: kn:parse"));
+        assert!(rendered.contains("local to this result"));
+        assert!(rendered.contains("parse\\u{a}forged"));
+        assert!(rendered.contains("cut by max_depth or limit"));
+        assert!(rendered.contains("selected relation index is incomplete"));
+        assert_eq!(rendered.matches("branch:main@").count(), 2);
+        assert!(!rendered.contains(&"a".repeat(40)));
+        assert!(!rendered.contains("hash"));
+    }
+
+    #[test]
+    fn inspected_symbol_retains_extracted_signature_links_and_partial_notice() {
+        let definition = evidence("src/reader.rs", 12, 20);
+        let link = SymbolLink {
+            id: ResultId::new("kn:caller").unwrap(),
+            relation: RelationKind::Calls,
+            evidence_type: EvidenceType::SyntacticObservation,
+            resolution: Resolution::Unresolved,
+            evidence: evidence("src/caller.rs", 5, 8),
+        };
+        let output = InspectSymbolOutput {
+            symbols: vec![SymbolInfo {
+                id: ResultId::new("kn:read").unwrap(),
+                name: "read".into(),
+                qualified_name: "Reader.read".into(),
+                kind: SymbolKind::Method,
+                language: "rust".into(),
+                analysis: AnalysisLevel::Syntactic,
+                definition,
+                signature: Some(UntrustedText::repository("fn read(bytes: &[u8])")),
+                doc: None,
+                references: vec![link],
+                implementations: vec![],
+                tests: vec![],
+                references_complete: false,
+            }],
+            gaps: vec![],
+        };
+        let rendered = inspect_symbol(&output);
+        assert!(rendered.contains("method Reader.read · rust · syntactic analysis"));
+        assert!(rendered.contains("Extracted signature"));
+        assert!(rendered.contains("fn read(bytes: &[u8])"));
+        assert!(rendered.contains("calls [syntactic_observation, unresolved]"));
+        assert!(rendered.contains("src/caller.rs:5–8"));
+        assert!(rendered.contains("Fetch id: kn:caller"));
+        assert!(rendered.contains("References may be incomplete"));
+        assert_eq!(rendered.matches("branch:main@").count(), 1);
+    }
+
+    #[test]
+    fn impact_preserves_risk_and_proof_locations_without_repeated_full_pin() {
+        let source = evidence("src/reader.rs", 12, 20);
+        let mut dependent = evidence("src/caller.rs", 5, 8);
+        dependent.why = vec![MatchReason::GraphPath {
+            hops: vec![GraphHop {
+                from: "call_read".into(),
+                relation: RelationKind::Calls,
+                to: "read".into(),
+                evidence_type: EvidenceType::SyntacticObservation,
+                resolution: Resolution::Ambiguous,
+            }],
+        }];
+        let output = AnalyzeImpactOutput {
+            subject: "read\nforged".into(),
+            changed: vec![ImpactItem {
+                id: ResultId::new("kn:read").unwrap(),
+                kind: ImpactKind::Symbol,
+                name: "read".into(),
+                distance: 0,
+                evidence: source.clone(),
+            }],
+            impacted: vec![ImpactItem {
+                id: ResultId::new("kn:caller").unwrap(),
+                kind: ImpactKind::Symbol,
+                name: "call_read".into(),
+                distance: 1,
+                evidence: dependent,
+            }],
+            risk: Some(Risk {
+                level: RiskLevel::Medium,
+                factors: vec![RiskFactor {
+                    code: RiskCode::UnresolvedReferences,
+                    message: "dynamic references remain".into(),
+                    evidence: vec![source],
+                }],
+            }),
+            truncated: true,
+            ..AnalyzeImpactOutput::default()
+        };
+        let rendered = impact(&output);
+        assert!(rendered.contains("analyze_impact: read\\u{a}forged"));
+        assert!(rendered.contains("Fetch id: kn:read"));
+        assert!(rendered.contains("call_read -calls-> read [syntactic_observation, ambiguous]"));
+        assert!(rendered.contains("src/caller.rs:5–8"));
+        assert!(rendered.contains("Risk: medium"));
+        assert!(rendered.contains("unresolved_references: dynamic references remain"));
+        assert_eq!(rendered.matches("src/reader.rs:12–20").count(), 2);
+        assert!(rendered.contains("cut by max_depth or limit"));
+        assert_eq!(rendered.matches("branch:main@").count(), 1);
     }
 
     #[test]
@@ -866,6 +1432,7 @@ mod tests {
                 requested: 256,
                 used: 1,
             }),
+            include_handles: false,
         };
         let rendered = search(&output);
         assert!(rendered.len() <= 1024, "{}", rendered.len());
@@ -907,6 +1474,7 @@ mod tests {
             )],
             diagnostics: None,
             budget: None,
+            include_handles: false,
         });
         assert!(rendered.contains("No source or memory results"));
         assert!(rendered.contains("does not establish absence"));

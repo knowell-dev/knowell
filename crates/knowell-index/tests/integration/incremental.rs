@@ -9,9 +9,10 @@ use knowell_index::{
     Priority, SyncOutcome, TierSkip, TierState, parser_version_tag, split_symbol_key,
 };
 use knowell_store::content;
+use knowell_store::graph;
 use knowell_store::jobs;
 use knowell_store::symbols;
-use knowell_store::views::GenerationPin;
+use knowell_store::views::{self, GenerationPin};
 use knowell_store::{OccurrenceRole, SymbolId};
 use tokio::sync::mpsc;
 
@@ -151,6 +152,356 @@ async fn modifying_one_file_reparses_and_reembeds_only_that_file() {
     let lexical = indexer.lexical(view).await.unwrap().unwrap();
     let hits = lexical.search("knowellProbeAddition", 5).unwrap();
     assert_eq!(hits.first().map(|h| h.path.as_str()), Some(file.as_str()));
+    drop(indexer);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn legacy_syntax_policy_refreshes_labels_without_content_or_embedding_churn() {
+    let db = require_db!();
+    let mut ws = fixture_workspace(Some(&[PROJECT]));
+    if setup(&ws).await.is_none() {
+        return;
+    }
+    let file = path("src/source-label-probe.ts");
+    ws.write(
+        PROJECT,
+        file.as_str(),
+        "export function sourceLabelProbe() { return 1; }\nexport function sourceLabelAux() { return 2; }\n",
+    );
+    ws.commit_all(PROJECT, "add a small source label probe");
+    embed_with(&mut ws.resolved, "local");
+    let data = tempfile::tempdir().unwrap();
+    let embedder = Arc::new(CountingEmbedder::new());
+    let indexer = indexer(&db, data.path(), &embedder);
+    let (registration, _) = indexer
+        .index_workspace(&ws.resolved, Priority::Interactive)
+        .await
+        .unwrap();
+    let view = view_of(&registration, PROJECT);
+    let before_pin = active_pin(&db, view).await;
+    let before_files = active_files(&db, view).await;
+    let before_definitions = definitions(&db, before_pin, &file).await;
+    assert_eq!(before_definitions.len(), 2);
+    let mut conn = db.conn().await;
+    let chunk_rows = content::chunks_of(
+        &mut conn,
+        registration.organization,
+        &before_files[&file],
+        &parser_version_tag(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        chunk_rows
+            .iter()
+            .all(|chunk| chunk.chunk.symbol_path.is_none())
+    );
+
+    // Reproduce a pre-policy generation: the source/inputs are intact, but
+    // its defines evidence and manifest predate immutable parsed labels.
+    sqlx::query(
+        "UPDATE edge SET evidence = evidence - 'source_label'
+         WHERE view_id = $1 AND kind = 'defines' AND valid_from <= $2
+           AND (valid_to IS NULL OR valid_to > $2)",
+    )
+    .bind(view)
+    .bind(before_pin.generation)
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    drop(conn);
+    let manifest_path = data
+        .path()
+        .join("views")
+        .join(view.to_string())
+        .join(format!("manifest-{}.json", before_pin.generation));
+    let mut old_manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    old_manifest
+        .as_object_mut()
+        .unwrap()
+        .remove("syntax_policy");
+    std::fs::write(&manifest_path, serde_json::to_vec(&old_manifest).unwrap()).unwrap();
+    let before_inputs = db.count("SELECT count(*) FROM chunk_input").await;
+    let before_chunks = db.count("SELECT count(*) FROM chunk").await;
+    let stats = indexer.stats();
+    let calls = embedder.calls();
+
+    refresh(&indexer, view).await;
+    let after_pin = active_pin(&db, view).await;
+    let after = indexer.stats();
+    assert!(after_pin.generation > before_pin.generation);
+    assert_eq!(active_files(&db, view).await, before_files);
+    assert_eq!(definitions(&db, after_pin, &file).await, before_definitions);
+    assert_eq!(
+        after.files_read, stats.files_read,
+        "source blobs are reused"
+    );
+    assert_eq!(
+        after.files_parsed - stats.files_parsed,
+        before_files.len() as u64,
+        "syntax evidence is refreshed once for every retained file"
+    );
+    assert_eq!(after.chunks_written, stats.chunks_written);
+    assert_eq!(after.inputs_embedded, stats.inputs_embedded);
+    assert_eq!(embedder.calls(), calls);
+    assert_eq!(
+        db.count("SELECT count(*) FROM chunk_input").await,
+        before_inputs
+    );
+    assert_eq!(db.count("SELECT count(*) FROM chunk").await, before_chunks);
+
+    let mut conn = db.conn().await;
+    let edges = graph::edges_with_origins(&mut conn, after_pin, &[file.to_string()])
+        .await
+        .unwrap();
+    let definition = edges
+        .iter()
+        .find(|edge| {
+            edge.edge.kind == "defines"
+                && edge.edge.evidence["source_label"]["qualified_name"] == "sourceLabelProbe"
+        })
+        .unwrap();
+    let id = before_definitions.get("function:sourceLabelProbe").unwrap();
+    assert_eq!(definition.edge.to, graph::NodeRef::Symbol(*id));
+    assert_eq!(definition.edge.evidence["source_label"]["version"], 1);
+    assert_eq!(
+        definition.edge.evidence["source_label"]["symbol_id"],
+        id.to_string()
+    );
+    assert_eq!(
+        definition.edge.evidence["source_label"]["name"],
+        "sourceLabelProbe"
+    );
+    assert_eq!(
+        definition.edge.evidence["source_label"]["qualified_name"],
+        "sourceLabelProbe"
+    );
+    assert_eq!(definition.edge.evidence["path"], file.as_str());
+    assert_eq!(
+        definition.edge.evidence["content_hash"],
+        before_files[&file].to_string()
+    );
+    let old_edges = graph::edges_with_origins(&mut conn, before_pin, &[file.to_string()])
+        .await
+        .unwrap();
+    assert!(
+        old_edges
+            .iter()
+            .filter(|edge| edge.edge.kind == "defines")
+            .all(|edge| { edge.edge.evidence.get("source_label").is_none() })
+    );
+    drop(conn);
+    assert!(matches!(
+        indexer
+            .refresh_view(view, Priority::Interactive)
+            .await
+            .unwrap(),
+        SyncOutcome::UpToDate { .. }
+    ));
+    drop(indexer);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn directory_policy_refresh_resumes_exact_tree_and_supersedes_changed_tree() {
+    let db = require_db!();
+    let source = tempfile::tempdir().unwrap();
+    let project_dir = source.path().join("probe");
+    std::fs::create_dir(&project_dir).unwrap();
+    let file = path("probe.rs");
+    let file_path = project_dir.join(file.as_str());
+    std::fs::write(&file_path, "fn first() {}\nfn second() {}\n").unwrap();
+    let workspace = knowell_config::parse_workspace(
+        "version = 1\n[workspace]\nname = \"directory-policy\"\ntrack = \"worktree\"\n[[project]]\nname = \"probe\"\npath = \"probe\"\n",
+    )
+    .unwrap();
+    let mut resolved = workspace.resolve(source.path()).unwrap();
+    embed_with(&mut resolved, "local");
+    let data = tempfile::tempdir().unwrap();
+    let embedder = Arc::new(CountingEmbedder::new());
+    let indexer = indexer(&db, data.path(), &embedder);
+    let (registration, _) = indexer
+        .index_workspace(&resolved, Priority::Interactive)
+        .await
+        .unwrap();
+    assert_eq!(
+        registration.views[0].source_kind,
+        knowell_store::SourceKind::Directory
+    );
+    let view = view_of(&registration, "probe");
+    let old_pin = active_pin(&db, view).await;
+    let manifest_path = data
+        .path()
+        .join("views")
+        .join(view.to_string())
+        .join(format!("manifest-{}.json", old_pin.generation));
+    let mut legacy: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    legacy.as_object_mut().unwrap().remove("syntax_policy");
+    std::fs::write(&manifest_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    let mut conn = db.conn().await;
+    sqlx::query(
+        "UPDATE edge SET evidence = evidence - 'source_label'
+         WHERE view_id = $1 AND kind = 'defines' AND valid_from <= $2
+           AND (valid_to IS NULL OR valid_to > $2)",
+    )
+    .bind(view)
+    .bind(old_pin.generation)
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    drop(conn);
+    let calls = embedder.calls();
+    assert!(calls > 0, "the initial directory inputs have ready vectors");
+    let stats = indexer.stats();
+
+    // Leave T1 pending, then let a repeated interactive sync's T0 overtake it.
+    assert!(matches!(
+        indexer
+            .refresh_view(view, Priority::Background)
+            .await
+            .unwrap(),
+        SyncOutcome::Queued { .. }
+    ));
+    assert!(indexer.run_next_job().await.unwrap());
+    let mut conn = db.conn().await;
+    let refreshing = views::building_generation(&mut conn, view)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(conn);
+    let duplicate = match indexer
+        .refresh_view(view, Priority::Interactive)
+        .await
+        .unwrap()
+    {
+        SyncOutcome::Queued {
+            job, created: true, ..
+        } => job,
+        other => panic!("expected a second T0 while T1 is pending, got {other:?}"),
+    };
+    assert!(indexer.run_next_job().await.unwrap());
+    let mut conn = db.conn().await;
+    assert_eq!(
+        jobs::get_job(&mut conn, duplicate)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        knowell_store::JobState::Succeeded
+    );
+    assert_eq!(
+        views::building_generation(&mut conn, view).await.unwrap(),
+        Some(refreshing)
+    );
+    assert_eq!(
+        views::get_generation(&mut conn, view, refreshing)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        knowell_store::GenerationState::Building
+    );
+    drop(conn);
+    for _ in 0..2 {
+        assert!(matches!(
+            indexer.refresh_view(view, Priority::Interactive).await.unwrap(),
+            SyncOutcome::Queued { job, created: false, .. } if job == duplicate
+        ));
+    }
+    let summary = indexer.run_until_idle().await.unwrap();
+    assert_eq!(summary.failed, 0, "{summary:?}");
+    assert_eq!(active_pin(&db, view).await.generation, refreshing);
+    assert_eq!(indexer.stats().builds_superseded, stats.builds_superseded);
+    assert_eq!(
+        embedder.calls(),
+        calls,
+        "the policy refresh reuses ready vectors"
+    );
+    let mut conn = db.conn().await;
+    let edges = graph::edges_with_origins(
+        &mut conn,
+        GenerationPin {
+            view,
+            generation: refreshing,
+        },
+        &[file.to_string()],
+    )
+    .await
+    .unwrap();
+    let labels: BTreeMap<_, _> = edges
+        .iter()
+        .filter(|edge| edge.edge.kind == "defines")
+        .map(|edge| {
+            let label = &edge.edge.evidence["source_label"];
+            (
+                label["qualified_name"].as_str().unwrap().to_owned(),
+                label["version"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        labels,
+        BTreeMap::from([("first".to_owned(), 1), ("second".to_owned(), 1)])
+    );
+    drop(conn);
+    assert!(matches!(
+        indexer
+            .refresh_view(view, Priority::Interactive)
+            .await
+            .unwrap(),
+        SyncOutcome::UpToDate { .. }
+    ));
+
+    // A different tree must still replace the unfinished directory generation.
+    std::fs::write(
+        &file_path,
+        "fn first() { let value = 1; }\nfn second() {}\n",
+    )
+    .unwrap();
+    assert!(matches!(
+        indexer
+            .refresh_view(view, Priority::Background)
+            .await
+            .unwrap(),
+        SyncOutcome::Queued { .. }
+    ));
+    assert!(indexer.run_next_job().await.unwrap());
+    let mut conn = db.conn().await;
+    let older = views::building_generation(&mut conn, view)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(conn);
+    std::fs::write(
+        &file_path,
+        "fn first() { let value = 2; }\nfn second() {}\n",
+    )
+    .unwrap();
+    assert!(matches!(
+        indexer
+            .refresh_view(view, Priority::Interactive)
+            .await
+            .unwrap(),
+        SyncOutcome::Queued { .. }
+    ));
+    assert!(indexer.run_next_job().await.unwrap());
+    let mut conn = db.conn().await;
+    let newer = views::building_generation(&mut conn, view)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(newer > older);
+    let superseded = views::get_generation(&mut conn, view, older)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(superseded.state, knowell_store::GenerationState::Failed);
+    assert!(superseded.error.unwrap().contains("superseded"));
+    drop(conn);
+    let summary = indexer.run_until_idle().await.unwrap();
+    assert_eq!(summary.failed, 0, "{summary:?}");
+    assert_eq!(active_pin(&db, view).await.generation, newer);
     drop(indexer);
 }
 

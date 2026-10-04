@@ -177,48 +177,22 @@ impl ToolName {
     /// descriptions are re-read by the model on every turn.
     pub fn description(self) -> &'static str {
         match self {
-            Self::OpenWorkspace => {
-                "Call first. Returns context_id for other tools, pinned projects/views, rules, tasks and recent decisions."
-            }
-            Self::Search => {
-                "Find code, docs, contracts and memory by meaning, words or symbol, with pinned source and fetch IDs."
-            }
-            Self::Fetch => {
-                "Read pinned source by result ID or project path and lines; continuation IDs read remaining ranges."
-            }
+            Self::OpenWorkspace => "Open/refresh pinned context and project map; reuse context_id.",
+            Self::Search => "Find source, contracts and memory by meaning, words or symbol.",
+            Self::Fetch => "Read pinned source by path/lines or exact ID when local reads lack it.",
             Self::InspectSymbol => {
-                "Read a symbol's definition, signature, references, implementations and tests by name or result ID."
+                "Read definition, signature, references, implementations and tests."
             }
-            Self::TraceFlow => {
-                "Trace evidenced calls, HTTP, events, RPC and table relations across projects from a symbol or contract."
-            }
-            Self::AnalyzeImpact => {
-                "Find affected symbols, contracts, projects, risk and tests for a symbol, file, diff or unapplied patch."
-            }
-            Self::Contracts => {
-                "List endpoint, topic, RPC, table, env, i18n and package contracts across projects, with participants and drift."
-            }
-            Self::BuildContext => {
-                "Collect complementary source for a task within a token budget, with exact fetch and continuation IDs."
-            }
-            Self::History => {
-                "Read blame, commits, co-changed files and recorded rationale for a file, lines or symbol."
-            }
-            Self::ReadMemory => {
-                "Read scoped memory: decisions, rules, notes, findings. Only accepted rules are team rules."
-            }
-            Self::WriteMemory => {
-                "Record a decision, finding or note citing evidence result ids. Agent writes are proposals; secrets are rejected."
-            }
-            Self::ResumeTask => {
-                "List open tasks, or resume task_id with progress, questions and changes since its checkpoint."
-            }
-            Self::SaveCheckpoint => {
-                "Save task progress, decisions and next steps. Omit task_id to start a task (goal required)."
-            }
-            Self::IndexStatus => {
-                "Check project index freshness/coverage and job progress when results are stale or empty."
-            }
+            Self::TraceFlow => "Trace evidenced routes from a symbol or contract.",
+            Self::AnalyzeImpact => "Find affected code, contracts, risk and tests for a change.",
+            Self::Contracts => "Find contract participants and drift across projects.",
+            Self::BuildContext => "Collect focused complementary source within a token budget.",
+            Self::History => "Read commits, blame, co-changes and recorded rationale.",
+            Self::ReadMemory => "Read scoped memory; only accepted rules are team rules.",
+            Self::WriteMemory => "Propose scoped memory with evidence IDs; secrets are rejected.",
+            Self::ResumeTask => "Resume task_id or list tasks and changes since checkpoints.",
+            Self::SaveCheckpoint => "Save authorized progress; new tasks require goal.",
+            Self::IndexStatus => "Check index freshness, coverage and job progress.",
         }
     }
 

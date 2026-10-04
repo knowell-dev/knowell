@@ -130,6 +130,9 @@ pub(crate) struct Snapshot {
     pub(crate) project_id: ProjectId,
     pub(crate) pin: GenerationPin,
     pub(crate) files: BTreeMap<RepoPath, FileInfo>,
+    /// Immutable occurrence counts prepared once, avoiding a catalog walk on
+    /// every warm query merely to report language capabilities.
+    language_counts: BTreeMap<String, u64>,
     pub(crate) symbols: Vec<SymbolEntry>,
     pub(crate) symbols_by_file: BTreeMap<RepoPath, Vec<usize>>,
     /// Lowercased short name → symbol indices.
@@ -184,14 +187,7 @@ impl Snapshot {
 
     /// Languages with file counts.
     pub(crate) fn languages(&self) -> BTreeMap<String, u64> {
-        let mut out: BTreeMap<String, u64> = BTreeMap::new();
-        for file in self.files.values() {
-            if let Some(language) = &file.language {
-                let count = out.entry(language.clone()).or_default();
-                *count = count.saturating_add(1);
-            }
-        }
-        out
+        self.language_counts.clone()
     }
 
     /// The import edges whose target is `path`.
@@ -209,6 +205,7 @@ impl Snapshot {
     }
 
     /// Relations (`references`, `calls`) that end at `id`.
+    #[cfg(test)]
     pub(crate) fn uses_of(&self, id: SymbolId) -> impl Iterator<Item = &OtherEdge> {
         self.edges_into
             .get(&id)
@@ -359,6 +356,41 @@ pub(crate) struct ParseOptions {
 }
 
 const METADATA_PAGE_FILES: usize = 1_000;
+
+/// A partial catalog's hard scope is part of its cache identity. An empty
+/// language set deliberately differs from no language restriction.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct MetadataScope {
+    pub(crate) path_prefixes: Vec<String>,
+    pub(crate) languages: Option<Vec<String>>,
+}
+
+impl MetadataScope {
+    pub(crate) fn new(path_prefixes: &[String], languages: Option<Vec<String>>) -> Self {
+        Self {
+            path_prefixes: path_prefixes
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            languages: languages.map(|values| {
+                values
+                    .into_iter()
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect()
+            }),
+        }
+    }
+
+    fn store_scope(&self) -> content::FileMetadataScope<'_> {
+        content::FileMetadataScope {
+            path_prefixes: &self.path_prefixes,
+            languages: self.languages.as_deref(),
+        }
+    }
+}
 /// Selected hydration is bounded independently of a generation's file count.
 pub(crate) const MAX_HYDRATED_PATHS: usize = 1_000;
 /// Hard bound on source body bytes retained by one selected hydration request.
@@ -380,13 +412,36 @@ fn structure_map(
 
 /// Reads paged, tenant-scoped generation metadata without any source bodies or
 /// local parsing. Relationships keep their stored evidence and resolution.
-/// Names are taken from pinned chunk metadata rather than mutable symbol labels.
+/// Names are taken from pinned definition evidence or legacy chunk metadata,
+/// never from the mutable logical symbol labels.
 pub(crate) async fn build_metadata(
     store: &Store,
     organization: OrganizationId,
     project: Name,
     project_id: ProjectId,
     pin: GenerationPin,
+) -> Result<Snapshot, EngineError> {
+    build_metadata_scoped(
+        store,
+        organization,
+        project,
+        project_id,
+        pin,
+        &MetadataScope::default(),
+    )
+    .await
+}
+
+/// Loads only file occurrences admitted by the hard query scope. Origins and
+/// source coordinates stay pinned; paths outside the scope are never added by
+/// graph metadata. Unrestricted calls preserve the complete catalog behavior.
+pub(crate) async fn build_metadata_scoped(
+    store: &Store,
+    organization: OrganizationId,
+    project: Name,
+    project_id: ProjectId,
+    pin: GenerationPin,
+    scope: &MetadataScope,
 ) -> Result<Snapshot, EngineError> {
     let parser_version = parser_version_tag();
     let mut conn = store.acquire().await?;
@@ -398,12 +453,13 @@ pub(crate) async fn build_metadata(
     let mut other_edges = Vec::new();
     let mut contracts = Vec::new();
     loop {
-        let page = content::files_metadata_at_page(
+        let page = content::files_metadata_at_scope_page(
             &mut conn,
             organization,
             pin,
             after.as_ref(),
             METADATA_PAGE_FILES,
+            scope.store_scope(),
         )
         .await?;
         if page.is_empty() {
@@ -418,6 +474,9 @@ pub(crate) async fn build_metadata(
             content::chunk_structures_of(&mut conn, organization, &hashes, &parser_version).await?,
         );
         let definitions = symbols::definitions_in_paths(&mut conn, pin, &paths).await?;
+        let origins = origins_of(&paths);
+        let edges = graph::edges_with_origins(&mut conn, pin, &origins).await?;
+        let labels = metadata_definition_labels(&edges, pin, project_id);
         let mut definitions_by_path: BTreeMap<RepoPath, Vec<symbols::Definition>> = BTreeMap::new();
         for definition in definitions {
             definitions_by_path
@@ -433,7 +492,7 @@ pub(crate) async fn build_metadata(
             let path = row.version.path;
             let hash = row.version.content_hash;
             let chunk_rows = by_hash.get(&hash).map(Vec::as_slice).unwrap_or_default();
-            symbol_rows.extend(metadata_symbols(
+            symbol_rows.extend(metadata_symbols_with_labels(
                 &path,
                 hash,
                 chunk_rows,
@@ -442,6 +501,7 @@ pub(crate) async fn build_metadata(
                     .get(&path)
                     .map(Vec::as_slice)
                     .unwrap_or_default(),
+                labels.get(&path),
             )?);
             chunks.insert(
                 path.clone(),
@@ -471,9 +531,15 @@ pub(crate) async fn build_metadata(
                 },
             );
         }
-        let origins = origins_of(&paths);
-        for edge in graph::edges_with_origins(&mut conn, pin, &origins).await? {
-            append_edge(edge, project_id, &mut imports, &mut other_edges);
+        for edge in edges {
+            append_edge(
+                edge,
+                pin,
+                &files,
+                project_id,
+                &mut imports,
+                &mut other_edges,
+            );
         }
         contracts.extend(graph::contracts_with_origins(&mut conn, pin, &origins).await?);
     }
@@ -503,6 +569,7 @@ fn origins_of(paths: &[RepoPath]) -> Vec<String> {
             [
                 path.to_string(),
                 format!("{}:{path}", knowell_index::LINK_STAGE_NAME),
+                format!("scip:{path}"),
             ]
         })
         .collect()
@@ -510,14 +577,34 @@ fn origins_of(paths: &[RepoPath]) -> Vec<String> {
 
 fn append_edge(
     edge: graph::Edge,
+    pin: GenerationPin,
+    files: &BTreeMap<RepoPath, FileInfo>,
     project_id: ProjectId,
     imports: &mut Vec<ImportEdge>,
     other_edges: &mut Vec<OtherEdge>,
 ) {
-    let data = edge.edge;
-    let Some(origin) = origin_path(&data.origin) else {
+    let marked_scip = edge.edge.origin.starts_with("scip:")
+        || edge
+            .edge
+            .evidence
+            .get("analysis_kind")
+            .and_then(serde_json::Value::as_str)
+            == Some("scip");
+    let origin = if marked_scip {
+        crate::precise::scip_source_path(&edge, pin)
+    } else {
+        origin_path(&edge.edge.origin)
+    };
+    let Some(origin) = origin else {
         return;
     };
+    let Some(file) = files.get(&origin) else {
+        return;
+    };
+    if !crate::precise::admits_scip_edge(&edge, pin, file.content_hash) {
+        return;
+    }
+    let data = edge.edge;
     let lines = evidence_lines(&data.evidence);
     match (data.kind.as_str(), &data.from, &data.to) {
         ("defines" | "contains", _, _) => {}
@@ -564,14 +651,199 @@ fn append_edge(
     }
 }
 
-/// Stored logical symbols can be renamed after this pin. Only a source-bound
-/// chunk label can recover the pinned name without reading the source body.
+/// Parsed labels live in versioned `defines` evidence independently of chunk
+/// grouping. Whole-file and grouped chunks therefore cannot erase names.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+struct PinnedSourceLabel {
+    version: u32,
+    symbol_id: SymbolId,
+    name: String,
+    qualified_name: String,
+    kind: SymbolKind,
+    name_line: u32,
+    bytes: [u64; 2],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SourceLabelEvidence {
+    project: ProjectId,
+    content_hash: ContentHash,
+    label: PinnedSourceLabel,
+}
+
+#[derive(Debug, Default)]
+struct DefinitionLabels {
+    /// A present but invalid versioned label must not silently fall back to a
+    /// chunk label. Its logical id remains marked even if its range is invalid.
+    labeled_ids: BTreeSet<SymbolId>,
+    /// Conflicting claims at one occurrence are deliberately kept as `None`.
+    occurrences: BTreeMap<(SymbolId, LineRange), Option<SourceLabelEvidence>>,
+}
+
+fn metadata_definition_labels(
+    edges: &[graph::Edge],
+    pin: GenerationPin,
+    project_id: ProjectId,
+) -> BTreeMap<RepoPath, DefinitionLabels> {
+    let mut labels: BTreeMap<RepoPath, DefinitionLabels> = BTreeMap::new();
+    for edge in edges {
+        let data = &edge.edge;
+        if pin.generation <= 0
+            || edge.view != pin.view
+            || edge.valid_from <= 0
+            || edge.valid_from > pin.generation
+            || edge
+                .valid_to
+                .is_some_and(|end| end <= pin.generation || end <= edge.valid_from)
+            || data.kind != "defines"
+            || data.evidence_type != EvidenceType::Syntactic
+            || data.resolution != Resolution::Resolved
+        {
+            continue;
+        }
+        let (NodeRef::File { project, path }, NodeRef::Symbol(id)) = (&data.from, &data.to) else {
+            continue;
+        };
+        if *project != project_id || data.origin != path.as_str() {
+            continue;
+        }
+        let Some(value) = data.evidence.get("source_label") else {
+            continue;
+        };
+        let bound = labels.entry(path.clone()).or_default();
+        bound.labeled_ids.insert(*id);
+        let Some(lines) = data
+            .evidence
+            .get("lines")
+            .and_then(serde_json::Value::as_array)
+            .filter(|values| values.len() == 2)
+            .and_then(|_| evidence_lines(&data.evidence))
+        else {
+            continue;
+        };
+        let parsed = source_label_evidence(value, &data.evidence, project_id, path, *id, lines);
+        let occurrence = bound
+            .occurrences
+            .entry((*id, lines))
+            .or_insert_with(|| parsed.clone());
+        if *occurrence != parsed {
+            *occurrence = None;
+        }
+    }
+    labels
+}
+
+fn source_label_evidence(
+    value: &serde_json::Value,
+    evidence: &serde_json::Value,
+    project: ProjectId,
+    path: &RepoPath,
+    id: SymbolId,
+    lines: LineRange,
+) -> Option<SourceLabelEvidence> {
+    let label: PinnedSourceLabel = serde_json::from_value(value.clone()).ok()?;
+    if label.version != 1
+        || label.symbol_id != id
+        || label.name.trim().is_empty()
+        || label.qualified_name.trim().is_empty()
+        || label.name.chars().any(char::is_control)
+        || label.qualified_name.chars().any(char::is_control)
+        || label.name_line < lines.start()
+        || label.name_line > lines.end()
+        || label.bytes.first()? >= label.bytes.get(1)?
+        || evidence.get("path")?.as_str()? != path.as_str()
+    {
+        return None;
+    }
+    // Bytes refer to redacted parser input, not the original file's stored size.
+    // The source-free path can verify ordering and identity, not byte contents.
+    usize::try_from(*label.bytes.first()?).ok()?;
+    usize::try_from(*label.bytes.get(1)?).ok()?;
+    let content_hash = serde_json::from_value(evidence.get("content_hash")?.clone()).ok()?;
+    Some(SourceLabelEvidence {
+        project,
+        content_hash,
+        label,
+    })
+}
+
+fn metadata_symbols_with_labels(
+    path: &RepoPath,
+    hash: ContentHash,
+    rows: &[content::Chunk],
+    structures: &BTreeMap<(ContentHash, u32), content::ChunkStructure>,
+    definitions: &[symbols::Definition],
+    labels: Option<&DefinitionLabels>,
+) -> Result<Vec<SymbolEntry>, EngineError> {
+    let Some(labels) = labels else {
+        return metadata_symbols(path, hash, rows, structures, definitions);
+    };
+    let mut entries = Vec::new();
+    for definition in definitions
+        .iter()
+        .filter(|row| row.path == *path && row.content_hash == hash)
+    {
+        let Some(Some(evidence)) = labels
+            .occurrences
+            .get(&(definition.symbol.id, definition.lines))
+        else {
+            continue;
+        };
+        let label = &evidence.label;
+        if evidence.project != definition.symbol.project || evidence.content_hash != hash {
+            continue;
+        }
+        entries.push(SymbolEntry {
+            key: symbol_key(path, &label.qualified_name),
+            local: label.qualified_name.clone(),
+            name: label.name.clone(),
+            kind: label.kind,
+            path: path.clone(),
+            lines: definition.lines,
+            name_line: label.name_line,
+            signature: String::new(),
+            doc: None,
+            parent: None,
+            store_id: Some(label.symbol_id),
+        });
+    }
+    entries.extend(metadata_symbols_legacy(
+        path,
+        hash,
+        rows,
+        structures,
+        definitions,
+        Some(&labels.labeled_ids),
+    )?);
+    entries.sort_by(|a, b| {
+        a.lines
+            .cmp(&b.lines)
+            .then_with(|| a.key.cmp(&b.key))
+            .then_with(|| a.store_id.cmp(&b.store_id))
+    });
+    entries.dedup();
+    Ok(entries)
+}
+
+/// Stored logical symbols can be renamed after this pin. Legacy metadata needs
+/// a uniquely bound immutable chunk label to recover the name without source.
 fn metadata_symbols(
     path: &RepoPath,
     hash: ContentHash,
     rows: &[content::Chunk],
     structures: &BTreeMap<(ContentHash, u32), content::ChunkStructure>,
     definitions: &[symbols::Definition],
+) -> Result<Vec<SymbolEntry>, EngineError> {
+    metadata_symbols_legacy(path, hash, rows, structures, definitions, None)
+}
+
+fn metadata_symbols_legacy(
+    path: &RepoPath,
+    hash: ContentHash,
+    rows: &[content::Chunk],
+    structures: &BTreeMap<(ContentHash, u32), content::ChunkStructure>,
+    definitions: &[symbols::Definition],
+    labeled_ids: Option<&BTreeSet<SymbolId>>,
 ) -> Result<Vec<SymbolEntry>, EngineError> {
     let mut entries = Vec::new();
     let mut definitions_per_range: BTreeMap<LineRange, usize> = BTreeMap::new();
@@ -585,6 +857,7 @@ fn metadata_symbols(
     for definition in definitions
         .iter()
         .filter(|row| row.path == *path && row.content_hash == hash)
+        .filter(|row| !labeled_ids.is_some_and(|ids| ids.contains(&row.symbol.id)))
     {
         // A line anchor cannot distinguish same-line declarations. Do not attach
         // a source label to an arbitrary logical id before parsing exact bytes.
@@ -922,66 +1195,18 @@ pub(crate) async fn build(
     let paths: Vec<RepoPath> = files.keys().cloned().collect();
     // Rows are grouped by origin: T1 writes the bare path, relation stages
     // prefix their name (`link:<path>`).
-    let origins: Vec<String> = paths
-        .iter()
-        .flat_map(|p| {
-            [
-                p.to_string(),
-                format!("{}:{p}", knowell_index::LINK_STAGE_NAME),
-            ]
-        })
-        .collect();
+    let origins = origins_of(&paths);
     let mut imports = Vec::new();
     let mut other_edges = Vec::new();
     for edge in graph::edges_with_origins(&mut conn, pin, &origins).await? {
-        let data = edge.edge;
-        let Some(origin) = origin_path(&data.origin) else {
-            continue;
-        };
-        let lines = evidence_lines(&data.evidence);
-        match (data.kind.as_str(), &data.from, &data.to) {
-            ("defines" | "contains", _, _) => {}
-            (
-                "imports",
-                NodeRef::File {
-                    project: pf,
-                    path: from,
-                },
-                NodeRef::File {
-                    project: pt,
-                    path: to,
-                },
-            ) if *pf == project_id && *pt == project_id => imports.push(ImportEdge {
-                from: from.clone(),
-                to: ImportTarget::File(to.clone()),
-                evidence: data.evidence_type,
-                resolution: data.resolution,
-                lines,
-            }),
-            (
-                "imports",
-                NodeRef::File {
-                    project: pf,
-                    path: from,
-                },
-                NodeRef::Name { name, .. },
-            ) if *pf == project_id => imports.push(ImportEdge {
-                from: from.clone(),
-                to: ImportTarget::Name(name.clone()),
-                evidence: data.evidence_type,
-                resolution: data.resolution,
-                lines,
-            }),
-            _ => other_edges.push(OtherEdge {
-                origin,
-                from: data.from.clone(),
-                to: data.to.clone(),
-                kind: data.kind.clone(),
-                evidence: data.evidence_type,
-                resolution: data.resolution,
-                lines,
-            }),
-        }
+        append_edge(
+            edge,
+            pin,
+            &files,
+            project_id,
+            &mut imports,
+            &mut other_edges,
+        );
     }
     let definitions = symbols::definitions_in_paths(&mut conn, pin, &paths).await?;
     let contracts = graph::contracts_with_origins(&mut conn, pin, &origins).await?;
@@ -1077,12 +1302,20 @@ impl Snapshot {
                 importers.entry(to.clone()).or_default().push(i);
             }
         }
+        let mut language_counts = BTreeMap::<String, u64>::new();
+        for file in files.values() {
+            if let Some(language) = &file.language {
+                let count = language_counts.entry(language.clone()).or_default();
+                *count = count.saturating_add(1);
+            }
+        }
         Snapshot {
             project,
             project_id,
             pin,
             source_ready: files.keys().cloned().collect(),
             files,
+            language_counts,
             symbols,
             symbols_by_file,
             by_name,
@@ -1307,10 +1540,10 @@ struct SnapshotState {
     tick: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum SnapshotKind {
     Full,
-    Metadata,
+    Metadata(MetadataScope),
 }
 
 impl SnapshotCache {
@@ -1328,7 +1561,17 @@ impl SnapshotCache {
 
     /// A separate metadata-only cell; it cannot replace a full graph snapshot.
     pub(crate) fn metadata_cell(&self, pin: GenerationPin) -> SnapshotCell {
-        self.cell_of(pin, SnapshotKind::Metadata)
+        self.metadata_scoped_cell(pin, MetadataScope::default())
+    }
+
+    /// Partial catalogs cannot replace complete metadata or another hard scope.
+    /// All scopes share the same bounded LRU cell capacity.
+    pub(crate) fn metadata_scoped_cell(
+        &self,
+        pin: GenerationPin,
+        scope: MetadataScope,
+    ) -> SnapshotCell {
+        self.cell_of(pin, SnapshotKind::Metadata(scope))
     }
 
     fn cell_of(&self, pin: GenerationPin, kind: SnapshotKind) -> SnapshotCell {
@@ -1343,7 +1586,7 @@ impl SnapshotCache {
             }
             None => {
                 let cell: SnapshotCell = Arc::new(OnceCell::new());
-                state.cells.insert(key, (Arc::clone(&cell), tick));
+                state.cells.insert(key.clone(), (Arc::clone(&cell), tick));
                 cell
             }
         };
@@ -1351,9 +1594,9 @@ impl SnapshotCache {
             let oldest = state
                 .cells
                 .iter()
-                .filter(|(p, _)| **p != key)
+                .filter(|(p, _)| *p != &key)
                 .min_by_key(|(_, (_, t))| *t)
-                .map(|(p, _)| *p);
+                .map(|(p, _)| p.clone());
             match oldest {
                 Some(p) => {
                     state.cells.remove(&p);
@@ -1403,6 +1646,508 @@ mod tests {
 
     fn lines(a: u32, b: u32) -> LineRange {
         LineRange::new(a, b).unwrap()
+    }
+
+    struct PinnedMetadataFixture {
+        path: RepoPath,
+        hash: ContentHash,
+        project: ProjectId,
+        pin: GenerationPin,
+        parsed: knowell_parse::ParsedFile,
+        definitions: Vec<symbols::Definition>,
+        edges: Vec<graph::Edge>,
+        chunks: Vec<content::Chunk>,
+    }
+
+    impl PinnedMetadataFixture {
+        fn new(path: &str, text: &str) -> Self {
+            use knowell_store::{EdgeId, ViewId};
+            use time::OffsetDateTime;
+            use uuid::Uuid;
+
+            let path = RepoPath::new(path).unwrap();
+            let hash = ContentHash::of(text.as_bytes());
+            let project = ProjectId(Uuid::from_u128(1));
+            let pin = GenerationPin {
+                view: ViewId(Uuid::from_u128(2)),
+                generation: 7,
+            };
+            let parsed = parse_with(&path, text, &ParseLimits::default(), None);
+            let mut definitions = Vec::new();
+            let mut edges = Vec::new();
+            for (index, symbol) in parsed.symbols.iter().enumerate() {
+                let index = u128::try_from(index).unwrap();
+                let id = SymbolId(Uuid::from_u128(index + 100));
+                definitions.push(symbols::Definition {
+                    symbol: symbols::Symbol {
+                        id,
+                        project,
+                        qualified_name: symbol_key(&path, &symbol.qualified_name),
+                        kind: symbol.kind.as_str().into(),
+                        created_at: OffsetDateTime::UNIX_EPOCH,
+                        updated_at: OffsetDateTime::UNIX_EPOCH,
+                    },
+                    path: path.clone(),
+                    content_hash: hash,
+                    lines: symbol.range,
+                });
+                edges.push(graph::Edge {
+                    id: EdgeId(Uuid::from_u128(index + 200)),
+                    view: pin.view,
+                    valid_from: pin.generation,
+                    valid_to: None,
+                    edge: graph::NewEdge {
+                        from: NodeRef::File {
+                            project,
+                            path: path.clone(),
+                        },
+                        to: NodeRef::Symbol(id),
+                        kind: "defines".into(),
+                        evidence_type: EvidenceType::Syntactic,
+                        resolution: Resolution::Resolved,
+                        origin: path.to_string(),
+                        evidence: serde_json::json!({
+                            "path":path, "content_hash":hash,
+                            "lines":[symbol.range.start(),symbol.range.end()],
+                            "source_label": {
+                                "version":1, "symbol_id":id, "name":symbol.name,
+                                "qualified_name":symbol.qualified_name,
+                                "kind":symbol.kind.as_str(), "name_line":symbol.name_line,
+                                "bytes":[symbol.byte_range.start,symbol.byte_range.end],
+                            },
+                        }),
+                    },
+                });
+            }
+            let chunks =
+                knowell_parse::chunks(&parsed, text, &knowell_parse::ChunkOptions::default())
+                    .unwrap()
+                    .into_iter()
+                    .map(|chunk| content::Chunk {
+                        organization: OrganizationId(Uuid::from_u128(3)),
+                        chunk: content::NewChunk {
+                            content_hash: hash,
+                            parser_version: parser_version_tag(),
+                            ordinal: u32::try_from(chunk.ordinal).unwrap(),
+                            lines: chunk.range,
+                            start_byte: u64::try_from(chunk.byte_range.start).unwrap(),
+                            end_byte: u64::try_from(chunk.byte_range.end).unwrap(),
+                            kind: chunk.kind.as_str().into(),
+                            symbol_path: chunk.symbol_path,
+                            prepared_input_hash: ContentHash::of(chunk.text.as_bytes()),
+                        },
+                    })
+                    .collect();
+            Self {
+                path,
+                hash,
+                project,
+                pin,
+                parsed,
+                definitions,
+                edges,
+                chunks,
+            }
+        }
+
+        fn entries(
+            &self,
+            edges: &[graph::Edge],
+            definitions: &[symbols::Definition],
+        ) -> Vec<SymbolEntry> {
+            self.entries_at(self.pin, edges, definitions)
+        }
+
+        fn entries_at(
+            &self,
+            pin: GenerationPin,
+            edges: &[graph::Edge],
+            definitions: &[symbols::Definition],
+        ) -> Vec<SymbolEntry> {
+            let labels = metadata_definition_labels(edges, pin, self.project);
+            metadata_symbols_with_labels(
+                &self.path,
+                self.hash,
+                &self.chunks,
+                &BTreeMap::new(),
+                definitions,
+                labels.get(&self.path),
+            )
+            .unwrap()
+        }
+
+        fn label_entries_at(
+            &self,
+            pin: GenerationPin,
+            edges: &[graph::Edge],
+            definitions: &[symbols::Definition],
+        ) -> Vec<SymbolEntry> {
+            let labels = metadata_definition_labels(edges, pin, self.project);
+            // A valid pinned chunk can independently prove a name even when an
+            // edge belongs to another generation. Isolate label admission here.
+            metadata_symbols_with_labels(
+                &self.path,
+                self.hash,
+                &[],
+                &BTreeMap::new(),
+                definitions,
+                labels.get(&self.path),
+            )
+            .unwrap()
+        }
+    }
+
+    #[test]
+    fn pinned_definition_labels_survive_whole_file_and_grouped_chunks() {
+        let grouped = (0..20)
+            .map(|index| format!("pub fn probe_{index}() -> usize {{ {index} }}\n"))
+            .collect::<String>();
+        let fixtures = [
+            PinnedMetadataFixture::new(
+                "src/short.rs",
+                "pub fn to_document(limit: usize) -> usize { limit + 99 }\npub fn other_format_probe() -> usize { 41 }\n",
+            ),
+            PinnedMetadataFixture::new("src/grouped.rs", &grouped),
+        ];
+        assert_eq!(fixtures[0].chunks.first().unwrap().chunk.kind, "file");
+        assert!(
+            fixtures[1]
+                .chunks
+                .iter()
+                .any(|row| row.chunk.kind == "group")
+        );
+        for fixture in fixtures {
+            assert!(
+                fixture
+                    .chunks
+                    .iter()
+                    .all(|row| row.chunk.symbol_path.is_none())
+            );
+            assert!(
+                metadata_symbols(
+                    &fixture.path,
+                    fixture.hash,
+                    &fixture.chunks,
+                    &BTreeMap::new(),
+                    &fixture.definitions
+                )
+                .unwrap()
+                .is_empty()
+            );
+            let entries = fixture.entries(&fixture.edges, &fixture.definitions);
+            assert_eq!(entries.len(), fixture.parsed.symbols.len());
+            for symbol in &fixture.parsed.symbols {
+                let entry = entries
+                    .iter()
+                    .find(|entry| entry.local == symbol.qualified_name)
+                    .unwrap();
+                assert_eq!(entry.name, symbol.name);
+                assert_eq!(entry.kind, symbol.kind);
+                assert_eq!(entry.lines, symbol.range);
+                assert_eq!(entry.name_line, symbol.name_line);
+                assert!(entry.signature.is_empty() && entry.doc.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn pinned_definition_labels_keep_historical_names_and_parser_specific_leaf_names() {
+        for fixture in [
+            PinnedMetadataFixture::new(
+                "src/original.rs",
+                "/// Original documentation\n#[inline]\npub fn original() {}\n",
+            ),
+            PinnedMetadataFixture::new("docs/original.md", "# Root\n## Child\nBody.\n"),
+        ] {
+            let mut renamed = fixture.definitions.clone();
+            for definition in &mut renamed {
+                definition.symbol.qualified_name = "src/moved.rs#current_name".into();
+                // Current APIs preserve kind, but pinned parsed facts must not
+                // depend on a future logical metadata migration preserving it.
+                definition.symbol.kind = "class".into();
+            }
+            let mut historical_edges = fixture.edges.clone();
+            for edge in &mut historical_edges {
+                edge.valid_from = 3;
+                edge.valid_to = Some(8);
+            }
+            let entries = fixture.entries(&historical_edges, &renamed);
+            assert_eq!(entries.len(), fixture.parsed.symbols.len());
+            for symbol in &fixture.parsed.symbols {
+                let entry = entries
+                    .iter()
+                    .find(|entry| entry.local == symbol.qualified_name)
+                    .unwrap();
+                assert_eq!(entry.key, symbol_key(&fixture.path, &symbol.qualified_name));
+                assert_eq!(entry.name, symbol.name);
+                assert_eq!(entry.kind, symbol.kind);
+                assert_eq!(entry.name_line, symbol.name_line);
+            }
+            for generation in [2, 8] {
+                let pin = GenerationPin {
+                    generation,
+                    ..fixture.pin
+                };
+                assert!(
+                    fixture
+                        .label_entries_at(pin, &historical_edges, &renamed)
+                        .is_empty()
+                );
+                assert_eq!(
+                    fixture.entries_at(pin, &historical_edges, &renamed),
+                    metadata_symbols(
+                        &fixture.path,
+                        fixture.hash,
+                        &fixture.chunks,
+                        &BTreeMap::new(),
+                        &renamed
+                    )
+                    .unwrap(),
+                    "inactive edge labels must not alter independent legacy evidence",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pinned_same_line_definition_labels_preserve_distinct_call_targets() {
+        let fixture = PinnedMetadataFixture::new(
+            "src/same_line.rs",
+            "fn alpha() {} fn beta() {}\nfn call_alpha() { alpha(); }\nfn call_beta() { beta(); }\n",
+        );
+        let entries = fixture.entries(&fixture.edges, &fixture.definitions);
+        assert_eq!(entries.len(), 4);
+        let id = |name: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.name == name)
+                .unwrap()
+                .store_id
+                .unwrap()
+        };
+        let alpha = id("alpha");
+        let beta = id("beta");
+        let caller = id("call_beta");
+        assert_ne!(alpha, beta);
+        let mut duplicated = fixture.definitions.clone();
+        duplicated.extend(fixture.definitions.clone());
+        assert_eq!(fixture.entries(&fixture.edges, &duplicated), entries);
+        let snapshot = Snapshot::assemble(SnapshotParts {
+            project: Name::new("fixture").unwrap(),
+            project_id: fixture.project,
+            pin: fixture.pin,
+            files: BTreeMap::from([(
+                fixture.path.clone(),
+                FileInfo {
+                    content_hash: fixture.hash,
+                    language: Some("rust".into()),
+                    size_bytes: 94,
+                    line_count: 3,
+                    has_text: true,
+                },
+            )]),
+            symbols: entries,
+            chunks: BTreeMap::new(),
+            imports: Vec::new(),
+            contracts: Vec::new(),
+            other_edges: vec![OtherEdge {
+                origin: fixture.path.clone(),
+                from: NodeRef::Symbol(caller),
+                to: NodeRef::Symbol(beta),
+                kind: "calls".into(),
+                evidence: EvidenceType::Syntactic,
+                resolution: Resolution::Resolved,
+                lines: Some(lines(3, 3)),
+            }],
+        });
+        let relation = snapshot.uses_of(beta).next().unwrap();
+        assert_eq!(
+            snapshot.place_of(&relation.to).unwrap().2.unwrap().name,
+            "beta"
+        );
+        assert_eq!(snapshot.symbol_by_id(alpha).unwrap().name, "alpha");
+        assert_eq!(snapshot.symbol_by_id(caller).unwrap().name, "call_beta");
+    }
+
+    #[test]
+    fn pinned_definition_labels_reject_malformed_or_conflicting_claims_without_chunk_fallback() {
+        let mut fixture = PinnedMetadataFixture::new("src/labels.rs", "pub fn original() {}\n");
+        fixture.chunks.first_mut().unwrap().chunk.symbol_path = Some("original".into());
+        let original = fixture.edges.first().unwrap().clone();
+        let mut unlabeled = original.clone();
+        unlabeled
+            .edge
+            .evidence
+            .as_object_mut()
+            .unwrap()
+            .remove("source_label");
+        assert_eq!(
+            fixture
+                .entries(&[unlabeled], &fixture.definitions)
+                .first()
+                .unwrap()
+                .name,
+            "original"
+        );
+        let corruptions = [
+            ("", serde_json::Value::Null),
+            ("version", serde_json::json!(2)),
+            ("symbol_id", serde_json::json!("not-an-id")),
+            (
+                "symbol_id",
+                serde_json::json!("00000000-0000-0000-0000-000000000999"),
+            ),
+            ("name", serde_json::json!("")),
+            ("qualified_name", serde_json::json!("\nspoof")),
+            ("kind", serde_json::json!("not-a-kind")),
+            ("name_line", serde_json::json!(0)),
+            ("bytes", serde_json::json!([0, 0])),
+            ("bytes", serde_json::json!([20, 10])),
+            ("bytes", serde_json::json!([-1, 20])),
+            ("bytes", serde_json::json!([0])),
+            ("bytes", serde_json::json!([0, 20, 30])),
+        ];
+        for (field, value) in corruptions {
+            let mut malformed = original.clone();
+            if field.is_empty() {
+                malformed.edge.evidence["source_label"] = value;
+            } else {
+                malformed.edge.evidence["source_label"][field] = value;
+            }
+            assert!(
+                fixture
+                    .entries(&[malformed], &fixture.definitions)
+                    .is_empty(),
+                "accepted invalid {field}"
+            );
+        }
+        let mut conflicting = original.clone();
+        conflicting.edge.evidence["source_label"]["qualified_name"] =
+            serde_json::json!("another_name");
+        for edges in [
+            vec![original.clone(), conflicting.clone()],
+            vec![conflicting, original.clone()],
+        ] {
+            assert!(fixture.entries(&edges, &fixture.definitions).is_empty());
+        }
+        assert_eq!(
+            fixture
+                .entries(&[original.clone(), original], &fixture.definitions)
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn pinned_definition_labels_require_every_source_and_occurrence_binding() {
+        use knowell_store::ViewId;
+        use uuid::Uuid;
+        let fixture = PinnedMetadataFixture::new("src/labels.rs", "pub fn original() {}\n");
+        let original = fixture.edges.first().unwrap();
+        let mut invalid_edges = Vec::new();
+        for (field, value) in [
+            ("path", serde_json::json!("src/another.rs")),
+            (
+                "content_hash",
+                serde_json::json!(ContentHash::of(b"another body")),
+            ),
+            ("lines", serde_json::json!([2, 2])),
+            ("lines", serde_json::json!([1, 1, 1])),
+        ] {
+            let mut edge = original.clone();
+            edge.edge.evidence[field] = value;
+            invalid_edges.push(edge);
+        }
+        let mut edge = original.clone();
+        edge.view = ViewId(Uuid::from_u128(999));
+        invalid_edges.push(edge);
+        let mut edge = original.clone();
+        edge.valid_from = 8;
+        invalid_edges.push(edge);
+        let mut edge = original.clone();
+        edge.valid_to = Some(7);
+        invalid_edges.push(edge);
+        let mut edge = original.clone();
+        edge.edge.origin = "src/another.rs".into();
+        invalid_edges.push(edge);
+        let mut edge = original.clone();
+        edge.edge.from = NodeRef::File {
+            project: ProjectId(Uuid::from_u128(999)),
+            path: fixture.path.clone(),
+        };
+        invalid_edges.push(edge);
+        let mut edge = original.clone();
+        edge.edge.to = NodeRef::Symbol(SymbolId(Uuid::from_u128(999)));
+        invalid_edges.push(edge);
+        let mut edge = original.clone();
+        edge.edge.evidence_type = EvidenceType::SemanticResolved;
+        invalid_edges.push(edge);
+        let mut edge = original.clone();
+        edge.edge.resolution = Resolution::Unresolved;
+        invalid_edges.push(edge);
+        for edge in invalid_edges {
+            let labels = metadata_definition_labels(
+                std::slice::from_ref(&edge),
+                fixture.pin,
+                fixture.project,
+            );
+            assert!(
+                fixture
+                    .label_entries_at(
+                        fixture.pin,
+                        std::slice::from_ref(&edge),
+                        &fixture.definitions
+                    )
+                    .is_empty()
+            );
+            if labels.get(&fixture.path).is_some_and(|bound| {
+                bound
+                    .labeled_ids
+                    .contains(&fixture.definitions.first().unwrap().symbol.id)
+            }) {
+                assert!(
+                    fixture.entries(&[edge], &fixture.definitions).is_empty(),
+                    "invalid present label must suppress its chunk fallback"
+                );
+            } else {
+                assert_eq!(
+                    fixture.entries(&[edge], &fixture.definitions),
+                    metadata_symbols(
+                        &fixture.path,
+                        fixture.hash,
+                        &fixture.chunks,
+                        &BTreeMap::new(),
+                        &fixture.definitions
+                    )
+                    .unwrap(),
+                    "unrelated edge cannot invalidate a separate pinned chunk proof"
+                );
+            }
+        }
+        let original_definition = fixture.definitions.first().unwrap();
+        let mut invalid_definitions = Vec::new();
+        let mut definition = original_definition.clone();
+        definition.symbol.project = ProjectId(Uuid::from_u128(999));
+        invalid_definitions.push(definition);
+        let mut definition = original_definition.clone();
+        definition.symbol.id = SymbolId(Uuid::from_u128(999));
+        invalid_definitions.push(definition);
+        let mut definition = original_definition.clone();
+        definition.path = RepoPath::new("src/another.rs").unwrap();
+        invalid_definitions.push(definition);
+        let mut definition = original_definition.clone();
+        definition.content_hash = ContentHash::of(b"another body");
+        invalid_definitions.push(definition);
+        let mut definition = original_definition.clone();
+        definition.lines = lines(2, 2);
+        invalid_definitions.push(definition);
+        for definition in invalid_definitions {
+            assert!(
+                fixture
+                    .label_entries_at(fixture.pin, &fixture.edges, &[definition])
+                    .is_empty()
+            );
+        }
     }
 
     #[test]
@@ -1823,5 +2568,138 @@ mod tests {
         assert!(Arc::ptr_eq(&current_cell, &cache.metadata_cell(current)));
         assert!(!Arc::ptr_eq(&metadata, &cache.metadata_cell(pin)));
         assert!(!Arc::ptr_eq(&full, &cache.cell(pin)));
+    }
+
+    #[test]
+    fn metadata_cache_scope_is_normalized_isolated_and_capacity_bounded() {
+        use uuid::Uuid;
+        let cache = SnapshotCache::new(3);
+        let pin = GenerationPin {
+            view: knowell_store::ViewId(Uuid::from_u128(2)),
+            generation: 1,
+        };
+        let scope = MetadataScope::new(
+            &["src/b/".into(), "src/a/".into(), "src/a/".into()],
+            Some(vec!["rust".into(), "typescript".into(), "rust".into()]),
+        );
+        let equivalent = MetadataScope::new(
+            &["src/a/".into(), "src/b/".into()],
+            Some(vec!["typescript".into(), "rust".into()]),
+        );
+        let partial = cache.metadata_scoped_cell(pin, scope.clone());
+        assert!(Arc::ptr_eq(
+            &partial,
+            &cache.metadata_scoped_cell(pin, equivalent)
+        ));
+        let global = cache.metadata_cell(pin);
+        assert!(!Arc::ptr_eq(&partial, &global));
+        let none = cache.metadata_scoped_cell(pin, MetadataScope::new(&[], Some(Vec::new())));
+        assert!(!Arc::ptr_eq(&none, &global));
+        assert_eq!(cache.state.lock().unwrap().cells.len(), 3);
+        let full = cache.cell(pin);
+        assert_eq!(cache.state.lock().unwrap().cells.len(), 3);
+        assert!(!Arc::ptr_eq(
+            &partial,
+            &cache.metadata_scoped_cell(pin, scope)
+        ));
+        assert!(!Arc::ptr_eq(&full, &global));
+        let current = GenerationPin {
+            generation: 2,
+            ..pin
+        };
+        let current_scope = MetadataScope::new(&["src/new/".into()], None);
+        let current_cell = cache.metadata_scoped_cell(current, current_scope.clone());
+        cache.retire_older(pin.view, 2);
+        assert!(Arc::ptr_eq(
+            &current_cell,
+            &cache.metadata_scoped_cell(current, current_scope)
+        ));
+        assert!(
+            cache
+                .state
+                .lock()
+                .unwrap()
+                .cells
+                .keys()
+                .all(|(key, _)| key.generation == 2)
+        );
+    }
+
+    #[test]
+    fn snapshot_admits_scip_origins_only_with_exact_pin_path_and_source_hash() {
+        use knowell_store::{EdgeId, ViewId};
+        use uuid::Uuid;
+        let project = ProjectId(Uuid::from_u128(3));
+        let path = RepoPath::new("src/compiler.rs").unwrap();
+        let hash = ContentHash::of(b"synthetic compiler source");
+        let pin = GenerationPin {
+            view: ViewId(Uuid::from_u128(4)),
+            generation: 7,
+        };
+        let files = [(
+            path.clone(),
+            FileInfo {
+                content_hash: hash,
+                language: Some("rust".into()),
+                size_bytes: 25,
+                line_count: 1,
+                has_text: true,
+            },
+        )]
+        .into();
+        let edge = graph::Edge {
+            id: EdgeId(Uuid::from_u128(5)),
+            view: pin.view,
+            valid_from: pin.generation,
+            valid_to: None,
+            edge: graph::NewEdge {
+                from: NodeRef::File {
+                    project,
+                    path: path.clone(),
+                },
+                to: NodeRef::File {
+                    project,
+                    path: path.clone(),
+                },
+                kind: "references".into(),
+                evidence_type: EvidenceType::SemanticResolved,
+                resolution: Resolution::Resolved,
+                origin: format!("scip:{path}"),
+                evidence: serde_json::json!({
+                    "analysis_kind":"scip", "analysis_format":1, "view":pin.view,
+                    "generation":pin.generation, "path":path, "content_hash":hash,
+                    "artifact_hash":hash, "analysis_input_hash":hash, "compiler_identity":hash,
+                    "source_revision":"a".repeat(40), "lines":[1,1],
+                }),
+            },
+        };
+        let mut imports = Vec::new();
+        let mut relations = Vec::new();
+        append_edge(
+            edge.clone(),
+            pin,
+            &files,
+            project,
+            &mut imports,
+            &mut relations,
+        );
+        assert_eq!(relations.len(), 1);
+        assert_eq!(
+            relations[0].origin,
+            RepoPath::new("src/compiler.rs").unwrap()
+        );
+        relations.clear();
+        let mut wrong_hash = edge.clone();
+        wrong_hash.edge.evidence["content_hash"] =
+            serde_json::json!(ContentHash::of(b"other synthetic body"));
+        let mut wrong_path = edge.clone();
+        wrong_path.edge.evidence["path"] = serde_json::json!("src/not-in-catalog.rs");
+        wrong_path.edge.origin = "scip:src/not-in-catalog.rs".into();
+        let mut stale = edge;
+        stale.edge.evidence["generation"] = serde_json::json!(pin.generation - 1);
+        for invalid in [wrong_hash, wrong_path, stale] {
+            append_edge(invalid, pin, &files, project, &mut imports, &mut relations);
+        }
+        assert!(relations.is_empty() && imports.is_empty());
     }
 }
