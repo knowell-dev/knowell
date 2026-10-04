@@ -13,6 +13,7 @@ use rmcp::ServiceExt;
 use rmcp::transport::StreamableHttpServerConfig;
 use rmcp::transport::StreamableHttpService;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::caller::TransportKind;
 use crate::engine::KnowellTools;
@@ -35,9 +36,33 @@ pub async fn serve_stdio<T: KnowellTools>(tools: Arc<T>) -> Result<(), ServeErro
 /// Serves a configured server (e.g. with a custom caller resolver) over
 /// stdin/stdout until the client disconnects.
 pub async fn serve_stdio_with<T: KnowellTools>(server: KnowellServer<T>) -> Result<(), ServeError> {
+    serve_stdio_with_io(server, tokio::io::stdin(), tokio::io::stdout()).await
+}
+
+/// Serves a configured stdio server over newline-delimited JSON-RPC byte streams.
+/// Uses the same protocol negotiation as [`serve_stdio_with`], including a
+/// discovery probe followed by an `initialize` handshake on the same stream.
+/// The reader and writer are owned until the client disconnects.
+pub async fn serve_stdio_with_io<T, R, W>(
+    server: KnowellServer<T>,
+    reader: R,
+    writer: W,
+) -> Result<(), ServeError>
+where
+    T: KnowellTools,
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    let server = server.with_transport(TransportKind::Stdio);
+    let transport = rmcp::transport::async_rw::AsyncRwTransport::new_server(reader, writer);
+    let Some(transport) = crate::stdio::prepare_stdio(&server, transport)
+        .await
+        .map_err(|error| ServeError::Initialize(error.to_string()))?
+    else {
+        return Ok(());
+    };
     let running = server
-        .with_transport(TransportKind::Stdio)
-        .serve(rmcp::transport::stdio())
+        .serve(transport)
         .await
         .map_err(|error| ServeError::Initialize(error.to_string()))?;
     running

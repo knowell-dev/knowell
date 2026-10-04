@@ -294,7 +294,8 @@ error (-32602).
 
 - **stdio** (edge, standalone): `serve_stdio(tools)`, or `serve_stdio_with(server)`
   for a custom caller resolver. stdout carries protocol messages; the binary
-  must log to stderr.
+  must log to stderr. `serve_stdio_with_io(server, reader, writer)` serves the
+  same protocol over owned byte streams for embedding or client checks.
 - **Streamable HTTP** (hub): `streamable_http_router(server, &options)` returns
   an `axum::Router` serving `/mcp` (nest it to mount elsewhere);
   `streamable_http_service` returns the rmcp tower service itself, whose
@@ -316,8 +317,14 @@ error (-32602).
 
 rmcp 3.5 negotiates every MCP revision it knows: 2024-11-05, 2025-03-26,
 2025-06-18 and 2025-11-25 through the `initialize` handshake, and 2026-07-28
-through `server/discover` with per-request metadata. The tests cover
-2025-11-25 (initialize, stdio-style duplex and HTTP) and 2026-07-28 (discover).
+through `server/discover` with per-request metadata. A stdio client can probe
+discovery and then choose an `initialize` handshake on the same pipe, including
+pipelined requests. The probe is answered before rmcp establishes its peer, so
+the chosen legacy session does not inherit an inline metadata requirement.
+Clients that continue with discovery keep full per-request validation; no
+client capabilities are synthesized. HTTP negotiation is unchanged.
+Raw-wire tests cover all four handshake versions, discovery-to-initialize
+fallback, modern metadata errors and recovery, and actual Source tool content.
 Clients on 2024-11-05 ignore annotations, output schemas and structured content
 and read the text rendering.
 

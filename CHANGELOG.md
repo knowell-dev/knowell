@@ -10,6 +10,9 @@ is released. Nothing has been released yet.
 
 ### Fixed
 
+- Allow stdio clients to probe MCP discovery and then initialize a legacy
+  session on the same pipe without retaining the probe's metadata requirement.
+  Modern per-request validation and Streamable HTTP behavior remain unchanged.
 - Return version-pinned source bodies and complementary code, test and document
   regions by default over MCP, with exact displayed ranges and advancing fetch
   continuations instead of duplicate diagnostic JSON.

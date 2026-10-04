@@ -45,6 +45,7 @@ mod resource;
 mod schema;
 mod server;
 mod source_render;
+mod stdio;
 mod text;
 pub mod tools;
 mod transport;
@@ -79,5 +80,5 @@ pub use text::{
 pub use tools::{ToolName, Validate};
 pub use transport::{
     DEFAULT_MAX_REQUEST_BODY_BYTES, HttpServerOptions, MCP_HTTP_PATH, serve_stdio,
-    serve_stdio_with, streamable_http_router, streamable_http_service,
+    serve_stdio_with, serve_stdio_with_io, streamable_http_router, streamable_http_service,
 };
