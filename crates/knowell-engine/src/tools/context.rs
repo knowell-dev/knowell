@@ -587,7 +587,7 @@ impl Engine {
         let mut section = expanded_sections.into_iter();
         run.response
             .expanded
-            .retain(|_| section.next().is_some_and(&wants));
+            .retain(|_| section.next().is_some_and(wants));
         let texts = if strategy == ContextSelectionStrategy::Source {
             self.source_texts_for(&run).await?
         } else {
